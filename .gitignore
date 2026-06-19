@@ -1,0 +1,12 @@
+node_modules
+.vite-cache
+dist
+dist-electron
+release
+.nexo-data
+*.log
+.env
+.env.*
+!.env.example
+coverage
+*.tsbuildinfo

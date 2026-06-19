@@ -1,0 +1,195 @@
+export type RuntimeSurface = "desktop" | "web";
+
+export type ProviderId =
+  | "openai-compatible"
+  | "anthropic-compatible";
+
+export type PlanningMode = "fast" | "balanced" | "deep";
+
+export const MODEL_CAPABILITIES = [
+  "orchestration",
+  "chat",
+  "vision",
+  "image_generation",
+  "image_editing",
+  "speech_to_text",
+  "text_to_speech",
+  "embedding",
+] as const;
+
+export type ModelCapability = typeof MODEL_CAPABILITIES[number];
+
+export type AttachmentType = "image" | "audio" | "file";
+
+export function isModelCapability(value: unknown): value is ModelCapability {
+  return typeof value === "string" && (MODEL_CAPABILITIES as readonly string[]).includes(value);
+}
+
+export type ChannelKey =
+  | "web"
+  | "desktop"
+  | "feishu"
+  | "dingtalk"
+  | "wechat"
+  | "wecom";
+
+export interface AgentSettings {
+  providerId: ProviderId;
+  providerName: string;
+  apiBase: string;
+  apiKey: string;
+  hasApiKey: boolean;
+  model: string;
+  temperature: number;
+  maxContextTurns: number;
+  enableContextCompaction: boolean;
+  contextCompactionThreshold: number;
+  maxSteps: number;
+  /** Default timeout for shell_command when timeoutMs is omitted (ms). */
+  shellCommandTimeoutMs: number;
+  planningMode: PlanningMode;
+  enableMemory: boolean;
+  enableKnowledge: boolean;
+  workspacePath: string;
+  /** Extra directories file_read/file_write may access (absolute paths). */
+  fileAccessRoots?: string[];
+  webHost: string;
+  webPort: number;
+  webPassword: string;
+  channels: Record<ChannelKey, boolean>;
+}
+
+export interface RuntimeInfo {
+  surface: RuntimeSurface;
+  platform: string;
+  version: string;
+  userDataPath?: string;
+  webBaseUrl?: string;
+}
+
+export type ChatRole = "system" | "user" | "assistant";
+
+export interface Attachment {
+  url: string;
+  name: string;
+  type: AttachmentType;
+  mimeType?: string;
+  size?: number;
+  source?: "upload" | "generated";
+}
+
+export interface ChatMessage {
+  id: string;
+  role: ChatRole;
+  content: string;
+  createdAt: string;
+  status?: "sending" | "done" | "error";
+  attachments?: Attachment[];
+}
+
+export interface ToolCapability {
+  key: string;
+  name: string;
+  group: "system" | "research" | "productivity" | "extension";
+  status: "ready" | "needs-config" | "disabled";
+  risk: "low" | "medium" | "high";
+  description: string;
+}
+
+export interface ModelProfile {
+  id: string;
+  name: string;
+  providerId: ProviderId;
+  apiBase: string;
+  apiKey: string;
+  hasApiKey: boolean;
+  model: string;
+  capabilities?: ModelCapability[];
+  isPrimary?: boolean;
+  temperature?: number;
+  description?: string;
+  enabled: boolean;
+}
+
+export interface DiscoveredModel {
+  id: string;
+  label: string;
+  ownedBy?: string;
+  capabilities: ModelCapability[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface SkillDefinition {
+  key: string;
+  name: string;
+  category: string;
+  enabled: boolean;
+  source: "built-in" | "workspace" | "marketplace";
+  description: string;
+  instruction?: string;
+  path?: string;
+  managed?: boolean;
+  marketplaceId?: string;
+  marketplaceName?: string;
+  homepage?: string;
+  author?: string;
+  version?: string;
+  contentSize?: number;
+}
+
+export interface SkillMarketplace {
+  id: string;
+  name: string;
+  description: string;
+  homepage: string;
+  cli?: string;
+  installHint: string;
+  searchEnabled: boolean;
+  installEnabled: boolean;
+  directSpecOnly?: boolean;
+  notes?: string;
+}
+
+export interface SkillMarketplaceSearchResult {
+  id: string;
+  marketplaceId: string;
+  marketplaceName: string;
+  name: string;
+  description: string;
+  installSpec: string;
+  installCommandPreview: string;
+  homepage?: string;
+  author?: string;
+  installs?: string;
+  verified?: boolean;
+}
+
+export interface SkillSearchResponse {
+  query: string;
+  results: SkillMarketplaceSearchResult[] | SkillDefinition[];
+  warnings: string[];
+  marketplaceResults?: SkillMarketplaceSearchResult[];
+}
+
+export interface SkillInstallRequest {
+  marketplaceId: string;
+  installSpec: string;
+  key?: string;
+  name?: string;
+  homepage?: string;
+}
+
+export interface McpServerConfig {
+  name: string;
+  command: string;
+  args: string[];
+}
+
+export interface KnowledgeItem {
+  key: string;
+  title: string;
+  kind: "memory" | "document" | "entity" | "routine";
+  confidence: number;
+  updatedAt: string;
+  summary: string;
+}

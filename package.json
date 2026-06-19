@@ -1,0 +1,84 @@
+{
+  "name": "nexo-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Nexo Agent desktop and web console built with Electron, React, TypeScript, and Ant Design.",
+  "main": "dist-electron/electron/bootstrap.js",
+  "scripts": {
+    "dev:web": "vite --host 0.0.0.0",
+    "dev:electron": "concurrently -k \"npm:dev:web\" \"npm:dev:electron:watch\" \"npm:dev:electron:start\"",
+    "dev:electron:watch": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:electron:start": "wait-on tcp:8106 file:dist-electron/electron/bootstrap.js file:dist-electron/electron/main.js file:dist-electron/electron/preload.js && cross-env VITE_DEV_SERVER_URL=http://localhost:8106 electron .",
+    "build:web": "tsc -p tsconfig.json --noEmit && vite build",
+    "build:electron": "node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json",
+    "build": "npm run build:web && npm run build:electron",
+    "serve:web-console": "node dist-electron/electron/standalone.js",
+    "preview": "vite preview --host 0.0.0.0",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "verify:multimodal-models": "npm run build:electron && node scripts/verify-multimodal-models.mjs",
+    "package": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@ant-design/icons": "^5.6.1",
+    "@langchain/community": "^1.1.29",
+    "@langchain/core": "^0.3.26",
+    "@langchain/openai": "^0.3.16",
+    "@types/sql.js": "^1.4.11",
+    "antd": "^5.22.5",
+    "busboy": "^1.6.0",
+    "chromadb": "^3.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "langchain": "^0.3.10",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^9.0.1",
+    "react-router-dom": "^6.28.0",
+    "rehype-highlight": "^7.0.1",
+    "remark-gfm": "^4.0.0",
+    "sql.js": "^1.14.1",
+    "uuid": "^11.0.3",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/busboy": "^1.5.4",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "com.company.nexoagent",
+    "productName": "Nexo Agent",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "nexo/**/*",
+      "node_modules/sql.js/dist/sql-wasm.wasm",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

@@ -1,0 +1,193 @@
+import React, { useMemo } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import { Avatar, Tag } from "antd";
+import { RobotOutlined, UserOutlined, FileOutlined, SoundOutlined } from "@ant-design/icons";
+import type { ChatMessage } from "../../shared/types";
+import { ToolCallItem } from "./ToolCallSteps";
+import type { ToolCallEvent } from "./ToolCallSteps";
+import type { MessageBlock } from "../../store/chat";
+import { getApiBase } from "../../services/api";
+import { useTheme, type ThemeColors } from "../../theme";
+import "highlight.js/styles/github-dark.css";
+
+interface Props {
+  message: ChatMessage;
+  streaming?: boolean;
+  toolCalls?: ToolCallEvent[];
+  blocks?: MessageBlock[];
+  attachments?: ChatMessage["attachments"];
+}
+
+function buildMarkdownComponents(colors: ThemeColors) {
+  return {
+    pre: ({ children }: { children?: React.ReactNode }) => (
+      <pre style={{ margin: "8px 0", borderRadius: 8, overflow: "auto", background: colors.codeBg, padding: "12px" }}>
+        {children}
+      </pre>
+    ),
+    code: ({ children, className }: { children?: React.ReactNode; className?: string }) =>
+      className ? (
+        <code className={className}>{children}</code>
+      ) : (
+        <code style={{ background: colors.codeBg, padding: "1px 5px", borderRadius: 4, fontSize: "0.9em" }}>
+          {children}
+        </code>
+      ),
+    p: ({ children }: { children?: React.ReactNode }) => <p style={{ margin: "4px 0" }}>{children}</p>,
+  };
+}
+
+const MarkdownText: React.FC<{ content: string; streaming?: boolean; colors: ThemeColors }> = ({ content, streaming, colors }) => {
+  const components = useMemo(() => buildMarkdownComponents(colors), [colors]);
+  return streaming ? (
+    <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.7 }}>
+      {content}<span style={{ color: "#38bdf8", animation: "blink 1s step-end infinite" }}>▍</span>
+    </span>
+  ) : (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={components}>
+      {content}
+    </ReactMarkdown>
+  );
+};
+
+function extractUploadArtifacts(content: string) {
+  const matches = [...content.matchAll(/(?:^|\s)(\/uploads\/[^\s)]+?\.(?:png|jpe?g|webp|gif|mp3|wav|m4a|ogg|webm))/gi)];
+  const seen = new Set<string>();
+  return matches
+    .map((match) => match[1])
+    .filter((url) => {
+      if (seen.has(url)) return false;
+      seen.add(url);
+      return true;
+    })
+    .map((url) => {
+      const lower = url.toLowerCase();
+      const type = /\.(png|jpe?g|webp|gif)$/i.test(lower) ? "image" : "audio";
+      return { url, type, name: url.split("/").pop() || url };
+    });
+}
+
+export const MessageBubble: React.FC<Props> = ({ message, streaming, toolCalls, blocks }) => {
+  const { colors } = useTheme();
+  const isUser = message.role === "user";
+  const toolMap = new Map((toolCalls ?? []).map((tc) => [tc.id, tc]));
+  const hasBlocks = !isUser && blocks && blocks.length > 0;
+  const apiBase = getApiBase();
+  const generatedArtifacts = !isUser ? extractUploadArtifacts(message.content) : [];
+
+  return (
+    <div style={{
+      display: "flex", gap: 10,
+      flexDirection: isUser ? "row-reverse" : "row",
+      marginBottom: 16, alignItems: "flex-start",
+    }}>
+      <Avatar
+        icon={isUser ? <UserOutlined /> : <RobotOutlined />}
+        style={{ background: isUser ? colors.bubbleUser : colors.assistantAvatar, flexShrink: 0, marginTop: 2 }}
+        size={32}
+      />
+      <div style={{ maxWidth: "80%", minWidth: 0 }}>
+        {message.attachments && message.attachments.map((att, i) =>
+          att.type === "image" ? (
+            <img
+              key={i}
+              src={apiBase + att.url}
+              style={{ maxWidth: 200, borderRadius: 8, marginBottom: 6, display: "block", cursor: "pointer" }}
+              onClick={() => window.open(apiBase + att.url)}
+            />
+          ) : att.type === "audio" ? (
+            <div key={i} style={{
+              background: colors.bgTertiary, border: `1px solid ${colors.borderStrong}`,
+              padding: 8, borderRadius: 8, marginBottom: 6,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, color: colors.textMuted }}>
+                <SoundOutlined />
+                <a href={apiBase + att.url} target="_blank" rel="noreferrer" style={{ color: colors.textMuted }}>
+                  {att.name}
+                </a>
+              </div>
+              <audio controls src={apiBase + att.url} style={{ width: "100%" }} />
+            </div>
+          ) : (
+            <div key={i} style={{
+              background: colors.bgTertiary, border: `1px solid ${colors.borderStrong}`,
+              padding: 8, borderRadius: 8, marginBottom: 6,
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <FileOutlined style={{ color: colors.textMuted }} />
+              <a href={apiBase + att.url} target="_blank" rel="noreferrer" style={{ color: colors.textMuted }}>
+                {att.name}
+              </a>
+            </div>
+          )
+        )}
+        <div style={{
+          background: isUser ? colors.bubbleUser : colors.bubbleAssistant,
+          color: isUser ? "#ffffff" : colors.textPrimary,
+          border: isUser ? "none" : `1px solid ${colors.border}`,
+          borderRadius: isUser ? "16px 4px 16px 16px" : "4px 16px 16px 16px",
+          padding: "10px 14px",
+          wordBreak: "break-word",
+        }}>
+          {isUser ? (
+            <span style={{ whiteSpace: "pre-wrap" }}>{message.content}</span>
+          ) : hasBlocks ? (
+            <>
+              {blocks.map((block, i) => {
+                const isLast = i === blocks.length - 1;
+                if (block.type === "text") {
+                  return (
+                    <MarkdownText
+                      key={`text-${i}`}
+                      content={block.content}
+                      streaming={streaming && isLast && block.type === "text"}
+                      colors={colors}
+                    />
+                  );
+                }
+                const call = toolMap.get(block.id);
+                return call ? <ToolCallItem key={block.id} call={call} /> : null;
+              })}
+              {streaming && blocks.length > 0 && blocks[blocks.length - 1].type === "tool" && (
+                <span style={{ color: "#38bdf8", animation: "blink 1s step-end infinite" }}>▍</span>
+              )}
+            </>
+          ) : (
+            <MarkdownText content={message.content} streaming={streaming} colors={colors} />
+          )}
+        </div>
+        {generatedArtifacts.length > 0 && (
+          <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+            {generatedArtifacts.map((artifact) => artifact.type === "image" ? (
+              <img
+                key={artifact.url}
+                src={apiBase + artifact.url}
+                alt={artifact.name}
+                style={{ maxWidth: 280, borderRadius: 8, border: `1px solid ${colors.border}`, cursor: "pointer" }}
+                onClick={() => window.open(apiBase + artifact.url)}
+              />
+            ) : (
+              <div
+                key={artifact.url}
+                style={{ background: colors.bgTertiary, border: `1px solid ${colors.borderStrong}`, padding: 8, borderRadius: 8 }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                  <SoundOutlined style={{ color: colors.textMuted }} />
+                  <a href={apiBase + artifact.url} target="_blank" rel="noreferrer" style={{ color: colors.textMuted }}>
+                    {artifact.name}
+                  </a>
+                </div>
+                <audio controls src={apiBase + artifact.url} style={{ width: "100%" }} />
+              </div>
+            ))}
+          </div>
+        )}
+        {message.status === "error" && (
+          <Tag color="error" style={{ marginTop: 4 }}>请求失败</Tag>
+        )}
+      </div>
+    </div>
+  );
+};
