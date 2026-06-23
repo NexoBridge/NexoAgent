@@ -10,7 +10,7 @@
       "name": "shell_command",
       "label": "Shell Command",
       "group": "system",
-      "description": "Run a shell command inside the configured workspace. Use this for filesystem inspection, CLI workflows, and scripted operations.",
+      "description": "Run a shell command inside the configured workspace. Use this for filesystem inspection, CLI workflows, and scripted operations. Do not run broad recursive scans from drive or system roots unless the user explicitly asks and the path and depth are narrowed.",
       "parameters": {
         "type": "object",
         "properties": {

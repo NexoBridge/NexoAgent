@@ -60,9 +60,10 @@ function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): T
         description: [
           tool.description,
           `Default cwd when omitted: ${getWorkspaceRoot(settings)}.`,
-          "cwd may be any absolute path on the local machine.",
           `Configured default timeout: ${timeoutSec}s (${settings.shellCommandTimeoutMs ?? 300_000}ms).`,
           "Omit timeoutMs to use that default.",
+          "Never run broad recursive scans from drive or system roots (for example Get-ChildItem C:\\\\ -Recurse, find /, or du -sh /) unless the user explicitly asks and you can narrow the path and depth.",
+          "Prefer targeted directory listings in the relevant project path with a small depth limit instead of full-disk enumeration.",
           "Never run vite/webpack/npm run dev via shell_command. Use build or ask the user to start the dev server.",
         ].join(" "),
       };
@@ -398,7 +399,8 @@ export async function streamFromLLM(
     "Use tools when they are helpful.",
     "Never write DSML/XML-like tool call tags in the user-visible response. Use the provided tool-calling interface only.",
     "Use shell_command for terminal tasks, filesystem inspection, and command-line workflows.",
-    "For shell_command, cwd may be any absolute path on the local machine. Omit cwd to use the default workspace root.",
+    "Never run broad recursive filesystem scans from drive or system roots (for example Get-ChildItem C:\\\\ -Recurse, find /, du -sh /, or tree from C:\\\\ or /) unless the user explicitly requests it and you can narrow the target path and depth.",
+    "Prefer targeted listings in the relevant project or workspace directory with a small depth limit instead of full-disk enumeration.",
     "For shell_command: omit timeoutMs to use the configured default script timeout (Settings). Do not pass timeoutMs: 6000 or other short values for npm install, build, or dev commands.",
     "Never use shell_command to start vite, webpack, or npm run dev because those processes do not exit and will block until timeout.",
     `Primary model: ${primaryConfig.name} / ${primaryConfig.model}.`,
