@@ -3,11 +3,15 @@ import { Badge, Divider, Layout, Tooltip } from "antd";
 import {
   ApiOutlined,
   BookOutlined,
+  BorderOutlined,
+  CloseOutlined,
   ClockCircleOutlined,
+  CopyOutlined,
   DatabaseOutlined,
   FileTextOutlined,
   GlobalOutlined,
   MessageOutlined,
+  MinusOutlined,
   MoonOutlined,
   SettingOutlined,
   SunOutlined,
@@ -31,6 +35,7 @@ import { getApiBase, isElectron } from "../../services/api";
 
 const { Content, Sider } = Layout;
 const brandIconUrl = new URL("../../../assets/nexoagent-icon.svg", import.meta.url).href;
+const DESKTOP_DRAG_BAR_HEIGHT = 44;
 const COLLAPSED_SESSION_SIDER_WIDTH = 60;
 const MIN_SESSION_SIDER_WIDTH = 220;
 const DEFAULT_SESSION_SIDER_WIDTH = 280;
@@ -51,13 +56,37 @@ export const AppLayout: React.FC = () => {
     return Number.isFinite(saved) ? Math.min(MAX_SESSION_SIDER_WIDTH, Math.max(MIN_SESSION_SIDER_WIDTH, saved)) : DEFAULT_EXPANDED_SESSION_SIDER_WIDTH;
   });
   const [resizingSessionSider, setResizingSessionSider] = useState(false);
+  const [windowMaximized, setWindowMaximized] = useState(false);
+  const [hoveredWindowControl, setHoveredWindowControl] = useState<"minimize" | "maximize" | "close" | null>(null);
+  const isWindowsDesktop = isElectron() && navigator.userAgent.includes("Windows");
   const { ensureRuntimeReady, loadSessions, newSession, loadSettings } = useChatStore();
   const { mode, colors, toggleTheme } = useTheme();
   const { lang, setLang, t } = useI18n();
   const resizeOriginRef = useRef<{ startX: number; startWidth: number } | null>(null);
-  const desktopApi = typeof window !== "undefined" && "nexoDesktop" in window
-    ? (window as typeof window & { nexoDesktop?: { openExternal?: (url: string) => Promise<void> } }).nexoDesktop
-    : undefined;
+  const desktopApi = window.nexoDesktop;
+
+  useEffect(() => {
+    if (!isWindowsDesktop || !desktopApi?.isWindowMaximized) return;
+    let disposed = false;
+    const unsubscribe = desktopApi.onWindowMaximizedChange?.((value) => {
+      if (!disposed) {
+        setWindowMaximized(value);
+      }
+    });
+
+    void desktopApi.isWindowMaximized().then((value) => {
+      if (!disposed) {
+        setWindowMaximized(value);
+      }
+    }).catch((error) => {
+      console.warn("[window] failed to read maximize state:", error);
+    });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, [desktopApi, isWindowsDesktop]);
 
   useEffect(() => {
     let disposed = false;
@@ -185,15 +214,134 @@ export const AppLayout: React.FC = () => {
     window.open(targetUrl, "_blank", "noopener,noreferrer");
   };
 
+  const titlebarButtonBaseStyle = (
+    control: "minimize" | "maximize" | "close",
+  ): React.CSSProperties & { WebkitAppRegion?: "no-drag" } => ({
+    width: 46,
+    height: DESKTOP_DRAG_BAR_HEIGHT,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: control === "close" && hoveredWindowControl === "close" ? "#ffffff" : colors.textSecondary,
+    background:
+      control === "close" && hoveredWindowControl === "close"
+        ? "#dc2626"
+        : hoveredWindowControl === control
+          ? colors.hoverBg
+          : "transparent",
+    cursor: "pointer",
+    WebkitAppRegion: "no-drag",
+    transition: "background 0.15s ease, color 0.15s ease",
+  });
+
+  const desktopDragBarStyle: React.CSSProperties & { WebkitAppRegion?: "drag" } = {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    height: DESKTOP_DRAG_BAR_HEIGHT,
+    background: colors.bgSecondary,
+    borderBottom: `1px solid ${colors.border}`,
+    WebkitAppRegion: "drag",
+    zIndex: 20,
+    display: "flex",
+    alignItems: "stretch",
+    justifyContent: "space-between",
+  };
+
+  const windowControlGroupStyle: React.CSSProperties & { WebkitAppRegion?: "no-drag" } = {
+    display: "flex",
+    alignItems: "stretch",
+    marginLeft: "auto",
+    WebkitAppRegion: "no-drag",
+  };
+
+  const handleMinimize = async () => {
+    await desktopApi?.minimizeWindow?.();
+  };
+
+  const handleToggleMaximize = async () => {
+    if (!desktopApi) return;
+    if (windowMaximized) {
+      await desktopApi.unmaximizeWindow?.();
+      setWindowMaximized(false);
+      return;
+    }
+    await desktopApi.maximizeWindow?.();
+    setWindowMaximized(true);
+  };
+
+  const handleCloseWindow = async () => {
+    await desktopApi?.closeWindow?.();
+  };
+
   return (
-    <Layout style={{ height: "100vh", background: colors.bgPrimary }}>
+    <Layout style={{ height: "100vh", background: colors.bgPrimary, paddingTop: isWindowsDesktop ? DESKTOP_DRAG_BAR_HEIGHT : 0, position: "relative" }}>
+      {isWindowsDesktop && (
+        <div style={desktopDragBarStyle}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              paddingLeft: 12,
+              minWidth: 0,
+            }}
+          >
+            <img
+              src={brandIconUrl}
+              alt="NexoAgent"
+              style={{ width: 16, height: 16, display: "block", borderRadius: 4, flexShrink: 0 }}
+            />
+            <span
+              style={{
+                color: colors.textPrimary,
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              Nexo Agent
+            </span>
+          </div>
+
+          <div style={windowControlGroupStyle}>
+            <div
+              onClick={() => void handleMinimize()}
+              onMouseEnter={() => setHoveredWindowControl("minimize")}
+              onMouseLeave={() => setHoveredWindowControl(null)}
+              style={titlebarButtonBaseStyle("minimize")}
+            >
+              <MinusOutlined />
+            </div>
+            <div
+              onClick={() => void handleToggleMaximize()}
+              onMouseEnter={() => setHoveredWindowControl("maximize")}
+              onMouseLeave={() => setHoveredWindowControl(null)}
+              style={titlebarButtonBaseStyle("maximize")}
+            >
+              {windowMaximized ? <CopyOutlined /> : <BorderOutlined />}
+            </div>
+            <div
+              onClick={() => void handleCloseWindow()}
+              onMouseEnter={() => setHoveredWindowControl("close")}
+              onMouseLeave={() => setHoveredWindowControl(null)}
+              style={titlebarButtonBaseStyle("close")}
+            >
+              <CloseOutlined />
+            </div>
+          </div>
+        </div>
+      )}
       <Sider width={52} style={{ background: colors.bgSecondary, borderRight: `1px solid ${colors.border}` }}>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "12px 0", gap: 4, height: "100%" }}>
-          <img
+          {/* <img
             src={brandIconUrl}
             alt="NexoAgent"
             style={{ width: 22, height: 22, marginBottom: 16, display: "block", borderRadius: 6 }}
-          />
+          /> */}
 
           {navItem("chat", <MessageOutlined />, t("chat"))}
 

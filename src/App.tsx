@@ -14,6 +14,12 @@ function AppShell() {
     applyThemeCssVars(colors);
   }, [colors]);
 
+  useEffect(() => {
+    void window.nexoDesktop?.setThemeMode?.(mode).catch((error) => {
+      console.warn("[theme] failed to sync desktop theme:", error);
+    });
+  }, [mode]);
+
   return (
     <ConfigProvider
       locale={lang === "zh" ? zhCN : enUS}

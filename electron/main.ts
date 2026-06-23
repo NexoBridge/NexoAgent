@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, shell, safeStorage } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, shell, safeStorage } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 import http from "node:http";
@@ -18,6 +18,7 @@ import type {
   RuntimeInfo
 } from "../src/shared/types";
 import { isPreservedApiKeyInput } from "../src/shared/settings";
+import type { DesktopThemeMode } from "../src/shared/desktop";
 
 interface StoredSettings extends Omit<AgentSettings, "apiKey" | "hasApiKey"> {
   encryptedApiKey?: string;
@@ -76,7 +77,10 @@ let httpServer: http.Server | null = null;
 let webServerPort = 9898;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const TOGGLE_DEVTOOLS_SHORTCUT = process.platform === "darwin" ? "Command+Alt+L" : "Control+Alt+L";
-
+const DESKTOP_THEME_BACKGROUNDS: Record<DesktopThemeMode, string> = {
+  dark: "#0e1726",
+  light: "#f8fafc",
+};
 if (!gotSingleInstanceLock) {
   app.quit();
 }
@@ -151,6 +155,23 @@ function pushSettingsToBackend(settings: AgentSettings, apiKey = "") {
 
 function getDesktopAppUrl() {
   return `http://localhost:${webServerPort}`;
+}
+
+function getWindowThemeMode(themeMode?: DesktopThemeMode): DesktopThemeMode {
+  if (themeMode) {
+    return themeMode;
+  }
+  return nativeTheme.shouldUseDarkColors ? "dark" : "light";
+}
+
+function applyDesktopTheme(themeMode: DesktopThemeMode) {
+  nativeTheme.themeSource = themeMode;
+
+  if (!mainWindow) {
+    return;
+  }
+
+  mainWindow.setBackgroundColor(DESKTOP_THEME_BACKGROUNDS[themeMode]);
 }
 
 async function startHttpServer() {
@@ -297,9 +318,11 @@ function createWindow() {
     minHeight: 720,
     icon: windowIconPath(),
     title: "Nexo Agent",
-    backgroundColor: "#0e1726",
+    backgroundColor: DESKTOP_THEME_BACKGROUNDS[getWindowThemeMode()],
     show: false,
     autoHideMenuBar: true,
+    frame: process.platform === "win32" ? false : true,
+    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -310,6 +333,14 @@ function createWindow() {
 
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
+  });
+
+  mainWindow.on("maximize", () => {
+    mainWindow?.webContents.send("window:maximized-changed", true);
+  });
+
+  mainWindow.on("unmaximize", () => {
+    mainWindow?.webContents.send("window:maximized-changed", false);
   });
 
   if (process.platform !== "darwin") {
@@ -353,6 +384,8 @@ function createWindow() {
   } else {
     void mainWindow.loadURL(getDesktopAppUrl());
   }
+
+  applyDesktopTheme(getWindowThemeMode());
 }
 
 function focusMainWindow() {
@@ -412,6 +445,29 @@ ipcMain.handle("settings:save", async (_event, settings: AgentSettings) => {
   await refreshCachedApiKey();
   pushSettingsToBackend(result, cachedApiKey);
   return result;
+});
+ipcMain.handle("theme:set", async (_event, mode: DesktopThemeMode) => {
+  applyDesktopTheme(mode);
+});
+ipcMain.handle("window:minimize", async () => {
+  mainWindow?.minimize();
+});
+ipcMain.handle("window:maximize", async () => {
+  if (!mainWindow) return;
+  if (!mainWindow.isMaximized()) {
+    mainWindow.maximize();
+  }
+});
+ipcMain.handle("window:unmaximize", async () => {
+  if (mainWindow?.isMaximized()) {
+    mainWindow.unmaximize();
+  }
+});
+ipcMain.handle("window:close", async () => {
+  mainWindow?.close();
+});
+ipcMain.handle("window:isMaximized", async () => {
+  return mainWindow?.isMaximized() ?? false;
 });
 ipcMain.handle("shell:openExternal", async (_event, url: string) => {
   if (typeof url !== "string" || !url.trim()) return;

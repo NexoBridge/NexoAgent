@@ -4,6 +4,7 @@ import { message as antdMessage } from "antd";
 import type { AgentSettings, Attachment as ChatAttachment, ChatMessage } from "../shared/types";
 import { apiDelete, apiGet, apiPatch, apiPost, getRuntimeApiBase, setRuntimeApiBase, subscribeStream } from "../services/api";
 import { sanitizeApiKeyForSave } from "../shared/settings";
+import type { DesktopApi } from "../shared/desktop";
 import {
   getDefaultServiceProviderName,
   getProviderDefaultApiBase,
@@ -112,19 +113,8 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
   };
 }
 
-type DesktopApi = {
-  nexoDesktop: {
-    getRuntimeInfo: () => Promise<{ webBaseUrl?: string }>;
-    loadSettings: () => Promise<AgentSettings>;
-    saveSettings: (settings: AgentSettings) => Promise<AgentSettings>;
-    openExternal: (url: string) => Promise<void>;
-  };
-};
-
-function getDesktopApi(): DesktopApi["nexoDesktop"] | null {
-  return "nexoDesktop" in window
-    ? (window as unknown as DesktopApi).nexoDesktop
-    : null;
+function getDesktopApi(): DesktopApi | null {
+  return window.nexoDesktop ?? null;
 }
 
 function formatAssistantError(message: string) {
