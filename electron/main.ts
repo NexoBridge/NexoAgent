@@ -10,6 +10,7 @@ import { cleanupOldSnapshots } from "./server/snapshot";
 import {
   getDefaultServiceProviderName,
   getProviderDefaultApiBase,
+  normalizeProviderApiBase,
   normalizeProviderId,
   normalizeServiceProviderName,
 } from "../src/shared/providers";
@@ -89,7 +90,11 @@ let cachedApiKey = "";
 
 function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): T {
   const providerId = normalizeProviderId(settings.providerId);
-  const apiBase = (settings.apiBase?.trim() || getProviderDefaultApiBase(providerId)).replace(/\/+$/, "");
+  const apiBase = normalizeProviderApiBase(
+    settings.apiBase?.trim() || getProviderDefaultApiBase(providerId),
+    providerId,
+    settings.providerName,
+  );
   return {
     ...settings,
     providerId,

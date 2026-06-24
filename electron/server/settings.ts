@@ -1,6 +1,7 @@
 import type { AgentSettings } from "../../src/shared/types";
 import { isPreservedApiKeyInput } from "../../src/shared/settings";
 import {
+  normalizeProviderApiBase,
   getDefaultServiceProviderName,
   getProviderDefaultApiBase,
   normalizeProviderId,
@@ -11,7 +12,11 @@ let webSettings: Partial<AgentSettings> = {};
 
 function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): T {
   const providerId = normalizeProviderId(settings.providerId);
-  const apiBase = (settings.apiBase?.trim() || getProviderDefaultApiBase(providerId)).replace(/\/+$/, "");
+  const apiBase = normalizeProviderApiBase(
+    settings.apiBase?.trim() || getProviderDefaultApiBase(providerId),
+    providerId,
+    settings.providerName,
+  );
   return {
     ...settings,
     providerId,

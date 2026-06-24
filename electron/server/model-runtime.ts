@@ -1,6 +1,12 @@
 import type { AgentSettings, ChatMessage, ModelCapability, ProviderId, ThinkingEffort } from "../../src/shared/types";
 import { isModelCapability } from "../../src/shared/types";
 import {
+  buildOpenAICompatibleAuthHeaders,
+  normalizeProviderApiBase,
+  providerConnectionAllowsEmptyApiKey,
+  resolveProviderSdkApiKey,
+} from "../../src/shared/providers";
+import {
   ensureCapabilityModelProfile,
   findStoredModelProfile,
   findStoredModelProfileByCapability,
@@ -132,7 +138,7 @@ function toRuntimeConfig(
   return {
     name,
     providerId,
-    apiBase: apiBase.replace(/\/+$/, ""),
+    apiBase: normalizeProviderApiBase(apiBase, providerId),
     apiKey: apiKey.trim(),
     model: model.trim(),
     temperature,
@@ -146,6 +152,28 @@ function toRuntimeConfig(
     contextWindowSourceDetail: contextBudget.contextWindowSourceDetail,
     contextWindowResolvedAt: contextBudget.contextWindowResolvedAt,
   };
+}
+
+function buildOpenAIRequestHeaders(
+  config: Pick<ModelRuntimeConfig, "providerId" | "apiBase" | "apiKey">,
+  contentType = "application/json",
+) {
+  return {
+    ...(contentType ? { "Content-Type": contentType } : {}),
+    ...buildOpenAICompatibleAuthHeaders(config.apiKey, {
+      providerId: config.providerId,
+      apiBase: config.apiBase,
+    }),
+  };
+}
+
+export function modelConfigAllowsEmptyApiKey(
+  config: Pick<ModelRuntimeConfig, "providerId" | "apiBase">,
+) {
+  return providerConnectionAllowsEmptyApiKey({
+    providerId: config.providerId,
+    apiBase: config.apiBase,
+  });
 }
 
 export async function resolvePrimaryModelConfig(settings: AgentSettings, storedApiKey = ""): Promise<ModelRuntimeConfig> {
@@ -391,10 +419,7 @@ export async function callChatCompletion(
 
   const response = await fetch(`${config.apiBase}/chat/completions`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
-    },
+    headers: buildOpenAIRequestHeaders(config),
     body: JSON.stringify({
       model: config.model,
       temperature: options.temperature ?? config.temperature,
@@ -455,10 +480,7 @@ export async function callImageGeneration(
 
   const response = await fetch(`${config.apiBase}/images/generations`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
-    },
+    headers: buildOpenAIRequestHeaders(config),
     body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({})) as OpenAIImageResponse;
@@ -503,9 +525,7 @@ export async function callImageEdit(
 
   const response = await fetch(`${config.apiBase}/images/edits`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-    },
+    headers: buildOpenAIRequestHeaders(config, ""),
     body: form,
   });
   const data = await response.json().catch(() => ({})) as OpenAIImageResponse;
@@ -538,9 +558,7 @@ export async function callSpeechToText(
 
   const response = await fetch(`${config.apiBase}/audio/transcriptions`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-    },
+    headers: buildOpenAIRequestHeaders(config, ""),
     body: form,
   });
   const text = await response.text();
@@ -565,10 +583,7 @@ export async function callTextToSpeech(
 
   const response = await fetch(`${config.apiBase}/audio/speech`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
-    },
+    headers: buildOpenAIRequestHeaders(config),
     body: JSON.stringify({
       model: args.modelOverride || config.model,
       input: args.input,

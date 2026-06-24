@@ -20,8 +20,12 @@ globalThis.fetch = async (input, init = {}) => {
     : new Headers(init.headers || {});
   const auth = headers.get("authorization") || "";
 
-  if (url === "https://provider.test/v1/models" || url === "https://api.openai.com/v1/models") {
-    if (auth !== "Bearer good-key") {
+  if (
+    url === "https://provider.test/v1/models"
+    || url === "https://api.openai.com/v1/models"
+    || url === "http://127.0.0.1:11434/v1/models"
+  ) {
+    if (url !== "http://127.0.0.1:11434/v1/models" && auth !== "Bearer good-key") {
       return Response.json({ error: { message: "bad key" } }, { status: 401 });
     }
     return Response.json({
@@ -81,6 +85,8 @@ assert.equal(discovered.some((model) => model.id === "text-embedding-3-small" &&
 await assert.rejects(() => modelProfiles.discoverModels("https://provider.test/v1", "bad-key"), /bad key/);
 const discoveredWithDefaultBase = await modelProfiles.discoverModels("", "good-key", "openai-compatible");
 assert.equal(discoveredWithDefaultBase.length, 5);
+const localDiscovered = await modelProfiles.discoverModels("http://127.0.0.1:11434", "", "openai-compatible");
+assert.equal(localDiscovered.length, 5);
 
 const primaryA = await modelProfiles.saveModelProfile({
   name: "Primary A",
@@ -139,6 +145,18 @@ const settings = {
   channels: { web: true, desktop: true, feishu: false, dingtalk: false, wechat: false, wecom: false },
 };
 const ctx = { settings, apiKey: "good-key", apiBase: "https://provider.test/v1" };
+const localCtx = {
+  settings: {
+    ...settings,
+    providerName: "Ollama",
+    apiBase: "http://127.0.0.1:11434",
+    apiKey: "",
+    hasApiKey: false,
+    model: "gpt-4o",
+  },
+  apiKey: "",
+  apiBase: "http://127.0.0.1:11434",
+};
 
 await assert.rejects(() => multimodal.generateImage({ prompt: "test" }, ctx), /image_generation/);
 
@@ -210,6 +228,8 @@ const audioDataUrl = `data:audio/mpeg;base64,${sampleAudio}`;
 
 const visionOutput = await modelCall.invokeModel({ capability: "vision", prompt: "what is this?", images: [imageDataUrl] }, ctx);
 assert.match(visionOutput, /vision analysis ok/);
+const localChatOutput = await modelCall.invokeModel({ prompt: "hello from local" }, localCtx);
+assert.match(localChatOutput, /vision analysis ok/);
 
 const generatedImage = await modelCall.invokeModel({ capability: "image_generation", prompt: "draw a square" }, ctx);
 assert.match(generatedImage, /\/uploads\/generated\/image-/);

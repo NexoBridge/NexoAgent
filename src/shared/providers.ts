@@ -12,6 +12,7 @@ export interface ServiceProviderPreset {
 
 const DEFAULT_PROVIDER_ID: ProviderId = "openai-compatible";
 const CUSTOM_SERVICE_PROVIDER_LABEL = "Custom";
+const OLLAMA_SERVICE_PROVIDER_LABEL = "Ollama";
 
 const PROVIDER_PROTOCOLS: Record<ProviderId, { en: string; zh: string; apiBase: string }> = {
   "openai-compatible": {
@@ -116,6 +117,13 @@ export const SERVICE_PROVIDER_PRESETS: ServiceProviderPreset[] = [
     hostnames: ["openrouter.ai"],
   },
   {
+    label: OLLAMA_SERVICE_PROVIDER_LABEL,
+    providerId: "openai-compatible",
+    apiBase: "http://127.0.0.1:11434/v1",
+    aliases: ["ollama"],
+    hostnames: ["localhost"],
+  },
+  {
     label: "SiliconFlow",
     providerId: "openai-compatible",
     apiBase: "https://api.siliconflow.cn/v1",
@@ -169,12 +177,50 @@ function normalizeText(value: unknown) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
-function tryParseHostname(apiBase: string) {
+function isPrivateIpv4Hostname(hostname: string) {
+  return /^10\./.test(hostname)
+    || /^127\./.test(hostname)
+    || /^192\.168\./.test(hostname)
+    || /^169\.254\./.test(hostname)
+    || /^172\.(1[6-9]|2\d|3[0-1])\./.test(hostname);
+}
+
+function isLocalHostname(hostname: string) {
+  return hostname === "localhost"
+    || hostname === "::1"
+    || hostname === "[::1]"
+    || hostname === "0.0.0.0"
+    || hostname.endsWith(".local")
+    || isPrivateIpv4Hostname(hostname);
+}
+
+function tryParseApiBase(apiBase: string) {
   try {
-    return new URL(apiBase.trim()).hostname.toLowerCase().replace(/^www\./, "");
+    return new URL(apiBase.trim());
   } catch {
-    return "";
+    return null;
   }
+}
+
+export function isLocalNetworkApiBase(apiBase: string) {
+  const parsed = tryParseApiBase(apiBase);
+  if (!parsed) return false;
+  return isLocalHostname(parsed.hostname.toLowerCase());
+}
+
+export function isLikelyOllamaApiBase(apiBase: string) {
+  const parsed = tryParseApiBase(apiBase);
+  if (!parsed) return false;
+  const hostname = parsed.hostname.toLowerCase();
+  const pathname = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+  return hostname.includes("ollama")
+    || parsed.port === "11434"
+    || (isLocalHostname(hostname) && (pathname === "" || pathname === "/" || pathname === "/api" || pathname === "/v1"));
+}
+
+function tryParseHostname(apiBase: string) {
+  const parsed = tryParseApiBase(apiBase);
+  return parsed?.hostname.toLowerCase().replace(/^www\./, "") ?? "";
 }
 
 function matchesServiceProvider(preset: ServiceProviderPreset, candidate: unknown) {
@@ -244,9 +290,14 @@ export function findServiceProviderPreset(providerName: unknown, providerId: unk
 
 export function findServiceProviderPresetByApiBase(apiBase: string, providerId: unknown = DEFAULT_PROVIDER_ID) {
   const hostname = tryParseHostname(apiBase);
+  const presets = getServiceProviderPresets(providerId);
+  const ollamaPreset = presets.find((preset) => preset.label === OLLAMA_SERVICE_PROVIDER_LABEL);
+  if (ollamaPreset && isLikelyOllamaApiBase(apiBase)) {
+    return ollamaPreset;
+  }
   if (!hostname) return null;
 
-  return getServiceProviderPresets(providerId).find((preset) =>
+  return presets.find((preset) =>
     (preset.hostnames ?? []).some((item) => {
       const normalizedItem = item.trim().toLowerCase();
       return hostname === normalizedItem || hostname.endsWith(`.${normalizedItem}`);
@@ -260,6 +311,33 @@ export function getServiceProviderDefaultApiBase(providerName: unknown, provider
 
 export function getProviderDefaultApiBase(providerId: unknown = DEFAULT_PROVIDER_ID) {
   return PROVIDER_DEFAULTS[normalizeProviderId(providerId)]?.apiBase ?? PROVIDER_DEFAULTS[DEFAULT_PROVIDER_ID].apiBase;
+}
+
+export function normalizeProviderApiBase(
+  apiBase: string,
+  providerId: unknown = DEFAULT_PROVIDER_ID,
+  providerName?: unknown,
+) {
+  const normalizedProviderId = normalizeProviderId(providerId);
+  const trimmed = apiBase.trim().replace(/\/+$/, "");
+  if (!trimmed) return getProviderDefaultApiBase(normalizedProviderId);
+  if (normalizedProviderId !== "openai-compatible") return trimmed;
+
+  const parsed = tryParseApiBase(trimmed);
+  if (!parsed) return trimmed;
+
+  const pathname = parsed.pathname.replace(/\/+$/, "");
+  const normalizedProviderName = typeof providerName === "string" ? providerName.trim() : "";
+  const isOllama = normalizedProviderName.toLowerCase() === OLLAMA_SERVICE_PROVIDER_LABEL.toLowerCase()
+    || isLikelyOllamaApiBase(trimmed);
+  if (isOllama && (!pathname || pathname === "/" || pathname === "/api")) {
+    parsed.pathname = "/v1";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString().replace(/\/+$/, "");
+  }
+
+  return trimmed;
 }
 
 export function inferServiceProviderName(apiBase: string, providerId: unknown = DEFAULT_PROVIDER_ID) {
@@ -287,10 +365,64 @@ export function normalizeServiceProviderName(
 ) {
   const explicitName = typeof providerName === "string" ? providerName.trim() : "";
   const explicitPreset = findServiceProviderPreset(explicitName, providerId);
-  if (explicitPreset) return explicitPreset.label;
-
   const basePreset = findServiceProviderPresetByApiBase(apiBase, providerId);
+  const defaultProviderName = getDefaultServiceProviderName(providerId);
+  if (explicitPreset) {
+    const isGenericExplicitProvider = explicitPreset.label === defaultProviderName || explicitPreset.label === CUSTOM_SERVICE_PROVIDER_LABEL;
+    if (isGenericExplicitProvider && basePreset && basePreset.label !== explicitPreset.label) {
+      return basePreset.label;
+    }
+    return explicitPreset.label;
+  }
   if (basePreset) return basePreset.label;
 
   return explicitName || inferServiceProviderName(apiBase, providerId);
+}
+
+export function providerConnectionAllowsEmptyApiKey(input: {
+  providerId?: unknown;
+  providerName?: unknown;
+  apiBase?: string;
+}) {
+  const normalizedProviderId = normalizeProviderId(input.providerId);
+  if (normalizedProviderId !== "openai-compatible") return false;
+
+  const normalizedApiBase = normalizeProviderApiBase(input.apiBase?.trim() || "", normalizedProviderId, input.providerName);
+  const normalizedProviderName = normalizeServiceProviderName(
+    input.providerName,
+    normalizedApiBase,
+    normalizedProviderId,
+  );
+
+  return normalizedProviderName === OLLAMA_SERVICE_PROVIDER_LABEL
+    || isLikelyOllamaApiBase(normalizedApiBase)
+    || isLocalNetworkApiBase(normalizedApiBase);
+}
+
+export function buildOpenAICompatibleAuthHeaders(
+  apiKey: string,
+  input: {
+    providerId?: unknown;
+    providerName?: unknown;
+    apiBase?: string;
+  },
+): Record<string, string> {
+  const trimmedApiKey = apiKey.trim();
+  if (!trimmedApiKey && providerConnectionAllowsEmptyApiKey(input)) {
+    return {};
+  }
+  return trimmedApiKey ? { Authorization: `Bearer ${trimmedApiKey}` } : {};
+}
+
+export function resolveProviderSdkApiKey(
+  apiKey: string,
+  input: {
+    providerId?: unknown;
+    providerName?: unknown;
+    apiBase?: string;
+  },
+) {
+  const trimmedApiKey = apiKey.trim();
+  if (trimmedApiKey) return trimmedApiKey;
+  return providerConnectionAllowsEmptyApiKey(input) ? "local-no-key" : "";
 }

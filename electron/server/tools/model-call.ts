@@ -1,5 +1,5 @@
 import type { ToolExecutionContext } from "../types";
-import { callChatCompletion, resolveModelConfigFromArgs, resolveThinkingRequestConfig } from "../model-runtime";
+import { callChatCompletion, modelConfigAllowsEmptyApiKey, resolveModelConfigFromArgs, resolveThinkingRequestConfig } from "../model-runtime";
 import { getOptionalNumberArg, getOptionalStringArg, getStringArg } from "../utils";
 import { isModelCapability, type ModelCapability } from "../../../src/shared/types";
 import { analyzeImage, editImage, generateImage, synthesizeSpeech, transcribeAudio } from "./multimodal";
@@ -75,7 +75,7 @@ export async function invokeModel(args: Record<string, unknown>, ctx: ToolExecut
   const requestedTemperature = Math.max(0, Math.min(2, getOptionalNumberArg(args, "temperature", Number.NaN)));
   const config = await resolveModelConfigFromArgs(args, ctx, { allowDefault: true });
 
-  if (!config.apiKey.trim()) {
+  if (!config.apiKey.trim() && !modelConfigAllowsEmptyApiKey(config)) {
     throw new Error(`Model profile "${config.name}" does not have an API key.`);
   }
 

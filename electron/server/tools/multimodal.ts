@@ -1,4 +1,4 @@
-import { callChatCompletion, callImageEdit, callImageGeneration, callSpeechToText, callTextToSpeech, resolveModelConfigFromArgs } from "../model-runtime";
+import { callChatCompletion, callImageEdit, callImageGeneration, callSpeechToText, callTextToSpeech, modelConfigAllowsEmptyApiKey, resolveModelConfigFromArgs } from "../model-runtime";
 import { attachmentToDataUrl, loadSourceBytes, saveGeneratedArtifact } from "../media";
 import type { ToolExecutionContext } from "../types";
 import { getOptionalNumberArg, getOptionalStringArg, getStringArg } from "../utils";
@@ -84,7 +84,7 @@ export async function analyzeImage(args: Record<string, unknown>, ctx: ToolExecu
   }
 
   const config = await resolveModelConfigFromArgs(args, ctx, { capability: "vision", allowDefault: false });
-  if (!config.apiKey) throw new Error(`Model profile "${config.name}" does not have an API key.`);
+  if (!config.apiKey && !modelConfigAllowsEmptyApiKey(config)) throw new Error(`Model profile "${config.name}" does not have an API key.`);
   const detail = getOptionalStringArg(args, "detail", "auto") as "low" | "high" | "original" | "auto";
   const imageParts = await Promise.all(images.map(async (url) => ({
     type: "image_url" as const,
@@ -111,7 +111,7 @@ export async function analyzeImage(args: Record<string, unknown>, ctx: ToolExecu
 export async function generateImage(args: Record<string, unknown>, ctx: ToolExecutionContext) {
   const prompt = getStringArg(args, "prompt");
   const config = await resolveModelConfigFromArgs(args, ctx, { capability: "image_generation", allowDefault: false });
-  if (!config.apiKey) throw new Error(`Model profile "${config.name}" does not have an API key.`);
+  if (!config.apiKey && !modelConfigAllowsEmptyApiKey(config)) throw new Error(`Model profile "${config.name}" does not have an API key.`);
 
   const result = await callImageGeneration(config, {
     prompt,
@@ -134,7 +134,7 @@ export async function editImage(args: Record<string, unknown>, ctx: ToolExecutio
     throw new Error("At least one source image is required.");
   }
   const config = await resolveModelConfigFromArgs(args, ctx, { capability: "image_editing", allowDefault: false });
-  if (!config.apiKey) throw new Error(`Model profile "${config.name}" does not have an API key.`);
+  if (!config.apiKey && !modelConfigAllowsEmptyApiKey(config)) throw new Error(`Model profile "${config.name}" does not have an API key.`);
 
   const sourceImages = await Promise.all(images.map(async (image) => {
     const source = await loadSourceBytes(image);
@@ -165,7 +165,7 @@ export async function transcribeAudio(args: Record<string, unknown>, ctx: ToolEx
   const source = getStringArg(args, "audio", ["file", "url", "audioUrl", "audio_url"]);
   const prompt = getOptionalStringArg(args, "prompt");
   const config = await resolveModelConfigFromArgs(args, ctx, { capability: "speech_to_text", allowDefault: false });
-  if (!config.apiKey) throw new Error(`Model profile "${config.name}" does not have an API key.`);
+  if (!config.apiKey && !modelConfigAllowsEmptyApiKey(config)) throw new Error(`Model profile "${config.name}" does not have an API key.`);
   const audio = await loadSourceBytes(source);
   const transcript = await callSpeechToText(config, {
     file: audio.buffer,
@@ -185,7 +185,7 @@ export async function transcribeAudio(args: Record<string, unknown>, ctx: ToolEx
 export async function synthesizeSpeech(args: Record<string, unknown>, ctx: ToolExecutionContext) {
   const input = getStringArg(args, "input", ["text"]);
   const config = await resolveModelConfigFromArgs(args, ctx, { capability: "text_to_speech", allowDefault: false });
-  if (!config.apiKey) throw new Error(`Model profile "${config.name}" does not have an API key.`);
+  if (!config.apiKey && !modelConfigAllowsEmptyApiKey(config)) throw new Error(`Model profile "${config.name}" does not have an API key.`);
   const result = await callTextToSpeech(config, {
     input,
     voice: getOptionalStringArg(args, "voice", "alloy"),

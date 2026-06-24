@@ -1,6 +1,14 @@
 import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { getProviderDefaultApiBase, getProviderName, normalizeProviderId, normalizeServiceProviderName } from "../../src/shared/providers";
+import {
+  buildOpenAICompatibleAuthHeaders,
+  getProviderDefaultApiBase,
+  getProviderName,
+  normalizeProviderApiBase,
+  normalizeProviderId,
+  normalizeServiceProviderName,
+  providerConnectionAllowsEmptyApiKey,
+} from "../../src/shared/providers";
 import { MODEL_CAPABILITIES, type DiscoveredModel, type ModelCapability, type ModelProfile, type ProviderId, type ThinkingEffort } from "../../src/shared/types";
 import { DATA_DIR, MODEL_PROFILES_FILE } from "./config";
 import { deleteStoredModelContextCacheEntry, inferBudgetFromProviderMetadata, isExplicitProfileContextBudget, resolveModelContextBudgetWithLookup, resolveStoredModelContextBudget, upsertStoredModelContextCacheEntry } from "./model-context";
@@ -40,7 +48,10 @@ function normalizeApiBaseForComparison(apiBase?: string | null) {
 
 function normalizeScope(scope: ModelProfileScope = {}): { providerId: ProviderId; apiBase: string; apiKey: string } {
   const providerId = normalizeProviderId(scope.providerId);
-  const apiBase = (scope.apiBase?.trim() || getProviderDefaultApiBase(providerId)).replace(/\/+$/, "");
+  const apiBase = normalizeProviderApiBase(
+    scope.apiBase?.trim() || getProviderDefaultApiBase(providerId),
+    providerId,
+  );
   return {
     providerId,
     apiBase,
@@ -115,7 +126,11 @@ function normalizeThinkingEffort(value: unknown, fallback: ThinkingEffort = "hig
 
 function normalizeProfile(profile: Partial<ModelProfile> & Pick<ModelProfile, "name" | "apiBase" | "model">, existing?: StoredModelProfile): StoredModelProfile {
   const providerId = normalizeProviderId(profile.providerId ?? existing?.providerId);
-  const apiBase = (profile.apiBase?.trim() || existing?.apiBase?.trim() || getProviderDefaultApiBase(providerId)).replace(/\/+$/, "");
+  const apiBase = normalizeProviderApiBase(
+    profile.apiBase?.trim() || existing?.apiBase?.trim() || getProviderDefaultApiBase(providerId),
+    providerId,
+    profile.providerName ?? existing?.providerName,
+  );
   const providerName = normalizeServiceProviderName(profile.providerName ?? existing?.providerName, apiBase, providerId);
   const nextApiKey = profile.apiKey?.trim() ? profile.apiKey.trim() : existing?.apiKey?.trim() ?? "";
   const inferredCapabilities = normalizeCapabilities(
@@ -397,15 +412,24 @@ export function pickBestDiscoveredModelForCapability(
 
 export async function discoverModels(apiBase: string, apiKey: string, providerId: ProviderId = "openai-compatible"): Promise<DiscoveredModel[]> {
   const normalizedProvider = normalizeProviderId(providerId);
-  const base = (apiBase.trim() || getProviderDefaultApiBase(normalizedProvider)).replace(/\/+$/, "");
+  const base = normalizeProviderApiBase(apiBase.trim() || getProviderDefaultApiBase(normalizedProvider), normalizedProvider);
   if (!base) throw new Error("API Base is required.");
   if (!/^https?:\/\//i.test(base)) throw new Error("API Base must start with http:// or https://.");
-  if (!apiKey.trim()) throw new Error("API Key is required.");
+
+  const normalizedProviderName = normalizeServiceProviderName("", base, normalizedProvider);
+  const trimmedApiKey = apiKey.trim();
+  if (!trimmedApiKey && !providerConnectionAllowsEmptyApiKey({
+    providerId: normalizedProvider,
+    providerName: normalizedProviderName,
+    apiBase: base,
+  })) {
+    throw new Error("API Key is required.");
+  }
 
   if (normalizedProvider === "anthropic-compatible") {
     const response = await fetch(`${base}/models`, {
       headers: {
-        "x-api-key": apiKey.trim(),
+        "x-api-key": trimmedApiKey,
         "anthropic-version": "2023-06-01",
       },
     });
@@ -417,7 +441,11 @@ export async function discoverModels(apiBase: string, apiKey: string, providerId
   }
 
   const response = await fetch(`${base}/models`, {
-    headers: { Authorization: `Bearer ${apiKey.trim()}` },
+    headers: buildOpenAICompatibleAuthHeaders(trimmedApiKey, {
+      providerId: normalizedProvider,
+      providerName: normalizedProviderName,
+      apiBase: base,
+    }),
   });
   const data = await response.json().catch(() => ({})) as OpenAIModelListResponse;
   if (!response.ok) {
@@ -454,6 +482,36 @@ export async function resolveProviderModelConnection(scope: ProviderModelConnect
   };
 }
 
+function isAutoConfiguredCapabilityProfile(
+  profile: Pick<StoredModelProfile, "description">,
+  capability: ModelCapability,
+) {
+  return (profile.description || "").trim() === `Auto-configured ${capability} model from provider defaults.`;
+}
+
+function shouldReuseExistingCapabilityProfile(
+  capability: ModelCapability,
+  profile: StoredModelProfile,
+  connection: ProviderModelConnection,
+) {
+  if (capability !== "embedding" || !isAutoConfiguredCapabilityProfile(profile, capability)) {
+    return true;
+  }
+
+  const fallback = getProviderEmbeddingAutoConfig({
+    providerId: connection.providerId,
+    providerName: connection.providerName,
+    apiBase: connection.apiBase,
+  });
+  if (!fallback) {
+    return false;
+  }
+
+  return normalizeApiBaseForComparison(profile.apiBase) === normalizeApiBaseForComparison(fallback.apiBase)
+    && normalizeServiceProviderName(profile.providerName, profile.apiBase, profile.providerId) === fallback.providerName
+    && profile.model.trim() === fallback.model;
+}
+
 export async function ensureCapabilityModelProfile(
   capability: ModelCapability,
   connection: ProviderModelConnection,
@@ -471,11 +529,16 @@ export async function ensureCapabilityModelProfile(
       })()
     : resolvedConnection;
   const existing = await findStoredModelProfileByCapability(capability, scopedConnection);
-  if (existing) {
+  if (existing && shouldReuseExistingCapabilityProfile(capability, existing, resolvedConnection)) {
     return existing;
   }
 
-  if (!resolvedConnection.apiKey?.trim()) {
+  const allowsEmptyApiKey = providerConnectionAllowsEmptyApiKey({
+    providerId: resolvedConnection.providerId,
+    providerName: resolvedConnection.providerName,
+    apiBase: scopedConnection.apiBase ?? resolvedConnection.apiBase,
+  });
+  if (!resolvedConnection.apiKey?.trim() && !allowsEmptyApiKey) {
     return null;
   }
 
@@ -483,7 +546,7 @@ export async function ensureCapabilityModelProfile(
   try {
     const discovered = await discoverModels(
       scopedConnection.apiBase ?? "",
-      resolvedConnection.apiKey,
+      resolvedConnection.apiKey ?? "",
       resolvedConnection.providerId,
     );
     candidate = pickBestDiscoveredModelForCapability(discovered, capability);

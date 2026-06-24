@@ -34,6 +34,7 @@ globalThis.fetch = async (input, init = {}) => {
   if (
     url === "https://generativelanguage.googleapis.com/v1beta/models"
     || url === "https://dashscope.aliyuncs.com/compatible-mode/v1/models"
+    || url === "https://api.deepseek.com/v1/models"
   ) {
     return Response.json({ error: { message: "model listing unavailable in this test" } }, { status: 404 });
   }
@@ -85,6 +86,21 @@ const qwenRuntime = providerEmbeddings.getProviderEmbeddingRuntimeConfig({
 assert.equal(qwenRuntime?.apiBase, "https://dashscope.aliyuncs.com/compatible-mode/v1");
 assert.equal(qwenRuntime?.model, "text-embedding-v4");
 
+const deepseekAuto = providerEmbeddings.getProviderEmbeddingAutoConfig({
+  providerId: "openai-compatible",
+  providerName: "OpenAI",
+  apiBase: "https://api.deepseek.com/v1",
+});
+assert.equal(deepseekAuto, null);
+
+const deepseekRuntime = providerEmbeddings.getProviderEmbeddingRuntimeConfig({
+  providerId: "openai-compatible",
+  providerName: "OpenAI",
+  apiBase: "https://api.deepseek.com/v1",
+  model: "deepseek-v4-pro",
+});
+assert.equal(deepseekRuntime, null);
+
 const unsupportedClaude = providerEmbeddings.getProviderEmbeddingRuntimeConfig({
   providerId: "anthropic-compatible",
   providerName: "Claude",
@@ -110,6 +126,14 @@ const qwenProfile = await modelProfiles.ensureCapabilityModelProfile("embedding"
 });
 assert.equal(qwenProfile?.apiBase, "https://dashscope.aliyuncs.com/compatible-mode/v1");
 assert.equal(qwenProfile?.model, "text-embedding-v4");
+
+const deepseekProfile = await modelProfiles.ensureCapabilityModelProfile("embedding", {
+  providerId: "openai-compatible",
+  providerName: "OpenAI",
+  apiBase: "https://api.deepseek.com/v1",
+  apiKey: "deepseek-key",
+});
+assert.equal(deepseekProfile, null);
 
 await memoryModule.storeScriptMemory("gemini:embedding", "Gemini provider-specific embeddings work.", {
   embeddingSettings: {

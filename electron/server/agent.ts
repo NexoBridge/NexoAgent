@@ -2,6 +2,12 @@ import { ChatOpenAI, type ChatOpenAICallOptions } from "@langchain/openai";
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
 import type { AIMessageChunk } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
+import {
+  getDefaultServiceProviderName,
+  normalizeServiceProviderName,
+  providerConnectionAllowsEmptyApiKey,
+  resolveProviderSdkApiKey,
+} from "../../src/shared/providers";
 import type { AgentSettings, ChatMessage } from "../../src/shared/types";
 import { extractAndStore, recallMemory } from "../memory";
 import { loadAttachmentContext } from "./attachments";
@@ -96,12 +102,19 @@ type BufferedToolCall = {
   index?: number;
 };
 
-const DSML_TAG = String.raw`(?:\|\|DSML\|\||\uFFE5\u7CEFDSML\uFFE5\u7CEF|\u95FF\u6FE1\u7CA3\u7F0D\u64E0SML\u95FF\u6FE1\u7CA3\u7F0D?)`;
+const DSML_TAG = String.raw`(?:\|\|DSML\|\||\uFF5C\uFF5CDSML\uFF5C\uFF5C|\uFFE5\u7CEFDSML\uFFE5\u7CEF|\u95FF\u6FE1\u7CA3\u7F0D\u64E0SML\u95FF\u6FE1\u7CA3\u7F0D?)`;
 const DSML_TOOL_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_TAG}tool_calls\s*>([\s\S]*?)<\/\s*${DSML_TAG}tool_calls\s*>`, "g");
 const DSML_TOOL_START_RE = new RegExp(String.raw`<\s*${DSML_TAG}tool_calls\s*>`);
 const DSML_INVOKE_RE = new RegExp(String.raw`<\s*${DSML_TAG}invoke\s+name="([^"]+)"\s*>([\s\S]*?)<\/\s*${DSML_TAG}invoke\s*>`, "g");
 const DSML_PARAMETER_RE = new RegExp(String.raw`<\s*${DSML_TAG}parameter\s+name="([^"]+)"(?:\s+string="([^"]+)")?\s*>([\s\S]*?)<\/\s*${DSML_TAG}parameter\s*>`, "g");
 const DSML_ANY_TAG_RE = new RegExp(String.raw`<\/?\s*${DSML_TAG}(?:tool_calls|invoke|parameter)\b[^>]*>`, "g");
+const DSML_OPENING_PREFIXES = [
+  "<||dsml||tool_calls",
+  "<｜｜dsml｜｜tool_calls",
+  "<锝滐綔dsml锝滐綔tool_calls",
+  "<閿濇粣缍擠sml閿濇粣缍攟tool_calls",
+  "<閿濇粣缍擠sml閿濇粣缍tool_calls",
+];
 
 function stripDsmlArtifacts(content: string) {
   let visibleText = content;
@@ -163,6 +176,80 @@ function parseDsmlToolCalls(content: string): { visibleText: string; calls: Buff
 
   visibleText += content.slice(cursor);
   return { visibleText: stripDsmlArtifacts(visibleText), calls };
+}
+
+function normalizePotentialDsmlStart(value: string) {
+  return value.replace(/^<\s*/, "<").toLowerCase();
+}
+
+function isPotentialDsmlStart(value: string) {
+  const normalized = normalizePotentialDsmlStart(value);
+  if (normalized === "<") return true;
+  return DSML_OPENING_PREFIXES.some((opening) => opening.startsWith(normalized) || normalized.startsWith(opening));
+}
+
+function findPotentialDsmlStart(value: string) {
+  let index = value.indexOf("<");
+  while (index >= 0) {
+    if (isPotentialDsmlStart(value.slice(index))) return index;
+    index = value.indexOf("<", index + 1);
+  }
+  return -1;
+}
+
+function shouldDropDanglingDsml(value: string) {
+  const normalized = normalizePotentialDsmlStart(value);
+  return normalized.includes("dsml") || DSML_OPENING_PREFIXES.some((opening) => normalized.startsWith(opening));
+}
+
+function createDsmlStreamBuffer() {
+  let pending = "";
+
+  const drain = (flush: boolean): { visibleText: string; calls: BufferedToolCall[] } => {
+    let visibleText = "";
+    const calls: BufferedToolCall[] = [];
+
+    while (pending) {
+      DSML_TOOL_BLOCK_RE.lastIndex = 0;
+      const blockMatch = DSML_TOOL_BLOCK_RE.exec(pending);
+      if (blockMatch) {
+        visibleText += pending.slice(0, blockMatch.index);
+        calls.push(...parseDsmlToolCalls(blockMatch[0]).calls);
+        pending = pending.slice(blockMatch.index + blockMatch[0].length);
+        continue;
+      }
+
+      const potentialStart = findPotentialDsmlStart(pending);
+      if (potentialStart >= 0) {
+        visibleText += pending.slice(0, potentialStart);
+        const held = pending.slice(potentialStart);
+        if (flush) {
+          if (!shouldDropDanglingDsml(held)) {
+            visibleText += held;
+          }
+          pending = "";
+        } else {
+          pending = held;
+        }
+        break;
+      }
+
+      visibleText += pending;
+      pending = "";
+    }
+
+    return { visibleText: stripDsmlArtifacts(visibleText), calls };
+  };
+
+  return {
+    push(token: string) {
+      pending += token;
+      return drain(false);
+    },
+    flush() {
+      return drain(true);
+    },
+  };
 }
 
 function normalizePositiveInteger(value: number | undefined, fallback: number, min = 1) {
@@ -323,6 +410,12 @@ export async function streamFromLLM(
     fallbackApiKey
   );
   const effectiveApiKey = primaryConfig.apiKey || fallbackApiKey;
+  const apiBase = primaryConfig.apiBase;
+  const allowsEmptyPrimaryApiKey = providerConnectionAllowsEmptyApiKey({
+    providerId: primaryConfig.providerId,
+    providerName: settings.providerName,
+    apiBase,
+  });
 
   if (!primaryConfig.model.trim()) {
     return buildDoneEvent(requestId, {
@@ -333,7 +426,7 @@ export async function streamFromLLM(
     });
   }
 
-  if (!effectiveApiKey) {
+  if (!effectiveApiKey && !allowsEmptyPrimaryApiKey) {
     return buildDoneEvent(requestId, {
       type: "done",
       content: primaryConfig.name === "default" ? MISSING_PRIMARY_MODEL_MESSAGE : MISSING_API_KEY_MESSAGE,
@@ -342,7 +435,6 @@ export async function streamFromLLM(
     });
   }
 
-  const apiBase = primaryConfig.apiBase;
   const model = primaryConfig.model;
   const thinkingConfig = resolveThinkingRequestConfig(settings, model, {
     thinkingEnabled: primaryConfig.thinkingEnabled,
@@ -439,7 +531,11 @@ export async function streamFromLLM(
     }
 
     const summaryLlm = new ChatOpenAI({
-      apiKey: effectiveApiKey,
+      apiKey: resolveProviderSdkApiKey(effectiveApiKey, {
+        providerId: primaryConfig.providerId,
+        providerName: settings.providerName,
+        apiBase,
+      }),
       model,
       temperature: 0,
       configuration: { baseURL: apiBase },
@@ -521,7 +617,11 @@ export async function streamFromLLM(
   }
 
   const llm = new ChatOpenAI({
-    apiKey: effectiveApiKey,
+    apiKey: resolveProviderSdkApiKey(effectiveApiKey, {
+      providerId: primaryConfig.providerId,
+      providerName: settings.providerName,
+      apiBase,
+    }),
     model,
     temperature: primaryConfig.temperature ?? settings.temperature ?? 0.4,
     configuration: { baseURL: apiBase },
@@ -557,8 +657,8 @@ export async function streamFromLLM(
       }
 
       let turnContent = "";
-      let rawTurnContent = "";
       const toolCallBuffer: BufferedToolCall[] = [];
+      const dsmlBuffer = createDsmlStreamBuffer();
       let terminalSummary = "";
 
       const stream = await llmRunner.stream(lcMessages);
@@ -571,7 +671,13 @@ export async function streamFromLLM(
         const c = chunk as AIMessageChunk;
         const token = typeof c.content === "string" ? c.content : "";
         if (token) {
-          rawTurnContent += token;
+          const dsmlChunk = dsmlBuffer.push(token);
+          if (dsmlChunk.visibleText) {
+            turnContent += dsmlChunk.visibleText;
+            fullContent += dsmlChunk.visibleText;
+            pushEvent(requestId, { type: "token", content: dsmlChunk.visibleText });
+          }
+          toolCallBuffer.push(...dsmlChunk.calls);
         }
         if (c.tool_call_chunks?.length) {
           for (const tc of c.tool_call_chunks) {
@@ -604,13 +710,14 @@ export async function streamFromLLM(
 
       if (interruptedByUser) break;
 
-      const parsedDsml = parseDsmlToolCalls(rawTurnContent);
-      turnContent = parsedDsml.visibleText;
-      if (turnContent) {
-        fullContent += turnContent;
-        pushEvent(requestId, { type: "token", content: turnContent });
+      const finalDsmlChunk = dsmlBuffer.flush();
+      if (finalDsmlChunk.visibleText) {
+        turnContent += finalDsmlChunk.visibleText;
+        fullContent += finalDsmlChunk.visibleText;
+        pushEvent(requestId, { type: "token", content: finalDsmlChunk.visibleText });
       }
-      toolCallBuffer.push(...parsedDsml.calls);
+      toolCallBuffer.push(...finalDsmlChunk.calls);
+      turnContent = stripDsmlArtifacts(turnContent);
 
       circuitBreaker?.recordModelTurn({
         step: step + 1,
@@ -710,7 +817,7 @@ export async function streamFromLLM(
         ),
       ]);
       let finalContent = "";
-      let rawFinalContent = "";
+      const finalDsmlBuffer = createDsmlStreamBuffer();
       for await (const chunk of finalStream) {
         if (isRunInterrupted(requestId)) {
           interruptedByUser = true;
@@ -720,7 +827,12 @@ export async function streamFromLLM(
         const c = chunk as AIMessageChunk;
         const token = typeof c.content === "string" ? c.content : "";
         if (token) {
-          rawFinalContent += token;
+          const dsmlChunk = finalDsmlBuffer.push(token);
+          if (dsmlChunk.visibleText) {
+            finalContent += dsmlChunk.visibleText;
+            fullContent += dsmlChunk.visibleText;
+            pushEvent(requestId, { type: "token", content: dsmlChunk.visibleText });
+          }
         }
         if (c.usage_metadata) {
           promptTokens = c.usage_metadata.input_tokens;
@@ -728,11 +840,13 @@ export async function streamFromLLM(
         }
       }
       if (!interruptedByUser) {
-        finalContent = parseDsmlToolCalls(rawFinalContent).visibleText;
-        if (finalContent) {
-          fullContent += finalContent;
-          pushEvent(requestId, { type: "token", content: finalContent });
+        const finalDsmlChunk = finalDsmlBuffer.flush();
+        if (finalDsmlChunk.visibleText) {
+          finalContent += finalDsmlChunk.visibleText;
+          fullContent += finalDsmlChunk.visibleText;
+          pushEvent(requestId, { type: "token", content: finalDsmlChunk.visibleText });
         }
+        finalContent = stripDsmlArtifacts(finalContent);
         if (!finalContent.trim()) {
           fullContent += LOOP_GUARD_FALLBACK_MESSAGE;
           pushEvent(requestId, { type: "token", content: LOOP_GUARD_FALLBACK_MESSAGE });
@@ -794,6 +908,9 @@ export async function extractMemoryAfterChat(
     { ...settings, apiBase: fallbackApiBase, model: fallbackModel, apiKey: fallbackApiKey },
     fallbackApiKey
   );
+  const embeddingProviderName = normalizeServiceProviderName("", primaryConfig.apiBase, primaryConfig.providerId)
+    || normalizeServiceProviderName(settings.providerName, primaryConfig.apiBase, primaryConfig.providerId)
+    || getDefaultServiceProviderName(primaryConfig.providerId);
 
   const durableMemoryInstruction = [
     "Extract only durable memory candidates.",
@@ -817,7 +934,11 @@ export async function extractMemoryAfterChat(
       }
 
       const llm = new ChatOpenAI({
-        apiKey: primaryConfig.apiKey || fallbackApiKey,
+        apiKey: resolveProviderSdkApiKey(primaryConfig.apiKey || fallbackApiKey, {
+          providerId: primaryConfig.providerId,
+          providerName: settings.providerName,
+          apiBase: primaryConfig.apiBase,
+        }),
         model: primaryConfig.model,
         temperature: 0,
         configuration: { baseURL: primaryConfig.apiBase },
@@ -832,7 +953,7 @@ export async function extractMemoryAfterChat(
       model: primaryConfig.model,
       embeddingSettings: {
         providerId: primaryConfig.providerId,
-        providerName: settings.providerName,
+        providerName: embeddingProviderName,
         apiKey: primaryConfig.apiKey || fallbackApiKey,
         apiBase: primaryConfig.apiBase,
         model: primaryConfig.model,

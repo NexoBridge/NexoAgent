@@ -7,7 +7,15 @@ import initSqlJs, { type Database, type SqlJsStatic } from "sql.js";
 import { ChatOpenAI } from "@langchain/openai";
 import { HumanMessage } from "@langchain/core/messages";
 import { ChromaClient, type Collection, type Metadata, type Where } from "chromadb";
-import { getDefaultServiceProviderName, normalizeProviderId } from "../src/shared/providers";
+import {
+  buildOpenAICompatibleAuthHeaders,
+  getDefaultServiceProviderName,
+  normalizeProviderApiBase,
+  normalizeProviderId,
+  normalizeServiceProviderName,
+  providerConnectionAllowsEmptyApiKey,
+  resolveProviderSdkApiKey,
+} from "../src/shared/providers";
 import type { AgentSettings } from "../src/shared/types";
 import { resolveCapabilityModelConfig } from "./server/model-runtime";
 import {
@@ -434,10 +442,15 @@ async function writeMemoryMarkdown() {
 
 function buildMemoryEmbeddingSettings(settings: MemoryEmbeddingSettings = {}): MemoryEmbeddingSettings {
   const providerId = normalizeProviderId(settings.providerId);
+  const apiBase = settings.apiBase?.trim()
+    ? normalizeProviderApiBase(settings.apiBase, providerId, settings.providerName)
+    : "";
+  const providerName = normalizeServiceProviderName(settings.providerName, apiBase, providerId)
+    || getDefaultServiceProviderName(providerId);
   return {
     providerId,
-    providerName: settings.providerName || getDefaultServiceProviderName(providerId),
-    apiBase: settings.apiBase?.trim().replace(/\/+$/, "") || "",
+    providerName,
+    apiBase,
     apiKey: settings.apiKey?.trim() || "",
     model: settings.model?.trim() || "",
     temperature: settings.temperature ?? 0,
@@ -446,14 +459,19 @@ function buildMemoryEmbeddingSettings(settings: MemoryEmbeddingSettings = {}): M
 
 async function resolveEmbeddingConfig(settings: MemoryEmbeddingSettings = {}): Promise<ResolvedEmbeddingConfig | null> {
   const normalized = buildMemoryEmbeddingSettings(settings);
-  if (!normalized.apiKey) return null;
+  const allowsEmptyApiKey = providerConnectionAllowsEmptyApiKey({
+    providerId: normalized.providerId,
+    providerName: normalized.providerName,
+    apiBase: normalized.apiBase,
+  });
+  if (!normalized.apiKey && !allowsEmptyApiKey) return null;
 
   try {
     const config = await resolveCapabilityModelConfig("embedding", normalized, {
       apiKey: normalized.apiKey,
       apiBase: normalized.apiBase,
     });
-    if (config?.apiKey?.trim() && config.model?.trim()) {
+    if (config?.model?.trim() && (config.apiKey?.trim() || allowsEmptyApiKey)) {
       const resolved = getProviderEmbeddingRuntimeConfig({
         providerId: config.providerId,
         providerName: normalized.providerName,
@@ -484,7 +502,7 @@ async function resolveEmbeddingConfig(settings: MemoryEmbeddingSettings = {}): P
 
   return {
     providerName: fallback.providerName,
-    apiKey: normalized.apiKey,
+    apiKey: normalized.apiKey || "",
     apiBase: fallback.apiBase,
     model: fallback.model,
     transport: fallback.transport,
@@ -510,7 +528,11 @@ async function requestOpenAICompatibleEmbeddings(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
+      ...buildOpenAICompatibleAuthHeaders(config.apiKey, {
+        providerId: "openai-compatible",
+        providerName: config.providerName,
+        apiBase: config.apiBase,
+      }),
     },
     body: JSON.stringify({
       model: config.model,
@@ -983,7 +1005,12 @@ export async function extractAndStore(
   callLLM: (prompt: string) => Promise<string>,
   options: { model?: string; embeddingSettings?: MemoryEmbeddingSettings } = {}
 ) {
-  if (!apiKey) return;
+  const allowsEmptyApiKey = providerConnectionAllowsEmptyApiKey({
+    providerId: options.embeddingSettings?.providerId,
+    providerName: options.embeddingSettings?.providerName,
+    apiBase: options.embeddingSettings?.apiBase || apiBase,
+  });
+  if (!apiKey && !allowsEmptyApiKey) return;
 
   const prompt = `Extract 0-3 concise memory facts worth remembering from this exchange.
 Reply ONLY with a JSON array of strings, e.g. ["fact1","fact2"]. Empty array if nothing worth saving.
@@ -1030,7 +1057,14 @@ export async function consolidateDreamForDay(
   } = {}
 ): Promise<DreamConsolidationResult> {
   const normalized = normalizeDayKey(dayKey);
-  if (!options.apiKey || !options.apiBase) return { ok: false, dayKey: normalized, reason: "missing_api_credentials" };
+  const allowsEmptyApiKey = providerConnectionAllowsEmptyApiKey({
+    providerId: options.embeddingSettings?.providerId,
+    providerName: options.embeddingSettings?.providerName,
+    apiBase: options.embeddingSettings?.apiBase || options.apiBase,
+  });
+  if (!options.apiBase || (!options.apiKey && !allowsEmptyApiKey)) {
+    return { ok: false, dayKey: normalized, reason: "missing_api_credentials" };
+  }
 
   await getDb();
   const sourceMemories = allRows({ dayKey: normalized, kinds: ["daily", "script"] }).filter(
@@ -1050,7 +1084,11 @@ ${summarizeSourceMemories(sourceMemories)}`;
       ? await options.callLLM(prompt)
       : await (async () => {
           const llm = new ChatOpenAI({
-            apiKey: options.apiKey,
+            apiKey: resolveProviderSdkApiKey(options.apiKey || "", {
+              providerId: options.embeddingSettings?.providerId,
+              providerName: options.embeddingSettings?.providerName,
+              apiBase: options.embeddingSettings?.apiBase || options.apiBase,
+            }),
             model: options.model || "gpt-4o-mini",
             temperature: 0.2,
             configuration: { baseURL: options.apiBase },

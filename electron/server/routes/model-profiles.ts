@@ -1,6 +1,6 @@
 import type { Application } from "express";
 import type { ModelProfile } from "../../../src/shared/types";
-import { normalizeProviderId } from "../../../src/shared/providers";
+import { normalizeProviderId, providerConnectionAllowsEmptyApiKey } from "../../../src/shared/providers";
 import {
   deleteModelProfile,
   discoverModels,
@@ -28,10 +28,15 @@ export function registerModelProfileRoutes(app: Application) {
     try {
       const savedApiKey = profileId ? await getStoredModelProfileApiKey(profileId) : "";
       const fallbackApiKey = getWebSettings().apiKey ?? "";
+      const normalizedProviderId = normalizeProviderId(providerId);
+      const allowsEmptyApiKey = providerConnectionAllowsEmptyApiKey({
+        providerId: normalizedProviderId,
+        apiBase: apiBase ?? "",
+      });
       res.json(await discoverModels(
         apiBase ?? "",
-        apiKey?.trim() || savedApiKey || fallbackApiKey,
-        normalizeProviderId(providerId)
+        apiKey?.trim() || savedApiKey || (allowsEmptyApiKey ? "" : fallbackApiKey),
+        normalizedProviderId
       ));
     } catch (error) {
       res.status(400).json({ error: toErrorMessage(error) });
@@ -44,10 +49,17 @@ export function registerModelProfileRoutes(app: Application) {
     if (!profile.model?.trim()) return res.status(400).json({ error: "model required" });
     const fallbackApiKey = getWebSettings().apiKey ?? "";
     const incomingApiKey = profile.apiKey?.trim() ?? "";
+    const normalizedProviderId = normalizeProviderId(profile.providerId);
+    const allowsEmptyApiKey = providerConnectionAllowsEmptyApiKey({
+      providerId: normalizedProviderId,
+      providerName: profile.providerName,
+      apiBase: profile.apiBase ?? "",
+    });
+    const effectiveApiKey = incomingApiKey || (!profile.id && !allowsEmptyApiKey ? fallbackApiKey : "");
     try {
       const saved = await saveModelProfile({
         ...profile,
-        apiKey: incomingApiKey || (!profile.id ? fallbackApiKey : ""),
+        apiKey: effectiveApiKey,
       } as Partial<ModelProfile> & Pick<ModelProfile, "name" | "apiBase" | "model">);
 
       const capabilities = saved.capabilities ?? [];
@@ -56,7 +68,7 @@ export function registerModelProfileRoutes(app: Application) {
           providerId: saved.providerId,
           providerName: saved.providerName,
           apiBase: saved.apiBase,
-          apiKey: incomingApiKey || fallbackApiKey,
+          apiKey: effectiveApiKey,
         }).catch(() => null);
       }
 

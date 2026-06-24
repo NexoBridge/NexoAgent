@@ -24,7 +24,7 @@ interface Props {
 }
 
 const STREAM_CURSOR = "|";
-const DSML_TAG_PATTERN = String.raw`(?:\|\|DSML\|\||锝滐綔DSML锝滐綔|閿濇粣缍擠SML閿濇粣缍攟闁挎繃绮ｇ紞鎿燬ML闁挎繃绮ｇ紞?)`;
+const DSML_TAG_PATTERN = String.raw`(?:\|\|DSML\|\||\uFF5C\uFF5CDSML\uFF5C\uFF5C|锝滐綔DSML锝滐綔|閿濇粣缍擠SML閿濇粣缍攟闁挎繃绮ｇ紞鎿燬ML闁挎繃绮ｇ紞?)`;
 const DSML_TOOL_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_TAG_PATTERN}tool_calls\s*>[\s\S]*?<\/\s*${DSML_TAG_PATTERN}tool_calls\s*>`, "g");
 const DSML_TOOL_START_RE = new RegExp(String.raw`<\s*${DSML_TAG_PATTERN}tool_calls\s*>`);
 const DSML_ANY_TAG_RE = new RegExp(String.raw`<\/?\s*${DSML_TAG_PATTERN}(?:tool_calls|invoke|parameter)\b[^>]*>`, "g");

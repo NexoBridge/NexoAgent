@@ -9,30 +9,41 @@ import {
   consolidateDreamForDay,
   normalizeDayKey,
 } from "../../memory";
+import { getDefaultServiceProviderName, normalizeServiceProviderName } from "../../../src/shared/providers";
+import { resolvePrimaryModelConfig } from "../model-runtime";
 import { getWebSettings } from "../settings";
+import { buildRuntimeSettings } from "../settings";
 import { getOptionalNumberArg, parseMemoryKind, parseMemoryKinds } from "../utils";
 import type { ServerContext } from "./context";
 
 export function registerMemoryRoutes(app: Application, ctx: ServerContext) {
-  const getModelSettings = () => {
-    const webSettings = getWebSettings();
-    const providerId = webSettings.providerId || "openai-compatible";
-    const providerName = webSettings.providerName || "";
-    const apiBase = (webSettings.apiBase || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const getModelSettings = async () => {
+    const webSettings = buildRuntimeSettings(getWebSettings());
     const apiKey = webSettings.apiKey || ctx.getStoredApiKey() || "";
+    const primaryConfig = await resolvePrimaryModelConfig(
+      { ...webSettings, apiKey },
+      apiKey,
+    ).catch(() => null);
+    const providerId = primaryConfig?.providerId ?? webSettings.providerId;
+    const apiBase = (primaryConfig?.apiBase || webSettings.apiBase || "https://api.openai.com/v1").replace(/\/+$/, "");
+    const providerName = normalizeServiceProviderName("", apiBase, providerId)
+      || normalizeServiceProviderName(webSettings.providerName, apiBase, providerId)
+      || getDefaultServiceProviderName(providerId);
+    const model = primaryConfig?.model || webSettings.model || "gpt-4o-mini";
+    const resolvedApiKey = primaryConfig?.apiKey || apiKey;
     return {
       providerId,
       providerName,
-      apiKey,
+      apiKey: resolvedApiKey,
       apiBase,
-      model: webSettings.model || "gpt-4o-mini",
+      model,
       embeddingSettings: {
         providerId,
         providerName,
-        apiKey,
+        apiKey: resolvedApiKey,
         apiBase,
-        model: webSettings.model || "gpt-4o-mini",
-        temperature: webSettings.temperature ?? 0,
+        model,
+        temperature: primaryConfig?.temperature ?? webSettings.temperature ?? 0,
       },
     };
   };
@@ -48,7 +59,7 @@ export function registerMemoryRoutes(app: Application, ctx: ServerContext) {
   app.get("/api/memory/search", async (req, res) => {
     const query = typeof req.query.query === "string" ? req.query.query.trim() : "";
     if (!query) return res.status(400).json({ error: "query required" });
-    const { embeddingSettings } = getModelSettings();
+    const { embeddingSettings } = await getModelSettings();
     const results = await searchMemories(query, embeddingSettings, {
       kinds: parseMemoryKinds(req.query.kinds ?? req.query.kind),
       dayKey: typeof req.query.dayKey === "string" ? req.query.dayKey : undefined,
@@ -68,14 +79,14 @@ export function registerMemoryRoutes(app: Application, ctx: ServerContext) {
     if (!key?.trim()) return res.status(400).json({ error: "key required" });
     if (!content?.trim()) return res.status(400).json({ error: "content required" });
 
-    const { embeddingSettings } = getModelSettings();
+    const { embeddingSettings } = await getModelSettings();
     const id = await storeScriptMemory(key.trim(), content.trim(), { scope, metadata, embeddingSettings, dayKey });
     return res.json({ ok: true, id });
   });
 
   app.post("/api/memory/dream/:dayKey/regenerate", async (req, res) => {
     const dayKey = normalizeDayKey(req.params.dayKey);
-    const { apiKey, apiBase, model, embeddingSettings } = getModelSettings();
+    const { apiKey, apiBase, model, embeddingSettings } = await getModelSettings();
     const result = await consolidateDreamForDay(dayKey, { apiKey, apiBase, model, embeddingSettings });
     return res.status(result.ok ? 200 : 400).json(result);
   });

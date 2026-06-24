@@ -33,6 +33,7 @@ import { OverflowMenuButton } from "../Common/OverflowMenuButton";
 import { useI18n } from "../../i18n";
 import {
   getDefaultServiceProviderName,
+  providerConnectionAllowsEmptyApiKey,
   getProviderDefaultApiBase,
   getProviderOptions,
   getProviderProtocolName,
@@ -285,6 +286,11 @@ export const Settings: React.FC = () => {
   const watchedApiKey = Form.useWatch("apiKey", profileForm) as string | undefined;
 
   const normalizedWatchedProviderId = normalizeProviderId(watchedProviderId);
+  const allowsEmptyProfileApiKey = providerConnectionAllowsEmptyApiKey({
+    providerId: normalizedWatchedProviderId,
+    providerName: watchedProviderName,
+    apiBase: String(watchedApiBase ?? ""),
+  });
   const thinkingEffortOptions = useMemo(
     () => [
       { value: "high" as ThinkingEffort, label: ui.thinkingHigh },
@@ -517,12 +523,12 @@ export const Settings: React.FC = () => {
     const apiKeyValue = String(watchedApiKey ?? "");
     const hasTypedKey = Boolean(apiKeyValue.trim()) && apiKeyValue !== SAVED_API_KEY_MASK;
     const hasSavedKey = Boolean(editingProfile?.hasApiKey);
-    if (!hasTypedKey && !hasSavedKey) return;
+    if (!hasTypedKey && !hasSavedKey && !allowsEmptyProfileApiKey) return;
     const timer = window.setTimeout(() => {
       void discoverProfileModels();
     }, 300);
     return () => window.clearTimeout(timer);
-  }, [profileModalOpen, watchedProviderId, watchedApiBase, watchedApiKey, editingProfile?.id, editingProfile?.hasApiKey]);
+  }, [profileModalOpen, watchedProviderId, watchedApiBase, watchedApiKey, watchedProviderName, editingProfile?.id, editingProfile?.hasApiKey, allowsEmptyProfileApiKey]);
 
   return (
     <div style={{ padding: "28px 32px", maxWidth: 1100, color: colors.textPrimary }}>

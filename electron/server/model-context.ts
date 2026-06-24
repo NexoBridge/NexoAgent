@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import type { AgentSettings, DiscoveredModel, ModelContextBudget, ModelContextSource, ModelProfile } from "../../src/shared/types";
+import { providerConnectionAllowsEmptyApiKey } from "../../src/shared/providers";
 import { MODEL_CONTEXT_CACHE_FILE, DATA_DIR } from "./config";
 import { callChatCompletion, resolvePrimaryModelConfig, type ChatCompletionMessage } from "./model-runtime";
 import { getWebSettings } from "./settings";
@@ -375,7 +376,10 @@ export async function lookupModelContextBudgetWithLLM(
   const effectiveSettings = { ...webSettings, ...settings } as AgentSettings;
   const apiKey = effectiveSettings.apiKey || "";
   const config = await resolvePrimaryModelConfig(effectiveSettings, apiKey);
-  if (!config.apiKey.trim()) {
+  if (!config.apiKey.trim() && !providerConnectionAllowsEmptyApiKey({
+    providerId: config.providerId,
+    apiBase: config.apiBase,
+  })) {
     return null;
   }
 
