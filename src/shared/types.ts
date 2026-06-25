@@ -57,8 +57,6 @@ export type CircuitBreakerReason =
   | "repeated_visible_output"
   | "repeated_tool_calls"
   | "consecutive_failures"
-  | "no_progress"
-  | "runtime_limit"
   | "token_budget";
 
 export interface CircuitBreakerInfo {
@@ -78,7 +76,6 @@ export interface AgentSettings extends ModelContextBudget {
   maxContextTurns: number;
   enableContextCompaction: boolean;
   contextCompactionThreshold: number;
-  maxSteps: number;
   /** Default timeout for shell_command when timeoutMs is omitted (ms). */
   shellCommandTimeoutMs: number;
   planningMode: PlanningMode;
@@ -87,8 +84,6 @@ export interface AgentSettings extends ModelContextBudget {
   circuitBreakerEnabled: boolean;
   circuitBreakerConsecutiveFailureLimit: number;
   circuitBreakerRepeatedToolCallLimit: number;
-  circuitBreakerNoProgressLimit: number;
-  circuitBreakerMaxRuntimeMs: number;
   circuitBreakerTokenBudget: number;
   enableMemory: boolean;
   enableKnowledge: boolean;

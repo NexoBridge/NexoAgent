@@ -11,7 +11,7 @@
       "name": "shell_command",
       "label": "Shell Command",
       "group": "system",
-      "description": "Run a shell command inside the configured workspace. Use this for filesystem inspection, CLI workflows, and scripted operations. Do not run broad recursive scans from drive or system roots unless the user explicitly asks and the path and depth are narrowed.",
+      "description": "Run a shell command inside the configured workspace. Use this for filesystem inspection, CLI workflows, and scripted operations. Git is allowed, but do not run commands that discard uncommitted work, such as git checkout --, git restore, git reset --hard, or git clean, unless the user explicitly asks to restore, reset, discard, or clean those changes. When repairing generated file corruption, preserve unrelated user edits and use targeted edits instead of restoring whole files. Do not run broad recursive scans from drive or system roots unless the user explicitly asks and the path and depth are narrowed.",
       "parameters": {
         "type": "object",
         "properties": {

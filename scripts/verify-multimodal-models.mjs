@@ -132,7 +132,6 @@ const settings = {
   maxContextTurns: 12,
   enableContextCompaction: true,
   contextCompactionThreshold: 24,
-  maxSteps: 20,
   shellCommandTimeoutMs: 300000,
   planningMode: "balanced",
   enableMemory: false,

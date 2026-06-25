@@ -4,7 +4,6 @@ export type TurnStopReason =
   | "completed"
   | "user_interrupt"
   | "circuit_breaker"
-  | "loop_guard"
   | "precondition_failed"
   | "runtime_error";
 

@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import { spawn } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
 import { getOptionalNumberArg, getOptionalStringArg, getStringArg } from "../utils";
 import type { ToolExecutionContext } from "../types";
 import { DEFAULT_AGENT_SETTINGS } from "../settings";
@@ -25,21 +27,69 @@ function trimOutput(value: string) {
 
 function decodeOutput(chunk: Buffer | string) {
   if (typeof chunk === "string") return chunk;
-  return chunk.toString("utf8");
+  const utf8 = chunk.toString("utf8");
+  if (process.platform !== "win32" || !utf8.includes("\uFFFD")) return utf8;
+
+  try {
+    return new TextDecoder("gb18030").decode(chunk);
+  } catch {
+    return utf8;
+  }
 }
 
-function buildSpawnOptions(command: string) {
+function findPowerShellCommandArg(command: string): string | undefined {
+  const match = command.match(
+    /^\s*(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b(?:\s+-(?!Command\b)[A-Za-z]+(?:\s+(?!-)\S+)*)*\s+-Command\s+/i,
+  );
+  if (!match) return undefined;
+
+  const scriptStart = match[0].length;
+  const rawScript = command.slice(scriptStart).trim();
+  if (!rawScript) return undefined;
+
+  const quote = rawScript[0];
+  if ((quote === "\"" || quote === "'") && rawScript.endsWith(quote)) {
+    return rawScript.slice(1, -1);
+  }
+  return rawScript;
+}
+
+function normalizeWindowsCommand(command: string) {
+  const nestedScript = findPowerShellCommandArg(command);
+  if (!nestedScript) return command;
+
+  return nestedScript
+    .replace(/\\"/g, "\"")
+    .replace(/\\'/g, "'");
+}
+
+async function writeWindowsCommandFile(command: string) {
+  const file = path.join(os.tmpdir(), `nexo-shell-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`);
+  const script = [
+    WINDOWS_UTF8_PREAMBLE,
+    normalizeWindowsCommand(command),
+    "",
+  ].join("\r\n");
+
+  // PowerShell 5.1 is more reliable with non-ASCII scripts when UTF-8 has a BOM.
+  await fs.writeFile(file, `\uFEFF${script}`, "utf8");
+  return file;
+}
+
+async function buildSpawnOptions(command: string) {
   if (process.platform === "win32") {
-    const powershellCommand = `${WINDOWS_UTF8_PREAMBLE}; ${command}`;
+    const scriptFile = await writeWindowsCommandFile(command);
     return {
       file: "powershell.exe",
-      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", powershellCommand],
+      args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptFile],
+      cleanupFile: scriptFile,
     };
   }
 
   return {
     file: command,
     args: [] as string[],
+    cleanupFile: undefined,
   };
 }
 
@@ -64,8 +114,9 @@ export async function runShellCommand(args: Record<string, unknown>, ctx: ToolEx
     cwd = target;
   }
 
+  const spawnOptions = await buildSpawnOptions(command);
+
   return new Promise<string>((resolve, reject) => {
-    const spawnOptions = buildSpawnOptions(command);
     const child = spawn(spawnOptions.file, spawnOptions.args, {
       cwd,
       env: { ...process.env },
@@ -93,11 +144,17 @@ export async function runShellCommand(args: Record<string, unknown>, ctx: ToolEx
 
     child.on("error", (error) => {
       clearTimeout(timer);
+      if (spawnOptions.cleanupFile) {
+        void fs.unlink(spawnOptions.cleanupFile).catch(() => undefined);
+      }
       reject(error);
     });
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      if (spawnOptions.cleanupFile) {
+        void fs.unlink(spawnOptions.cleanupFile).catch(() => undefined);
+      }
       const output = [stdout.trim() ? `stdout:\n${trimOutput(stdout)}` : "", stderr.trim() ? `stderr:\n${trimOutput(stderr)}` : ""]
         .filter(Boolean)
         .join("\n\n");

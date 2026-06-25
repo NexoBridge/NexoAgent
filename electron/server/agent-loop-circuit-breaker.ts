@@ -35,7 +35,6 @@ export type CircuitBreakerDecision =
 
 interface CircuitBreakerState {
   consecutiveFailureCount: number;
-  noProgressCount: number;
   accumulatedTokens: number;
   lastFingerprint: string;
   repeatedFingerprintCount: number;
@@ -48,7 +47,6 @@ interface CircuitBreakerState {
 
 const DEFAULT_STATE: CircuitBreakerState = {
   consecutiveFailureCount: 0,
-  noProgressCount: 0,
   accumulatedTokens: 0,
   lastFingerprint: "",
   repeatedFingerprintCount: 0,
@@ -167,9 +165,6 @@ export class AgentLoopCircuitBreaker {
       this.state.repeatedVisibleOutputCount = 0;
     }
 
-    if (normalizeText(turn.visibleText).length > 0) {
-      this.state.noProgressCount = 0;
-    }
   }
 
   recordToolResult(result: CircuitBreakerToolResult) {
@@ -180,7 +175,6 @@ export class AgentLoopCircuitBreaker {
     } else {
       this.state.lastToolExchangeSignature = exchangeSignature;
       this.state.repeatedToolExchangeCount = 1;
-      this.state.noProgressCount = 0;
     }
 
     if (isFailureOutput(result.output)) {
@@ -192,9 +186,6 @@ export class AgentLoopCircuitBreaker {
     if (outputSignature && outputSignature !== this.state.lastUsefulOutputSignature) {
       this.state.lastUsefulOutputSignature = outputSignature;
       this.state.repeatedVisibleOutputCount = 0;
-      this.state.noProgressCount = 0;
-    } else if (this.state.repeatedToolExchangeCount > 1) {
-      this.state.noProgressCount = Math.max(this.state.noProgressCount, this.state.repeatedToolExchangeCount);
     }
   }
 
@@ -224,33 +215,12 @@ export class AgentLoopCircuitBreaker {
       };
     }
 
-    const repeatedToolLimit = Math.max(1, this.settings.circuitBreakerRepeatedToolCallLimit ?? 3);
+    const repeatedToolLimit = Math.max(1, this.settings.circuitBreakerRepeatedToolCallLimit ?? 10);
     if (this.state.repeatedToolExchangeCount >= repeatedToolLimit && this.state.lastToolExchangeSignature) {
       return {
         action: "stop",
         reason: "repeated_tool_calls",
         detail: `Equivalent tool calls with the same output repeated ${this.state.repeatedToolExchangeCount} times without enough progress.`,
-        step,
-      };
-    }
-
-    const noProgressLimit = Math.max(1, this.settings.circuitBreakerNoProgressLimit ?? 4);
-    if (this.state.noProgressCount >= noProgressLimit) {
-      return {
-        action: "stop",
-        reason: "no_progress",
-        detail: `The run made no useful visible progress for ${this.state.noProgressCount} consecutive checks.`,
-        step,
-      };
-    }
-
-    const runtimeLimit = Math.max(1_000, this.settings.circuitBreakerMaxRuntimeMs ?? 600_000);
-    const elapsedMs = Date.now() - this.startedAt;
-    if (elapsedMs >= runtimeLimit) {
-      return {
-        action: "stop",
-        reason: "runtime_limit",
-        detail: `The run exceeded the configured runtime limit of ${runtimeLimit}ms.`,
         step,
       };
     }

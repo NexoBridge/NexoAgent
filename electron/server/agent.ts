@@ -13,6 +13,7 @@ import { extractAndStore, recallMemory } from "../memory";
 import { loadAttachmentContext } from "./attachments";
 import { circuitBreakerInfoFromDecision, createAgentLoopCircuitBreaker } from "./agent-loop-circuit-breaker";
 import { retrieveKnowledgeContext } from "./knowledge";
+import { resolveMemoryEmbeddingSettings } from "./memory-embedding";
 import { resolveAndPersistModelContextBudget, getEnabledModelCapabilitySummary } from "./model-profiles";
 import { callChatCompletion, resolvePrimaryModelConfig, resolveThinkingRequestConfig } from "./model-runtime";
 import { isRunInterrupted } from "./run-control";
@@ -29,7 +30,6 @@ const MISSING_PRIMARY_MODEL_MESSAGE = "No primary model is configured. Go to Set
 const MISSING_API_KEY_MESSAGE = "The current primary model does not have an API key configured. Add one in Settings > Models and try again.";
 const LOOP_GUARD_FALLBACK_MESSAGE = "\n\nThis run entered a repeated loop, so I stopped here for now. The tool results gathered so far are still available. Send \"continue\" if you want me to keep working from the current results.";
 const EMPTY_RESPONSE_FALLBACK_MESSAGE = "I did not produce a valid reply. Please try again, or review the model configuration and retry.";
-const EMERGENCY_TOOL_LOOP_LIMIT = 48;
 const USER_INTERRUPTED_FALLBACK_MESSAGE = "Stopped the current run.";
 
 function buildDoneEvent(
@@ -71,6 +71,8 @@ function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): T
           "Omit timeoutMs to use that default.",
           "Never run broad recursive scans from drive or system roots (for example Get-ChildItem C:\\\\ -Recurse, find /, or du -sh /) unless the user explicitly asks and you can narrow the path and depth.",
           "Prefer targeted directory listings in the relevant project path with a small depth limit instead of full-disk enumeration.",
+          "Git is allowed for inspection and normal workflows, but do not run commands that discard uncommitted work, such as git checkout --, git restore, git reset --hard, or git clean, unless the user explicitly asks to restore, reset, discard, or clean those changes.",
+          "When repairing generated file corruption, preserve unrelated user changes and use targeted edits instead of restoring whole files.",
           "Never run vite/webpack/npm run dev via shell_command. Use build or ask the user to start the dev server.",
         ].join(" "),
       };
@@ -317,6 +319,20 @@ function formatAuxiliarySection(title: string, content: string) {
   return `${title}:\n${content.trim()}`;
 }
 
+function mergeMemoryContext(...contexts: string[]) {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const context of contexts) {
+    for (const line of context.split(/\r?\n/)) {
+      const normalized = line.trim();
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      lines.push(normalized);
+    }
+  }
+  return lines.join("\n");
+}
+
 async function buildBudgetAwareConversationContext(
   settings: AgentSettings,
   session: Session,
@@ -465,16 +481,26 @@ export async function streamFromLLM(
   const budgetConfig = computePromptBudget(settings, resolvedBudget, Math.max(512, enabledToolDefs.length * 180));
 
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const memoryEmbeddingSettings = await resolveMemoryEmbeddingSettings({
+    providerId: primaryConfig.providerId,
+    providerName: settings.providerName,
+    apiKey: effectiveApiKey,
+    apiBase,
+    model: primaryConfig.model,
+    temperature: primaryConfig.temperature,
+  });
   let memoryContext = "";
   if (settings.enableMemory) {
-    memoryContext = await recallMemory(lastUserMsg, {
-      providerId: primaryConfig.providerId,
-      providerName: settings.providerName,
-      apiKey: effectiveApiKey,
-      apiBase,
-      model: primaryConfig.model,
-      temperature: primaryConfig.temperature,
-    });
+    const operationalMemoryQuery = [
+      lastUserMsg,
+      "project path workspace root cwd repository location repo folder client admin management console conventions user preferences",
+      "项目路径 工作区 根目录 当前项目 仓库 管理端 客户端 项目规范 用户偏好",
+    ].join("\n");
+    const [taskMemoryContext, operationalMemoryContext] = await Promise.all([
+      recallMemory(lastUserMsg, memoryEmbeddingSettings, undefined, 6),
+      recallMemory(operationalMemoryQuery, memoryEmbeddingSettings, undefined, 6),
+    ]);
+    memoryContext = mergeMemoryContext(taskMemoryContext, operationalMemoryContext);
   }
   const knowledgeContext = settings.enableKnowledge ? await retrieveKnowledgeContext(lastUserMsg) : "";
   const attachmentContext = await loadAttachmentContext(attachments);
@@ -502,6 +528,9 @@ export async function streamFromLLM(
     "Use shell_command for terminal tasks, filesystem inspection, and command-line workflows.",
     "Never run broad recursive filesystem scans from drive or system roots (for example Get-ChildItem C:\\\\ -Recurse, find /, du -sh /, or tree from C:\\\\ or /) unless the user explicitly requests it and you can narrow the target path and depth.",
     "Prefer targeted listings in the relevant project or workspace directory with a small depth limit instead of full-disk enumeration.",
+    "Before setting shell_command.cwd for a known external project, prefer recalled project paths from memory; if the path is missing or stale, verify nearby candidate directories with a narrow listing.",
+    "Git may be used for status, diff, log, branch, add, commit, and other non-destructive workflows. Do not run commands that discard uncommitted changes, including git checkout --, git restore, git reset --hard, or git clean, unless the user explicitly asks to restore, reset, discard, or clean those changes.",
+    "Before changing files in a dirty worktree, inspect relevant diffs and preserve user edits. To fix generated corruption, apply the smallest targeted patch instead of restoring whole files.",
     "For shell_command: omit timeoutMs to use the configured default script timeout (Settings). Do not pass timeoutMs: 6000 or other short values for npm install, build, or dev commands.",
     "Never use shell_command to start vite, webpack, or npm run dev because those processes do not exit and will block until timeout.",
     "Use write_knowledge to preserve reusable structured knowledge, stable project facts, procedures, or user-provided reference material in the local knowledge base when it will likely help future sessions.",
@@ -643,14 +672,12 @@ export async function streamFromLLM(
   let fullContent = "";
   let promptTokens: number | undefined;
   let completionTokens: number | undefined;
-  const maxSteps = EMERGENCY_TOOL_LOOP_LIMIT;
-  let reachedEmergencyLoopLimit = false;
   let interruptedByUser = false;
   let breakerInfo: ReturnType<typeof circuitBreakerInfoFromDecision> | undefined;
   const circuitBreaker = settings.circuitBreakerEnabled ? createAgentLoopCircuitBreaker(settings) : null;
 
   try {
-    for (let step = 0; step < maxSteps; step++) {
+    for (let step = 0; ; step++) {
       if (isRunInterrupted(requestId)) {
         interruptedByUser = true;
         break;
@@ -798,22 +825,17 @@ export async function streamFromLLM(
       const decision = circuitBreaker?.evaluate();
       if (decision?.action === "stop") {
         breakerInfo = circuitBreakerInfoFromDecision(decision);
-        reachedEmergencyLoopLimit = false;
         break;
-      }
-
-      if (step === maxSteps - 1) {
-        reachedEmergencyLoopLimit = true;
       }
     }
 
-    if (!interruptedByUser && (reachedEmergencyLoopLimit || breakerInfo)) {
+    if (!interruptedByUser && breakerInfo) {
       const finalStream = await llmNoTools.stream([
         ...lcMessages,
         new SystemMessage(
           breakerInfo
             ? `The run was stopped by the circuit breaker (${breakerInfo.reason}: ${breakerInfo.detail}). Do not call tools. Based on the available tool results, give the user a concise final response in their language. If work is incomplete, say exactly what remains.`
-            : "The run hit the internal emergency loop guard. Do not call tools. Based on the available tool results, give the user a concise final response in their language. If work is incomplete, say exactly what remains."
+            : "Do not call tools. Based on the available tool results, give the user a concise final response in their language. If work is incomplete, say exactly what remains."
         ),
       ]);
       let finalContent = "";
@@ -871,7 +893,7 @@ export async function streamFromLLM(
       : fullContent || EMPTY_RESPONSE_FALLBACK_MESSAGE,
     status: interruptedByUser
       ? "interrupted"
-      : (breakerInfo || reachedEmergencyLoopLimit)
+      : breakerInfo
         ? "needs_input"
         : "completed",
     usage: { promptTokens, completionTokens },
@@ -879,9 +901,7 @@ export async function streamFromLLM(
       ? { stopReason: "user_interrupt" as const }
       : breakerInfo
         ? { stopReason: "circuit_breaker" as const, circuitBreaker: breakerInfo }
-        : reachedEmergencyLoopLimit
-          ? { stopReason: "loop_guard" as const }
-          : { stopReason: "completed" as const }),
+        : { stopReason: "completed" as const }),
     contextBudget: {
       contextWindowTokens: budgetConfig.contextWindowTokens,
       maxInputTokens: budgetConfig.maxInputTokens,
@@ -911,6 +931,14 @@ export async function extractMemoryAfterChat(
   const embeddingProviderName = normalizeServiceProviderName("", primaryConfig.apiBase, primaryConfig.providerId)
     || normalizeServiceProviderName(settings.providerName, primaryConfig.apiBase, primaryConfig.providerId)
     || getDefaultServiceProviderName(primaryConfig.providerId);
+  const memoryEmbeddingSettings = await resolveMemoryEmbeddingSettings({
+    providerId: primaryConfig.providerId,
+    providerName: embeddingProviderName,
+    apiKey: primaryConfig.apiKey || fallbackApiKey,
+    apiBase: primaryConfig.apiBase,
+    model: primaryConfig.model,
+    temperature: primaryConfig.temperature,
+  });
 
   const durableMemoryInstruction = [
     "Extract only durable memory candidates.",
@@ -951,14 +979,7 @@ export async function extractMemoryAfterChat(
     },
     {
       model: primaryConfig.model,
-      embeddingSettings: {
-        providerId: primaryConfig.providerId,
-        providerName: embeddingProviderName,
-        apiKey: primaryConfig.apiKey || fallbackApiKey,
-        apiBase: primaryConfig.apiBase,
-        model: primaryConfig.model,
-        temperature: primaryConfig.temperature,
-      },
+      embeddingSettings: memoryEmbeddingSettings,
     }
   );
 }

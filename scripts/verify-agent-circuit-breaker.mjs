@@ -67,39 +67,7 @@ function makeBreaker(overrides = {}, startedAt = Date.now()) {
 }
 
 {
-  const breaker = makeBreaker({ circuitBreakerNoProgressLimit: 2 });
-  breaker.recordModelTurn({
-    step: 1,
-    visibleText: "",
-    toolCalls: [{ name: "invoke_model", args: { prompt: "again" } }],
-  });
-  breaker.recordToolResult({
-    name: "invoke_model",
-    args: { prompt: "again" },
-    output: "",
-    elapsedSeconds: 0.1,
-  });
-  breaker.recordModelTurn({
-    step: 2,
-    visibleText: "",
-    toolCalls: [{ name: "invoke_model", args: { prompt: "again" } }],
-  });
-  breaker.recordToolResult({
-    name: "invoke_model",
-    args: { prompt: "again" },
-    output: "",
-    elapsedSeconds: 0.1,
-  });
-  const decision = breaker.evaluate();
-  assert.equal(decision.action, "stop");
-  if (decision.action === "stop") {
-    assert.equal(decision.reason, "no_progress");
-  }
-}
-
-{
   const breaker = makeBreaker({
-    circuitBreakerNoProgressLimit: 2,
     circuitBreakerRepeatedToolCallLimit: 2,
   });
   for (const [index, command] of ["write-a", "write-b", "write-c"].entries()) {
@@ -117,20 +85,6 @@ function makeBreaker(overrides = {}, startedAt = Date.now()) {
   }
   const decision = breaker.evaluate();
   assert.equal(decision.action, "continue");
-}
-
-{
-  const breaker = makeBreaker({ circuitBreakerMaxRuntimeMs: 1000 }, Date.now() - 2000);
-  breaker.recordModelTurn({
-    step: 1,
-    visibleText: "working",
-    toolCalls: [],
-  });
-  const decision = breaker.evaluate();
-  assert.equal(decision.action, "stop");
-  if (decision.action === "stop") {
-    assert.equal(decision.reason, "runtime_limit");
-  }
 }
 
 {

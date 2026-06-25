@@ -3,6 +3,7 @@ import path from "node:path";
 import { isMemoryKind, recallMemory, type MemoryKind } from "../../memory";
 import { KNOWLEDGE_DIR } from "../config";
 import { MAX_FILE_WRITE_BYTES } from "../knowledge";
+import { resolveMemoryEmbeddingSettings } from "../memory-embedding";
 import type { ToolExecutionContext } from "../types";
 import { getOptionalNumberArg, getOptionalStringArg, getStringArg, resolveDataPath } from "../utils";
 import { invokeModel } from "./model-call";
@@ -119,14 +120,15 @@ export const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
     const kinds = readMemoryKinds(args.kinds ?? args.kind);
     const dayKey = getOptionalStringArg(args, "dayKey") || getOptionalStringArg(args, "day_key");
     const k = getOptionalNumberArg(args, "k", 6);
-    const result = await recallMemory(query, {
+    const embeddingSettings = await resolveMemoryEmbeddingSettings({
       providerId: ctx.settings.providerId,
       providerName: ctx.settings.providerName,
       apiKey: ctx.apiKey,
       apiBase: ctx.apiBase,
       model: ctx.settings.model,
       temperature: ctx.settings.temperature,
-    }, undefined, k, kinds, dayKey || undefined);
+    });
+    const result = await recallMemory(query, embeddingSettings, undefined, k, kinds, dayKey || undefined);
     return result || "No relevant memory found.";
   },
 };

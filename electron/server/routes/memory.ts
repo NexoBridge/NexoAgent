@@ -10,6 +10,7 @@ import {
   normalizeDayKey,
 } from "../../memory";
 import { getDefaultServiceProviderName, normalizeServiceProviderName } from "../../../src/shared/providers";
+import { resolveMemoryEmbeddingSettings } from "../memory-embedding";
 import { resolvePrimaryModelConfig } from "../model-runtime";
 import { getWebSettings } from "../settings";
 import { buildRuntimeSettings } from "../settings";
@@ -31,20 +32,21 @@ export function registerMemoryRoutes(app: Application, ctx: ServerContext) {
       || getDefaultServiceProviderName(providerId);
     const model = primaryConfig?.model || webSettings.model || "gpt-4o-mini";
     const resolvedApiKey = primaryConfig?.apiKey || apiKey;
+    const embeddingSettings = await resolveMemoryEmbeddingSettings({
+      providerId,
+      providerName,
+      apiKey: resolvedApiKey,
+      apiBase,
+      model,
+      temperature: primaryConfig?.temperature ?? webSettings.temperature ?? 0,
+    });
     return {
       providerId,
       providerName,
       apiKey: resolvedApiKey,
       apiBase,
       model,
-      embeddingSettings: {
-        providerId,
-        providerName,
-        apiKey: resolvedApiKey,
-        apiBase,
-        model,
-        temperature: primaryConfig?.temperature ?? webSettings.temperature ?? 0,
-      },
+      embeddingSettings,
     };
   };
 

@@ -31,10 +31,12 @@ import {
   MEMORY_JSON_FILE,
   MEMORY_MD_FILE,
 } from "./server/config";
+import { serverLog } from "./server/logger";
 const MEMORY_SCHEMA_VERSION = 3;
 const CHROMA_COLLECTION = "nexo_memories";
 const DREAM_DEBOUNCE_MS = 1200;
 const EMBEDDING_TIMEOUT_MS = 8000;
+const CHROMA_BACKFILL_BATCH_SIZE = 50;
 
 export type MemoryKind = "daily" | "dream" | "script";
 
@@ -241,6 +243,46 @@ function queueAllMemoriesForChromaBackfill() {
   }
 }
 
+async function getChromaMemoryIds(runtime: ChromaRuntime): Promise<Set<string>> {
+  const ids = new Set<string>();
+  const pageSize = 500;
+  let offset = 0;
+  while (true) {
+    const page = await runtime.collection.get({ limit: pageSize, offset, include: [] });
+    for (const id of page.ids ?? []) {
+      ids.add(String(id));
+    }
+    if ((page.ids?.length ?? 0) < pageSize) break;
+    offset += pageSize;
+  }
+  return ids;
+}
+
+async function queueMissingChromaBackfill() {
+  try {
+    const runtime = await getChromaRuntime();
+    if (!runtime) {
+      queueAllMemoriesForChromaBackfill();
+      serverLog("WARN Chroma unavailable while checking memory vector backfill; queued all memories.");
+      return;
+    }
+    const existingIds = await getChromaMemoryIds(runtime);
+    let missing = 0;
+    for (const entry of allRows()) {
+      if (!existingIds.has(entry.id)) {
+        pendingChromaUpserts.add(entry.id);
+        missing += 1;
+      }
+    }
+    if (missing) {
+      serverLog(`INFO Queued ${missing} missing Chroma memory vectors for backfill.`);
+    }
+  } catch (error) {
+    queueAllMemoriesForChromaBackfill();
+    serverLog(`WARN Failed to inspect Chroma memory vectors; queued all memories. ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function createSchema(database: Database) {
   database.run(`
     CREATE TABLE IF NOT EXISTS memories (
@@ -314,6 +356,7 @@ export async function loadMemory() {
     }
     db.run("PRAGMA foreign_keys = ON;");
     await ensureSchema(db);
+    await queueMissingChromaBackfill();
     await writeMemoryMarkdown();
   })();
   return dbReady;
@@ -611,7 +654,10 @@ async function embedText(
 ) {
   const config = resolvedConfig ?? await resolveEmbeddingConfig(settings);
   if (!config) return null;
-  const vectors = await requestEmbeddings([text], config, purpose).catch(() => null);
+  const vectors = await requestEmbeddings([text], config, purpose).catch((error) => {
+    serverLog(`WARN ${config.providerName} embedding request failed for ${purpose}: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  });
   return vectors?.[0] ?? null;
 }
 
@@ -643,6 +689,17 @@ function chromaBindingPackage() {
   return null;
 }
 
+function resolveChromaBindingModule(bindingPackage: string) {
+  for (const candidate of [bindingPackage, `chromadb/node_modules/${bindingPackage}`]) {
+    try {
+      return require.resolve(candidate);
+    } catch {
+      // Try the next package layout.
+    }
+  }
+  return bindingPackage;
+}
+
 async function waitForChroma(client: ChromaClient) {
   const started = Date.now();
   let lastError: unknown;
@@ -662,9 +719,10 @@ async function startLocalChromaServer(port: number): Promise<ChildProcess | unde
   if (!(await isPortFree(port))) return undefined;
   const bindingPackage = chromaBindingPackage();
   if (!bindingPackage) return undefined;
+  const bindingModule = resolveChromaBindingModule(bindingPackage);
   await fs.mkdir(CHROMA_DIR, { recursive: true });
   const script = [
-    `const binding = require(${JSON.stringify(bindingPackage)});`,
+    `const binding = require(${JSON.stringify(bindingModule)});`,
     `binding.cli(${JSON.stringify(["chroma", "run", "--path", CHROMA_DIR, "--host", "127.0.0.1", "--port", String(port)])});`,
   ].join("\n");
   const child = spawn(process.execPath, ["-e", script], {
@@ -703,8 +761,9 @@ async function getChromaRuntime(): Promise<ChromaRuntime | null> {
         metadata: { source: "nexo-agent" },
       });
       return { client, collection, process: child, port };
-    } catch {
+    } catch (error) {
       chromaUnavailable = true;
+      serverLog(`ERROR Failed to initialize Chroma runtime: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   })();
@@ -726,17 +785,20 @@ async function upsertChromaMemory(memory: MemoryEntry, settings: MemoryEmbedding
   const config = await resolveEmbeddingConfig(settings);
   if (!config) {
     pendingChromaUpserts.add(memory.id);
+    serverLog(`WARN Skipped Chroma upsert for memory ${memory.id}: no embedding config.`);
     return false;
   }
   try {
     const vector = await embedText(memory.content, settings, "retrieval_document", config);
     if (!vector?.length) {
       pendingChromaUpserts.add(memory.id);
+      serverLog(`WARN Skipped Chroma upsert for memory ${memory.id}: embedding request returned no vector.`);
       return false;
     }
     const runtime = await getChromaRuntime();
     if (!runtime) {
       pendingChromaUpserts.add(memory.id);
+      serverLog(`WARN Skipped Chroma upsert for memory ${memory.id}: Chroma runtime unavailable.`);
       return false;
     }
     await runtime.collection.upsert({
@@ -747,8 +809,9 @@ async function upsertChromaMemory(memory: MemoryEntry, settings: MemoryEmbedding
     });
     pendingChromaUpserts.delete(memory.id);
     return true;
-  } catch {
+  } catch (error) {
     pendingChromaUpserts.add(memory.id);
+    serverLog(`ERROR Failed to upsert Chroma memory ${memory.id}: ${error instanceof Error ? error.message : String(error)}`);
     return false;
   }
 }
@@ -782,7 +845,7 @@ async function wipeChromaCollection() {
 
 async function backfillPendingChroma(settings: MemoryEmbeddingSettings = {}) {
   if (pendingChromaUpserts.size === 0) return;
-  const ids = Array.from(pendingChromaUpserts).slice(0, 20);
+  const ids = Array.from(pendingChromaUpserts).slice(0, CHROMA_BACKFILL_BATCH_SIZE);
   for (const id of ids) {
     const memory = getMemoryById(id);
     if (memory) await upsertChromaMemory(memory, settings);
@@ -862,13 +925,25 @@ export async function searchMemories(
   const recallOptions = typeof settingsOrApiKey === "string"
     ? options
     : (typeof apiBaseOrOptions === "string" ? options : apiBaseOrOptions ?? options);
+  const k = recallOptions.k ?? 6;
+  const merged: MemoryEntry[] = [];
+  const seen = new Set<string>();
+  const addEntries = (entries: MemoryEntry[] | null | undefined) => {
+    for (const entry of entries ?? []) {
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      merged.push(entry);
+    }
+  };
+
   try {
     const semantic = await semanticSearchEntries(query, memorySettings, recallOptions);
-    if (semantic?.length) return semantic;
+    addEntries(semantic);
   } catch {
     // Fall through to SQLite.
   }
-  return fallbackRank(query, recallOptions);
+  addEntries(fallbackRank(query, { ...recallOptions, k }));
+  return merged.slice(0, k);
 }
 
 export async function recallMemory(
