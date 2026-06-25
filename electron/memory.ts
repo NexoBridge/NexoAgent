@@ -37,6 +37,7 @@ const CHROMA_COLLECTION = "nexo_memories";
 const DREAM_DEBOUNCE_MS = 1200;
 const EMBEDDING_TIMEOUT_MS = 8000;
 const CHROMA_BACKFILL_BATCH_SIZE = 50;
+const CHROMA_RETRY_DELAY_MS = 30_000;
 
 export type MemoryKind = "daily" | "dream" | "script";
 
@@ -96,6 +97,9 @@ let dbReady: Promise<void> | null = null;
 let writeQueue = Promise.resolve();
 let chromaRuntime: Promise<ChromaRuntime | null> | null = null;
 let chromaUnavailable = false;
+let chromaRetryAt = 0;
+let chromaStartupStdout = "";
+let chromaStartupStderr = "";
 const pendingChromaUpserts = new Set<string>();
 const dreamTimers = new Map<string, NodeJS.Timeout>();
 const chromaChildren = new Set<ChildProcess>();
@@ -721,14 +725,30 @@ async function startLocalChromaServer(port: number): Promise<ChildProcess | unde
   if (!bindingPackage) return undefined;
   const bindingModule = resolveChromaBindingModule(bindingPackage);
   await fs.mkdir(CHROMA_DIR, { recursive: true });
+  chromaStartupStdout = "";
+  chromaStartupStderr = "";
+  const appendLimited = (current: string, chunk: string, limit = 6000) => {
+    const next = current + chunk;
+    return next.length > limit ? next.slice(-limit) : next;
+  };
   const script = [
     `const binding = require(${JSON.stringify(bindingModule)});`,
     `binding.cli(${JSON.stringify(["chroma", "run", "--path", CHROMA_DIR, "--host", "127.0.0.1", "--port", String(port)])});`,
   ].join("\n");
   const child = spawn(process.execPath, ["-e", script], {
     cwd: process.cwd(),
-    stdio: "ignore",
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: "1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
+  });
+  child.stdout?.on("data", (chunk) => {
+    chromaStartupStdout = appendLimited(chromaStartupStdout, chunk.toString("utf8"));
+  });
+  child.stderr?.on("data", (chunk) => {
+    chromaStartupStderr = appendLimited(chromaStartupStderr, chunk.toString("utf8"));
   });
   chromaChildren.add(child);
   child.once("exit", () => chromaChildren.delete(child));
@@ -746,9 +766,11 @@ async function startLocalChromaServer(port: number): Promise<ChildProcess | unde
 }
 
 async function getChromaRuntime(): Promise<ChromaRuntime | null> {
-  if (chromaUnavailable) return null;
   if (chromaRuntime) return chromaRuntime;
-  chromaRuntime = (async () => {
+  if (chromaUnavailable && Date.now() < chromaRetryAt) return null;
+  chromaUnavailable = false;
+  chromaRetryAt = 0;
+  const runtimePromise = (async () => {
     try {
       await fs.mkdir(CHROMA_DIR, { recursive: true });
       const port = await findFreePort();
@@ -763,11 +785,18 @@ async function getChromaRuntime(): Promise<ChromaRuntime | null> {
       return { client, collection, process: child, port };
     } catch (error) {
       chromaUnavailable = true;
-      serverLog(`ERROR Failed to initialize Chroma runtime: ${error instanceof Error ? error.message : String(error)}`);
+      chromaRetryAt = Date.now() + CHROMA_RETRY_DELAY_MS;
+      const diagnostics = [chromaStartupStdout.trim(), chromaStartupStderr.trim()].filter(Boolean).join("\n");
+      const detail = error instanceof Error ? error.message : String(error);
+      serverLog(
+        `ERROR Failed to initialize Chroma runtime: ${detail}${diagnostics ? `\nChroma startup output:\n${diagnostics}` : ""}`
+      );
+      chromaRuntime = null;
       return null;
     }
   })();
-  return chromaRuntime;
+  chromaRuntime = runtimePromise;
+  return runtimePromise;
 }
 
 function toChromaMetadata(memory: MemoryEntry): Metadata {

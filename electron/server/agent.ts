@@ -31,6 +31,12 @@ const MISSING_API_KEY_MESSAGE = "The current primary model does not have an API 
 const LOOP_GUARD_FALLBACK_MESSAGE = "\n\nThis run entered a repeated loop, so I stopped here for now. The tool results gathered so far are still available. Send \"continue\" if you want me to keep working from the current results.";
 const EMPTY_RESPONSE_FALLBACK_MESSAGE = "I did not produce a valid reply. Please try again, or review the model configuration and retry.";
 const USER_INTERRUPTED_FALLBACK_MESSAGE = "Stopped the current run.";
+const CONTEXT_COMPACTION_NOTICE = [
+  "\u5df2\u63a5\u8fd1\u4e0a\u4e0b\u6587\u4e0a\u9650\uff0c\u6211\u5df2\u5c06\u8f83\u65e9\u7684\u5f53\u524d\u4f1a\u8bdd\u5185\u5bb9\u538b\u7f29\u6210\u6458\u8981\uff1b\u63a5\u4e0b\u6765\u4f1a\u7ee7\u7eed\u57fa\u4e8e\u538b\u7f29\u6458\u8981\u3001\u5f53\u524d\u4f1a\u8bdd\u5c3e\u90e8\u548c\u957f\u671f\u8bb0\u5fc6\u5de5\u4f5c\u3002",
+  "",
+  "---",
+  "",
+].join("\n");
 
 function buildDoneEvent(
   requestId: string,
@@ -294,6 +300,19 @@ function buildCompactionTranscript(messages: ChatMessage[], maxChars = 28_000) {
   return selected.join("\n\n");
 }
 
+function formatCurrentSessionContextForRecall(session: Session, maxChars = 28_000) {
+  const conversationMessages = session.messages.filter((message) => message.role !== "system");
+  const transcript = buildCompactionTranscript(conversationMessages, maxChars);
+  return [
+    session.threadSummary?.trim()
+      ? `Compressed earlier current-session context:\n${session.threadSummary.trim()}`
+      : "",
+    transcript
+      ? `Current-session transcript:\n${transcript}`
+      : "",
+  ].filter(Boolean).join("\n\n");
+}
+
 function fallbackCompactMessages(messages: ChatMessage[]) {
   const transcript = buildCompactionTranscript(messages, 7000);
   return [
@@ -342,8 +361,8 @@ async function buildBudgetAwareConversationContext(
 ) {
   const conversationMessages = session.messages.filter((message) => message.role !== "system");
   const recentWindow = normalizePositiveInteger(settings.maxContextTurns, 12);
-  let recentMessages = conversationMessages.slice(-recentWindow);
-  let olderMessages = conversationMessages.slice(0, Math.max(0, conversationMessages.length - recentMessages.length));
+  let recentMessages = [...conversationMessages];
+  let olderMessages: ChatMessage[] = [];
   let threadSummary = session.threadSummary?.trim() ?? "";
   let compacted = false;
   let passes = 0;
@@ -355,24 +374,20 @@ async function buildBudgetAwareConversationContext(
 
   while (
     settings.enableContextCompaction
-    && (estimateTotal() >= budgetConfig.autoCompactTokenLimit || (passes === 0 && olderMessages.length > 0 && conversationMessages.length > Math.max(recentWindow + 1, settings.contextCompactionThreshold)))
+    && estimateTotal() >= budgetConfig.autoCompactTokenLimit
     && passes < 4
   ) {
-    const summaryInput = olderMessages.length > 0
-      ? olderMessages
-      : recentMessages.slice(0, Math.max(0, recentMessages.length - Math.max(2, Math.floor(recentWindow / 2))));
+    const targetRawTurns = Math.max(2, Math.min(recentWindow, Math.floor(recentMessages.length / 2)));
+    olderMessages = recentMessages.slice(0, Math.max(0, recentMessages.length - targetRawTurns));
+    const summaryInput = olderMessages.length > 0 ? olderMessages : recentMessages.slice(0, Math.max(0, recentMessages.length - 2));
     if (!summaryInput.length) break;
 
     const nextSummary = await compactOlderMessages(summaryInput, summarize);
     threadSummary = [threadSummary, nextSummary].filter(Boolean).join("\n\n");
     compacted = true;
     passes += 1;
-
-    if (olderMessages.length > 0) {
-      olderMessages = [];
-    } else {
-      recentMessages = recentMessages.slice(-Math.max(2, Math.floor(recentWindow / 2)));
-    }
+    recentMessages = recentMessages.slice(-Math.max(2, Math.min(recentWindow, recentMessages.length - summaryInput.length)));
+    olderMessages = [];
 
     while (estimateTotal() > budgetConfig.compactionTargetTokens && recentMessages.length > 2) {
       const shifted = recentMessages.shift();
@@ -481,6 +496,13 @@ export async function streamFromLLM(
   const budgetConfig = computePromptBudget(settings, resolvedBudget, Math.max(512, enabledToolDefs.length * 180));
 
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const currentSessionContext = formatCurrentSessionContextForRecall(session);
+  const currentSessionMemoryQuery = [
+    "Current user message:",
+    lastUserMsg,
+    "Current-session context, authoritative for resolving omitted references and current targets:",
+    currentSessionContext,
+  ].filter((part) => part.trim()).join("\n\n");
   const memoryEmbeddingSettings = await resolveMemoryEmbeddingSettings({
     providerId: primaryConfig.providerId,
     providerName: settings.providerName,
@@ -492,12 +514,12 @@ export async function streamFromLLM(
   let memoryContext = "";
   if (settings.enableMemory) {
     const operationalMemoryQuery = [
-      lastUserMsg,
+      currentSessionMemoryQuery || lastUserMsg,
       "project path workspace root cwd repository location repo folder client admin management console conventions user preferences",
       "项目路径 工作区 根目录 当前项目 仓库 管理端 客户端 项目规范 用户偏好",
     ].join("\n");
     const [taskMemoryContext, operationalMemoryContext] = await Promise.all([
-      recallMemory(lastUserMsg, memoryEmbeddingSettings, undefined, 6),
+      recallMemory(currentSessionMemoryQuery || lastUserMsg, memoryEmbeddingSettings, undefined, 6),
       recallMemory(operationalMemoryQuery, memoryEmbeddingSettings, undefined, 6),
     ]);
     memoryContext = mergeMemoryContext(taskMemoryContext, operationalMemoryContext);
@@ -523,6 +545,8 @@ export async function streamFromLLM(
     `Planning mode: ${settings.planningMode}.`,
     "If a tool loop starts repeating the same visible response without producing fresh progress, stop calling tools and give the best final answer from the current results.",
     `Default shell_command cwd when omitted: ${getWorkspaceRoot(settings)}.`,
+    "Context priority: current user message and the current session transcript are authoritative for resolving omitted references, targets, surfaces, and project context. Current-session compressed summaries come next. Recalled memories, knowledge notes, and skills are background only; ignore them whenever they conflict with or would change the target implied by the current session.",
+    "When the current session established a target such as admin, client, server, management console, or a specific page, keep using that target for follow-up requests unless the user explicitly switches it.",
     "Use tools when they are helpful.",
     "Never write DSML/XML-like tool call tags in the user-visible response. Use the provided tool-calling interface only.",
     "Use shell_command for terminal tasks, filesystem inspection, and command-line workflows.",
@@ -595,6 +619,10 @@ export async function streamFromLLM(
     ...conversationContext.messages,
   ];
   let turnSnapshotCreated = false;
+  const compactionNotice = conversationContext.compacted ? CONTEXT_COMPACTION_NOTICE : "";
+  if (compactionNotice) {
+    pushEvent(requestId, { type: "token", content: compactionNotice });
+  }
 
   if (primaryConfig.providerId === "anthropic-compatible") {
     try {
@@ -615,10 +643,11 @@ export async function streamFromLLM(
       for (const char of result.content) {
         pushEvent(requestId, { type: "token", content: char });
       }
+      const finalContent = `${compactionNotice}${result.content}`;
       const doneEvent: Extract<StreamEvent, { type: "done" }> = {
         type: "done",
         hasSnapshot: turnSnapshotCreated,
-        content: result.content,
+        content: finalContent,
         status: "completed",
         stopReason: "completed",
         usage: {
@@ -669,7 +698,7 @@ export async function streamFromLLM(
     capabilitySummary,
   };
 
-  let fullContent = "";
+  let fullContent = compactionNotice;
   let promptTokens: number | undefined;
   let completionTokens: number | undefined;
   let interruptedByUser = false;
