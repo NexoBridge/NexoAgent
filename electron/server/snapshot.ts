@@ -15,7 +15,11 @@ const TEXT_EXTENSIONS = new Set([
 const SKIP_DIRS = new Set([
   "node_modules", ".git", ".nexo-data", "dist", "dist-electron",
   ".vite-cache", "__pycache__", ".venv", "venv", ".next", ".nuxt",
-  "build", "coverage", ".turbo", ".cache",
+  "build", "coverage", ".turbo", ".cache", "release",
+]);
+
+const SKIP_FILE_NAMES = new Set([
+  "LICENSES.chromium.html",
 ]);
 
 const KNOWN_NAMES = new Set([
@@ -43,6 +47,10 @@ function shouldSkipDir(dirname: string): boolean {
   return SKIP_DIRS.has(dirname);
 }
 
+function shouldSkipFile(filePath: string): boolean {
+  return SKIP_FILE_NAMES.has(path.basename(filePath));
+}
+
 async function collectTextFiles(root: string): Promise<string[]> {
   const result: string[] = [];
   const stack: string[] = [root];
@@ -61,7 +69,7 @@ async function collectTextFiles(root: string): Promise<string[]> {
         if (!shouldSkipDir(entry.name)) {
           stack.push(fullPath);
         }
-      } else if (entry.isFile() && isTextFile(fullPath)) {
+      } else if (entry.isFile() && isTextFile(fullPath) && !shouldSkipFile(fullPath)) {
         result.push(fullPath);
         if (result.length >= MAX_SNAPSHOT_FILES) break;
       }

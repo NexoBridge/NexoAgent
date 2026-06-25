@@ -234,10 +234,11 @@ export async function resolveModelConfigFromArgs(
   }
 
   if (capability) {
-    const profile = await findStoredModelProfileByCapability(capability, {
-      providerId: ctx.settings.providerId,
-      apiBase: ctx.apiBase,
-    })
+    const scopedCapabilities: ModelCapability[] = ["orchestration", "chat"];
+    const scope = scopedCapabilities.includes(capability)
+      ? { providerId: ctx.settings.providerId, apiBase: ctx.apiBase }
+      : undefined;
+    const profile = await findStoredModelProfileByCapability(capability, scope)
       ?? (capability === "chat" ? await findStoredModelProfileByCapability("orchestration") : null);
     if (profile) {
       const budget = await resolveStoredModelContextBudget({ profile, settings: ctx.settings });
