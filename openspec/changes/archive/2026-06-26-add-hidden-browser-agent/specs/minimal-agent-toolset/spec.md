@@ -1,8 +1,5 @@
-# minimal-agent-toolset Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change streamline-agent-tools. Update Purpose after archive.
-## Requirements
 ### Requirement: Reduced Built-in Tool Catalog
 系统 SHALL 暴露一个精简的内置 Agent 工具目录，包含 `shell_command`、`invoke_model`、`recall_memory`、`write_knowledge` 以及范围收窄的 `browser_action`；通过 `invoke_model` 路由多模态专业工作；并从默认运行时中移除不相关的专用文件、HTTP、技能、定时任务、计算器和旧版多模态工具。
 
@@ -22,26 +19,3 @@ TBD - created by archiving change streamline-agent-tools. Update Purpose after a
 - **当** 工具注册表加载 `browser_action` 时
 - **则** 该工具应当被描述为交互式浏览器操作工具
 - **并且** 不应当被描述为通用 HTTP、Web 搜索、文件、技能或定时任务工具
-
-### Requirement: Shell Command as Primary Operational Surface
-The system SHALL treat `shell_command` as the primary built-in operational tool for filesystem and command-line workflows after dedicated file and HTTP tools are removed.
-
-#### Scenario: Operational prompt guidance prefers shell command
-- **WHEN** the orchestrator prompt is assembled for a chat request
-- **THEN** it SHALL instruct the model to use `shell_command` for general operational tasks instead of removed utility tools
-
-#### Scenario: Removed operational tools are not suggested
-- **WHEN** the runtime builds prompt guidance or tool descriptions
-- **THEN** it SHALL not instruct the model to use removed file, HTTP, skills, or scheduled-task tools
-
-### Requirement: Backward-Compatible Tool Settings Loading
-The system SHALL tolerate existing saved tool settings that reference removed tools and normalize them to the reduced runtime.
-
-#### Scenario: Saved settings contain removed tool names
-- **WHEN** the runtime loads a saved enabled-tools list created before tool reduction
-- **THEN** removed tool names SHALL be ignored and the normalized settings SHALL continue loading successfully
-
-#### Scenario: Normalized settings are persisted
-- **WHEN** the runtime detects removed or unknown tool names in saved settings
-- **THEN** it SHALL persist an updated enabled-tools list containing only supported tool names
-

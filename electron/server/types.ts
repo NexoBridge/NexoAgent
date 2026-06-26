@@ -18,6 +18,7 @@ export type StreamEvent =
       usage?: { promptTokens?: number; completionTokens?: number };
       stopReason?: TurnStopReason;
       hasSnapshot?: boolean;
+      attachments?: ChatAttachment[];
       circuitBreaker?: {
         reason: string;
         detail: string;

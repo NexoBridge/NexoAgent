@@ -7,6 +7,7 @@ import { createExpressApp } from "./server/index";
 import { applyAgentSettings } from "./server/settings";
 import { DATA_DIR, SETTINGS_FILE } from "./server/config";
 import { cleanupOldSnapshots } from "./server/snapshot";
+import { browserManager } from "./server/browser-manager";
 import {
   getDefaultServiceProviderName,
   getProviderDefaultApiBase,
@@ -336,6 +337,7 @@ function createWindow() {
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
   });
+  browserManager.setMainWindow(mainWindow);
 
   mainWindow.on("maximize", () => {
     mainWindow?.webContents.send("window:maximized-changed", true);
@@ -343,6 +345,10 @@ function createWindow() {
 
   mainWindow.on("unmaximize", () => {
     mainWindow?.webContents.send("window:maximized-changed", false);
+  });
+  mainWindow.on("closed", () => {
+    browserManager.setMainWindow(null);
+    mainWindow = null;
   });
 
   if (process.platform !== "darwin") {
@@ -440,6 +446,19 @@ ipcMain.handle("runtime:info", (): RuntimeInfo => ({
   userDataPath: DATA_DIR,
   webBaseUrl: getDesktopAppUrl(),
 }));
+ipcMain.handle("browser:open-workbench", async () => {
+  await browserManager.openWorkbench();
+});
+ipcMain.handle("browser:close-workbench", async () => {
+  await browserManager.closeWorkbench();
+});
+ipcMain.handle("browser:set-bounds", async (_event, bounds: Partial<{ x: number; y: number; width: number; height: number }>) => {
+  browserManager.syncWindowBounds(bounds);
+});
+ipcMain.handle("browser:set-zoom", async (_event, mode: "in" | "out" | "reset") => browserManager.setZoom(mode));
+ipcMain.handle("browser:get-state", async () => browserManager.getState());
+ipcMain.handle("browser:action", async (_event, request) => browserManager.executeAction(request));
+ipcMain.handle("browser:pick-element", async () => browserManager.pickElement());
 
 ipcMain.handle("settings:load", loadSettings);
 ipcMain.handle("settings:save", async (_event, settings: AgentSettings) => {
@@ -510,5 +529,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("will-quit", () => {
+  browserManager.destroy();
   globalShortcut.unregisterAll();
 });

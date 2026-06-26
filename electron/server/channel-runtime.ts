@@ -169,6 +169,7 @@ export async function runChannelMessage(message: IncomingChannelMessage, getStor
     content: reply,
     createdAt: new Date().toISOString(),
     status: doneEvent.status,
+    attachments: doneEvent.attachments ?? [],
   });
   session.updatedAt = new Date().toISOString();
 

@@ -8,7 +8,7 @@ import {
   providerConnectionAllowsEmptyApiKey,
   resolveProviderSdkApiKey,
 } from "../../src/shared/providers";
-import type { AgentSettings, ChatMessage } from "../../src/shared/types";
+import type { AgentSettings, ChatMessage, ConversationSurface } from "../../src/shared/types";
 import { extractAndStore, recallMemory } from "../memory";
 import { loadAttachmentContext } from "./attachments";
 import { circuitBreakerInfoFromDecision, createAgentLoopCircuitBreaker } from "./agent-loop-circuit-breaker";
@@ -71,6 +71,42 @@ function buildOpenAIThinkingCallOptions(settings: AgentSettings, model: string):
     : {};
 }
 
+function buildBrowserSurfacePrompt(surface: ConversationSurface) {
+  const common = [
+    "Browser capability:",
+    "- The shared browser exists to support the current conversation. Do not describe it as a standalone product feature, workbench, or separate agent.",
+    "- Use browser_action for interactive web browsing, page inspection, and web app operation in the shared browser session.",
+    "- When the user refers to the current page, this page, what is on screen, or a website already opened in the shared browser, use browser_action against that shared session.",
+    "- Do not use browser_action as a generic HTTP client, crawler, search API, or file access tool.",
+    "- For normal page controls such as buttons, links, inputs, menus, and form submission, use the elements returned by the latest browser_action result first. If a needed control is not present, refs may be stale, or the user names it fuzzily, call action=resolve with a concise query and then click/type the returned ref.",
+    "- The browser DOM resolver is browser-only and uses local all-MiniLM-L6-v2 semantic matching fused with DOM rules. Prefer it for fuzzy control descriptions instead of screenshot or vision.",
+    "- Do not use screenshots, vision models, shell_command, PowerShell, or OS-level mouse/keyboard automation to locate or operate ordinary DOM controls when browser_action elements/refs can do it.",
+    "- Before click/type when element refs are stale or unknown, call browser_action with action=snapshot or action=resolve.",
+    "- After click/type/navigation, treat URL, loading, navigation flags, title, text, and elements together as the page state. If navigation changed but text looks transitional, sparse, or stale, do not claim the action failed; request a fresh snapshot or continue from the updated URL.",
+    "- Before typing passwords, tokens, payment data, or other sensitive values, confirm that the user explicitly requested that exact action.",
+  ];
+
+  const chatOnly = [
+    "Chat-only browser posture:",
+    "- The user is mainly in the conversation and cannot rely on seeing the browser state.",
+    "- Act as an analyst or researcher: use the browser in the background to gather evidence, inspect interactive pages, or complete web workflows, then bring the result back as a self-contained answer.",
+    "- Use screenshots when visual state matters, layout must be verified, images/charts are relevant, or the user asks to see/show/inspect the page; screenshot artifacts are attached to the assistant response automatically.",
+    "- Do not ask the user to watch the hidden browser. Summarize the relevant page state, what you did, and what remains.",
+  ];
+
+  const visibleBrowser = [
+    "Visible-browser posture:",
+    "- The conversation is embedded beside a browser page that the user can see.",
+    "- Act as a browser co-pilot and page operator: prefer direct action on the visible current page for navigation, clicking, typing, searching, form work, comparison, and inspection tasks.",
+    "- When asked to press a visible labeled or fuzzily described control such as Send, Submit, Search, Save, or Next, look for the matching element name/text in the browser_action elements list or call action=resolve, then click its ref. Screenshot-based visual localization is a fallback only after DOM resolver refs fail.",
+    "- Keep narration short around obvious page actions. After acting, say what changed, what you found, or what input you need next.",
+    "- Use screenshots only when the user asks to capture/show/send the page, visual evidence must be preserved in the conversation, or the state cannot be conveyed reliably from the text snapshot.",
+    "- If the user says to continue, click, type, search, go back, inspect, or otherwise refers to the visible page, treat the current browser state as primary context.",
+  ];
+
+  return [...common, ...(surface === "browser" ? visibleBrowser : chatOnly)].join("\n");
+}
+
 function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): ToolDef[] {
   return tools.map((tool) => {
     if (tool.name === "shell_command") {
@@ -96,6 +132,23 @@ function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): T
         description: [
           tool.description,
           'Use capability="vision" for image analysis, "image_generation" for text-to-image, "image_editing" for image edits, "speech_to_text" for transcription, and "text_to_speech" for spoken audio generation.',
+        ].join(" "),
+      };
+    }
+    if (tool.name === "browser_action") {
+      return {
+        ...tool,
+        description: [
+          tool.description,
+          "Use only for interactive browser navigation, page inspection, and web app control inside the current conversation.",
+          "The browser session is shared with the conversation UI; do not present it as a separate standalone product feature.",
+          "Do not use it as a general HTTP request tool, search tool, or file access tool.",
+          "For buttons, links, inputs, menus, and form submission, prefer snapshot or resolve elements and click/type returned refs before considering screenshots or vision.",
+          "Use action=resolve with query for fuzzy control names; the browser-only resolver uses local all-MiniLM-L6-v2 semantic matching plus DOM rules and does not affect memory or knowledge retrieval.",
+          "Do not use shell commands, PowerShell, or OS-level mouse/keyboard automation to operate ordinary browser UI controls.",
+          "When visual state matters or the user asks to see the current page, call action=screenshot; screenshot artifacts are attached to the assistant response automatically.",
+          "Before typing passwords, tokens, or other sensitive values, make sure the user explicitly asked for that action.",
+          "If the element reference is stale, request a fresh snapshot before retrying.",
         ].join(" "),
       };
     }
@@ -279,6 +332,119 @@ function trimForPrompt(text: string, maxChars: number) {
   return `${clean.slice(0, half)}\n...[truncated]...\n${clean.slice(-half)}`;
 }
 
+function browserScreenshotAttachmentFromToolResult(
+  name: string,
+  args: Record<string, unknown>,
+  output: string,
+): ChatAttachment | null {
+  if (name !== "browser_action" || args.action !== "screenshot") return null;
+  try {
+    const parsed = JSON.parse(output) as {
+      artifact?: {
+        url?: string;
+        name?: string;
+        type?: string;
+        mimeType?: string;
+        size?: number;
+      };
+    };
+    const artifact = parsed.artifact;
+    if (!artifact?.url || !artifact.name) return null;
+    return {
+      url: artifact.url,
+      name: artifact.name,
+      type: artifact.type === "audio" || artifact.type === "file" ? artifact.type : "image",
+      mimeType: artifact.mimeType,
+      size: artifact.size,
+      source: "generated",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function textFromUnknown(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function isVisionCapability(args: Record<string, unknown>) {
+  const capability = String(args.capability ?? "").toLowerCase();
+  return capability === "vision" || capability === "image" || capability === "image_analysis";
+}
+
+function looksLikeDomControlLocalization(text: string) {
+  const lower = text.toLowerCase();
+  const controlWords = [
+    "button", "按钮", "控件", "链接", "link", "input", "输入框", "文本框", "菜单", "menu",
+    "发送", "写信", "提交", "登录", "搜索", "保存", "下一步", "继续", "send", "submit", "compose", "search", "save", "next",
+  ];
+  const operationWords = [
+    "click", "press", "type", "定位", "找到", "查找", "点击", "按", "输入", "填写", "触发", "operate",
+  ];
+  const visualWords = [
+    "图像", "图片", "照片", "canvas", "chart", "图表", "地图", "视觉检查", "截图给用户", "capture for user",
+  ];
+  return controlWords.some((word) => lower.includes(word.toLowerCase()))
+    && operationWords.some((word) => lower.includes(word.toLowerCase()))
+    && !visualWords.some((word) => lower.includes(word.toLowerCase()));
+}
+
+function inferResolveQuery(text: string) {
+  const candidates = ["写信", "发送", "提交", "搜索", "登录", "保存", "下一步", "继续", "收件人", "主题", "正文"];
+  const hit = candidates.find((candidate) => text.includes(candidate));
+  if (hit) return ["收件人", "主题", "正文"].includes(hit) ? hit : `${hit}按钮`;
+  const quoted = text.match(/["“']([^"”']{1,24})["”']/)?.[1]?.trim();
+  return quoted || "目标控件";
+}
+
+function browserDomFirstRedirect(
+  toolName: string,
+  args: Record<string, unknown>,
+  contextText: string,
+  hasResolveAttempt: boolean,
+) {
+  const combined = [
+    contextText,
+    textFromUnknown(args.prompt),
+    textFromUnknown(args.system),
+    textFromUnknown(args.query),
+    textFromUnknown(args.text),
+  ].join("\n");
+  if (!looksLikeDomControlLocalization(combined) || hasResolveAttempt) return "";
+
+  if (toolName === "browser_action" && args.action === "screenshot") {
+    const query = inferResolveQuery(combined);
+    return [
+      "DOM-first guard: screenshot is not allowed yet for ordinary browser control localization.",
+      `Call browser_action with action="resolve", query="${query}", and role="button" or the appropriate role, then click/type the returned ref.`,
+      "Use screenshot or vision only after resolve returns low confidence/needsDisambiguation, or for image/canvas/chart/layout tasks.",
+    ].join(" ");
+  }
+
+  if (toolName === "invoke_model" && isVisionCapability(args)) {
+    const query = inferResolveQuery(combined);
+    return [
+      "DOM-first guard: vision model calls are not allowed yet for ordinary browser control localization.",
+      `Call browser_action with action="resolve", query="${query}", and role="button" or the appropriate role, then click/type the returned ref.`,
+      "Use vision only after resolve fails or for genuinely visual content such as images, canvas, charts, or layout inspection.",
+    ].join(" ");
+  }
+
+  return "";
+}
+
+function appendUniqueAttachment(attachments: ChatAttachment[], attachment: ChatAttachment | null) {
+  if (!attachment) return;
+  if (attachments.some((item) => item.url === attachment.url)) return;
+  attachments.push(attachment);
+}
+
 function formatMessageForCompaction(message: ChatMessage, index: number) {
   const role = message.role === "assistant" ? "Assistant" : "User";
   const attachmentText = message.attachments?.length
@@ -437,6 +603,7 @@ export async function streamFromLLM(
   storedApiKey: string,
   attachments: ChatAttachment[] = [],
   turnId: string = "",
+  surface: ConversationSurface = "chat",
 ): Promise<Extract<StreamEvent, { type: "done" }>> {
   const messages = session.messages;
   const webSettings = getWebSettings();
@@ -559,6 +726,7 @@ export async function streamFromLLM(
     "Use tools when they are helpful.",
     "Never write DSML/XML-like tool call tags in the user-visible response. Use the provided tool-calling interface only.",
     "Use shell_command for terminal tasks, filesystem inspection, and command-line workflows.",
+    buildBrowserSurfacePrompt(surface),
     "Never run broad recursive filesystem scans from drive or system roots (for example Get-ChildItem C:\\\\ -Recurse, find /, du -sh /, or tree from C:\\\\ or /) unless the user explicitly requests it and you can narrow the target path and depth.",
     "Prefer targeted listings in the relevant project or workspace directory with a small depth limit instead of full-disk enumeration.",
     "Before setting shell_command.cwd for a known external project, prefer recalled project paths from memory; if the path is missing or stale, verify nearby candidate directories with a narrow listing.",
@@ -707,6 +875,8 @@ export async function streamFromLLM(
   let fullContent = compactionNotice;
   let promptTokens: number | undefined;
   let completionTokens: number | undefined;
+  const assistantAttachments: ChatAttachment[] = [];
+  let browserResolveAttempted = false;
   let interruptedByUser = false;
   let breakerInfo: ReturnType<typeof circuitBreakerInfoFromDecision> | undefined;
   const circuitBreaker = settings.circuitBreakerEnabled ? createAgentLoopCircuitBreaker(settings) : null;
@@ -822,13 +992,30 @@ export async function streamFromLLM(
         const t0 = Date.now();
         let output: string;
         try {
-          output = toolFn
-            ? await toolFn.execute(parsedArgs, toolCtx)
-            : `Tool is not enabled or unknown: ${tc.name}`;
+          const domFirstRedirect = browserDomFirstRedirect(
+            tc.name,
+            parsedArgs,
+            [lastUserMsg, turnContent, fullContent].join("\n"),
+            browserResolveAttempted,
+          );
+          if (domFirstRedirect) {
+            output = domFirstRedirect;
+          } else {
+            output = toolFn
+              ? await toolFn.execute(parsedArgs, toolCtx)
+              : `Tool is not enabled or unknown: ${tc.name}`;
+          }
         } catch (error) {
           output = `Error: ${toErrorMessage(error)}`;
         }
+        if (tc.name === "browser_action" && parsedArgs.action === "resolve") {
+          browserResolveAttempted = true;
+        }
         const elapsed = (Date.now() - t0) / 1000;
+        appendUniqueAttachment(
+          assistantAttachments,
+          browserScreenshotAttachmentFromToolResult(tc.name, parsedArgs, String(output)),
+        );
 
         pushEvent(requestId, { type: "tool_result", id: tc.id, output: String(output), elapsed });
         circuitBreaker?.recordToolResult({
@@ -917,6 +1104,7 @@ export async function streamFromLLM(
       content: interruptedByUser || isRunInterrupted(requestId) ? interruptedContent(fullContent) : toErrorMessage(error),
       status: interruptedByUser || isRunInterrupted(requestId) ? "interrupted" : "failed",
       stopReason: interruptedByUser || isRunInterrupted(requestId) ? "user_interrupt" : "runtime_error",
+      attachments: assistantAttachments.length ? assistantAttachments : undefined,
     });
   }
 
@@ -932,6 +1120,7 @@ export async function streamFromLLM(
         ? "needs_input"
         : "completed",
     usage: { promptTokens, completionTokens },
+    attachments: assistantAttachments.length ? assistantAttachments : undefined,
     ...(interruptedByUser
       ? { stopReason: "user_interrupt" as const }
       : breakerInfo

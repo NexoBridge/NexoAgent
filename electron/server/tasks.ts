@@ -95,6 +95,7 @@ export async function executeTask(task: ScheduledTask, getStoredApiKey: () => st
     content: doneEvent.content,
     createdAt: new Date().toISOString(),
     status: doneEvent.status,
+    attachments: doneEvent.attachments ?? [],
   });
   session.updatedAt = new Date().toISOString();
   task.lastRun = session.updatedAt;

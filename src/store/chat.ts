@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { v4 as uuid } from "uuid";
 import { message as antdMessage } from "antd";
-import type { AgentSettings, Attachment as ChatAttachment, ChatMessage } from "../shared/types";
+import type { AgentSettings, Attachment as ChatAttachment, ChatMessage, ConversationSurface } from "../shared/types";
 import { apiDelete, apiGet, apiPatch, apiPost, getRuntimeApiBase, setRuntimeApiBase, subscribeStream } from "../services/api";
 import { sanitizeApiKeyForSave } from "../shared/settings";
 import type { DesktopApi } from "../shared/desktop";
@@ -33,6 +33,10 @@ export type MessageBlock =
 
 export type MessageBlocks = Record<string, MessageBlock[]>;
 
+interface SendMessageOptions {
+  surface?: ConversationSurface;
+}
+
 interface ChatStore {
   sessions: SessionMeta[];
   activeSessionId: string | null;
@@ -48,7 +52,7 @@ interface ChatStore {
   selectSession: (id: string) => Promise<void>;
   deleteSession: (id: string) => Promise<void>;
   renameSession: (id: string, title: string) => Promise<void>;
-  sendMessage: (content: string, attachments?: Attachment[]) => Promise<void>;
+  sendMessage: (content: string, attachments?: Attachment[], options?: SendMessageOptions) => Promise<void>;
   cancelStream: () => void;
   undoAssistantMessage: (messageId: string) => Promise<void>;
   loadSettings: () => Promise<void>;
@@ -256,7 +260,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
       set((state) => ({ sessions: state.sessions.map((session) => (session.id === id ? { ...session, title } : session)) }));
     },
 
-    sendMessage: async (content, attachments) => {
+    sendMessage: async (content, attachments, options) => {
       let { activeSessionId, settings } = get();
       if (!activeSessionId) {
         await get().newSession();
@@ -290,6 +294,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
           message: content,
           settings,
           attachments: attachments || [],
+          surface: options?.surface ?? "chat",
         });
         requestId = response.requestId;
         if (response.turnId && response.turnId !== assistantId) {
@@ -413,11 +418,21 @@ export const useChatStore = create<ChatStore>((set, get) => {
         if (event.type === "done") {
           flushPendingTokens();
           const status = String(event.status ?? "completed") as ChatMessage["status"];
+          const responseAttachments = Array.isArray(event.attachments)
+            ? (event.attachments as ChatAttachment[])
+            : [];
           set((state) => ({
             streaming: false,
             cancelStream: () => {},
             messages: state.messages.map((message) =>
-              message.id === serverTurnId ? { ...message, content: full || (event.content as string), status } : message
+              message.id === serverTurnId
+                ? {
+                    ...message,
+                    content: full || (event.content as string),
+                    status,
+                    attachments: responseAttachments.length ? responseAttachments : message.attachments,
+                  }
+                : message
             ),
           }));
           const snap = (event as any).hasSnapshot;

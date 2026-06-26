@@ -4,7 +4,8 @@
     "shell_command",
     "invoke_model",
     "recall_memory",
-    "store_script_memory"
+    "store_script_memory",
+    "browser_action"
   ],
   "tools": [
     {
@@ -190,6 +191,35 @@
           "key",
           "content"
         ]
+      }
+    },
+    {
+      "name": "browser_action",
+      "label": "Browser Action",
+      "group": "extension",
+      "description": "Operate the shared Electron browser session for conversational web browsing and web app control. Use only when the task explicitly involves navigating a website, checking a page, or interacting with a web app in the current conversation. Do not present it as a standalone feature, and do not use it for general HTTP requests, web search, file access, or credentialless automation. For buttons, links, inputs, menus, and form submission, prefer snapshot or resolve elements and click/type returned refs before considering screenshots or vision. Use action=resolve with query for fuzzy control names; the browser-only DOM resolver uses local all-MiniLM-L6-v2 semantic matching plus DOM rules. Do not use shell commands, PowerShell, or OS-level mouse/keyboard automation to operate ordinary browser UI controls. When visual state matters or the user asks to see the current page, call action=screenshot so the runtime can attach the screenshot to the assistant response. Before typing sensitive data or submitting forms, confirm the user intends that action. Always snapshot or resolve first when you need fresh element references.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": ["snapshot", "resolve", "navigate", "click", "type", "scroll", "screenshot", "refresh", "back", "forward"]
+          },
+          "url": { "type": "string" },
+          "ref": { "type": "string", "description": "Element ref returned by the latest snapshot or browser action result. Use this for click/type." },
+          "query": { "type": "string", "description": "Natural-language element query for action=resolve, or for click/type when ref is not available." },
+          "role": { "type": "string", "description": "Optional role hint for resolve, such as button, link, or textbox." },
+          "text": { "type": "string", "description": "Text to type for action=type." },
+          "submit": { "type": "boolean" },
+          "direction": {
+            "type": "string",
+            "enum": ["up", "down", "left", "right"]
+          },
+          "amount": { "type": "number" },
+          "limit": { "type": "number", "description": "Maximum resolve candidates to return." },
+          "minConfidence": { "type": "number", "description": "Minimum resolver confidence for query-based click/type." }
+        },
+        "required": ["action"]
       }
     }
   ]

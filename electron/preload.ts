@@ -1,5 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { AgentSettings, RuntimeInfo } from "../src/shared/types";
+import type {
+  AgentSettings,
+  BrowserActionRequest,
+  BrowserActionResponse,
+  BrowserBounds,
+  BrowserElementPickResult,
+  BrowserState,
+  RuntimeInfo,
+} from "../src/shared/types";
 import type { DesktopApi, DesktopThemeMode } from "../src/shared/desktop";
 
 const desktopApi: DesktopApi = {
@@ -14,9 +22,24 @@ const desktopApi: DesktopApi = {
   unmaximizeWindow: (): Promise<void> => ipcRenderer.invoke("window:unmaximize"),
   closeWindow: (): Promise<void> => ipcRenderer.invoke("window:close"),
   isWindowMaximized: (): Promise<boolean> => ipcRenderer.invoke("window:isMaximized"),
+  openBrowserWorkbench: (): Promise<void> => ipcRenderer.invoke("browser:open-workbench"),
+  closeBrowserWorkbench: (): Promise<void> => ipcRenderer.invoke("browser:close-workbench"),
+  setBrowserBounds: (bounds: Partial<BrowserBounds>): Promise<void> => ipcRenderer.invoke("browser:set-bounds", bounds),
+  setBrowserZoom: (mode: "in" | "out" | "reset"): Promise<BrowserState> => ipcRenderer.invoke("browser:set-zoom", mode),
+  getBrowserState: (): Promise<BrowserState> => ipcRenderer.invoke("browser:get-state"),
+  browserAction: (request: BrowserActionRequest): Promise<BrowserActionResponse> => ipcRenderer.invoke("browser:action", request),
+  pickBrowserElement: (): Promise<BrowserElementPickResult> => ipcRenderer.invoke("browser:pick-element"),
   onWindowMaximizedChange: (listener) => {
     const channel = "window:maximized-changed";
     const wrapped = (_event: unknown, maximized: boolean) => listener(maximized);
+    ipcRenderer.on(channel, wrapped);
+    return () => {
+      ipcRenderer.removeListener(channel, wrapped);
+    };
+  },
+  onBrowserStateChange: (listener) => {
+    const channel = "browser:state-changed";
+    const wrapped = (_event: unknown, state: BrowserState) => listener(state);
     ipcRenderer.on(channel, wrapped);
     return () => {
       ipcRenderer.removeListener(channel, wrapped);

@@ -5,13 +5,18 @@ import { uploadFiles } from "./upload";
 import { useChatStore } from "../../store/chat";
 import { useTheme } from "../../theme";
 import { useI18n } from "../../i18n";
-import type { Attachment } from "../../shared/types";
+import type { Attachment, ConversationSurface } from "../../shared/types";
 
 function hasDraggedFiles(dataTransfer?: DataTransfer | null) {
   return Array.from(dataTransfer?.types ?? []).includes("Files");
 }
 
-export const ChatPanel: React.FC = () => {
+interface ChatPanelProps {
+  surface?: ConversationSurface;
+  externalFillValue?: { text: string; ts: number } | null;
+}
+
+export const ChatPanel: React.FC<ChatPanelProps> = ({ surface = "chat", externalFillValue = null }) => {
   const { streaming, sendMessage, cancelStream } = useChatStore();
   const { colors, mode } = useTheme();
   const { t } = useI18n();
@@ -35,6 +40,16 @@ export const ChatPanel: React.FC = () => {
       window.removeEventListener("drop", preventWindowFileDrop);
     };
   }, []);
+
+  useEffect(() => {
+    if (!externalFillValue?.text) return;
+    setFillValue({
+      text: inputText.trim()
+        ? `${inputText.trimEnd()}\n\n${externalFillValue.text}`
+        : externalFillValue.text,
+      ts: externalFillValue.ts,
+    });
+  }, [externalFillValue]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleUploadFiles(files: File[]) {
     if (files.length === 0) return;
@@ -100,7 +115,7 @@ export const ChatPanel: React.FC = () => {
       />
       <InputBar
         onSend={(content, messageAttachments) => {
-          void sendMessage(content, messageAttachments);
+          void sendMessage(content, messageAttachments, { surface });
           setAttachments([]);
         }}
         attachments={attachments}

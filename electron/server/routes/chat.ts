@@ -1,6 +1,6 @@
 import type { Application } from "express";
 import { randomUUID } from "node:crypto";
-import type { AgentSettings } from "../../../src/shared/types";
+import type { AgentSettings, ConversationSurface } from "../../../src/shared/types";
 import { extractMemoryAfterChat, streamFromLLM } from "../agent";
 import { getLatestSnapshotTurnId, getSnapshotMeta, restoreSnapshot } from "../snapshot";
 import { clearRun, interruptRun, registerRun } from "../run-control";
@@ -14,6 +14,10 @@ function findAssistantMessageIndexById(messages: Array<{ id: string; role: strin
   return messages.findIndex((message) => message.role === "assistant" && message.id === messageId);
 }
 
+function normalizeConversationSurface(value: unknown): ConversationSurface {
+  return value === "browser" ? "browser" : "chat";
+}
+
 export function registerChatRoutes(app: Application, ctx: ServerContext) {
   app.post("/api/chat/:requestId/interrupt", async (req, res) => {
     interruptRun(req.params.requestId);
@@ -22,13 +26,15 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
 
   app.post("/api/chat", async (req, res) => {
     await ensureSessionsLoaded();
-    const { sessionId, message, settings, attachments } = req.body as {
+    const { sessionId, message, settings, attachments, surface } = req.body as {
       sessionId: string;
       message: string;
       settings: AgentSettings;
       attachments?: ChatAttachment[];
+      surface?: ConversationSurface;
     };
     const messageAttachments = attachments ?? [];
+    const conversationSurface = normalizeConversationSurface(surface);
 
     let session = getSessionsMap().get(sessionId);
     if (!session) {
@@ -58,7 +64,7 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
     const runtimeSettings = buildRuntimeSettings(settings ?? {});
     const sessionRef = session;
 
-    void streamFromLLM(runtimeSettings, sessionRef, requestId, ctx.getStoredApiKey(), messageAttachments, turnId)
+    void streamFromLLM(runtimeSettings, sessionRef, requestId, ctx.getStoredApiKey(), messageAttachments, turnId, conversationSurface)
       .then(async (doneEvent) => {
         sessionRef.messages.push({
           id: turnId,
@@ -66,6 +72,7 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
           content: doneEvent.content,
           createdAt: new Date().toISOString(),
           status: doneEvent.status,
+          attachments: doneEvent.attachments ?? [],
         });
         sessionRef.updatedAt = new Date().toISOString();
         void saveSessionsToDisk();

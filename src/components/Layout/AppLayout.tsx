@@ -28,6 +28,7 @@ import Tasks from "../Tasks";
 import Logs from "../Logs";
 import { Channels } from "../Channels";
 import { Settings } from "../Settings";
+import BrowserWorkbench from "../BrowserWorkbench";
 import { useChatStore } from "../../store/chat";
 import { useTheme } from "../../theme";
 import { useI18n } from "../../i18n";
@@ -42,7 +43,7 @@ const DEFAULT_SESSION_SIDER_WIDTH = 280;
 const MAX_SESSION_SIDER_WIDTH = 520;
 const DEFAULT_EXPANDED_SESSION_SIDER_WIDTH = 340;
 
-type View = "chat" | "memory" | "knowledge" | "tools" | "skills" | "tasks" | "logs" | "channels" | "settings";
+type View = "chat" | "browser" | "memory" | "knowledge" | "tools" | "skills" | "tasks" | "logs" | "channels" | "settings";
 
 export const AppLayout: React.FC = () => {
   const [view, setView] = useState<View>("chat");
@@ -344,6 +345,7 @@ export const AppLayout: React.FC = () => {
           /> */}
 
           {navItem("chat", <MessageOutlined />, t("chat"))}
+          {navItem("browser", <GlobalOutlined />, t("browserWorkbench"))}
 
           <Divider style={{ margin: "4px 0", borderColor: colors.border, minWidth: 36, width: 36 }} />
 
@@ -413,6 +415,7 @@ export const AppLayout: React.FC = () => {
 
       <Content style={{ display: "flex", flexDirection: "column", overflow: "auto", background: colors.bgPrimary }}>
         {view === "chat" && <ChatPanel />}
+        {view === "browser" && <BrowserWorkbench />}
         {view === "memory" && <MemoryPanel />}
         {view === "knowledge" && <Knowledge />}
         {view === "tools" && <Tools />}

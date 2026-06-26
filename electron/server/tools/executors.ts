@@ -1,4 +1,5 @@
 import { isMemoryKind, recallMemory, storeScriptMemory, type MemoryKind } from "../../memory";
+import { browserManager } from "../browser-manager";
 import { resolveMemoryEmbeddingSettings } from "../memory-embedding";
 import type { ToolExecutionContext } from "../types";
 import { getOptionalNumberArg, getOptionalStringArg, getStringArg } from "../utils";
@@ -42,9 +43,31 @@ function readMetadata(value: unknown): Record<string, unknown> | undefined {
   }
 }
 
+function formatBrowserResult(result: Awaited<ReturnType<typeof browserManager.executeAction>>) {
+  return JSON.stringify(result, null, 2);
+}
+
 export const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
   invoke_model: async (args, ctx) => invokeModel(args, ctx),
   shell_command: async (args, ctx) => runShellCommand(args, ctx),
+  browser_action: async (args) => {
+    const limit = args.limit === undefined ? undefined : getOptionalNumberArg(args, "limit", 5);
+    const minConfidence = args.minConfidence === undefined ? undefined : getOptionalNumberArg(args, "minConfidence", 0.82);
+    const result = await browserManager.executeAction({
+      action: getStringArg(args, "action") as Parameters<typeof browserManager.executeAction>[0]["action"],
+      url: getOptionalStringArg(args, "url"),
+      ref: getOptionalStringArg(args, "ref"),
+      query: getOptionalStringArg(args, "query"),
+      role: getOptionalStringArg(args, "role"),
+      text: getOptionalStringArg(args, "text"),
+      submit: Boolean(args.submit),
+      direction: getOptionalStringArg(args, "direction", "down") as "up" | "down" | "left" | "right",
+      amount: getOptionalNumberArg(args, "amount", 720),
+      limit,
+      minConfidence,
+    });
+    return formatBrowserResult(result);
+  },
   recall_memory: async (args, ctx) => {
     const query = getStringArg(args, "query", ["q"]);
     const kinds = readMemoryKinds(args.kinds ?? args.kind);

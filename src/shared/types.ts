@@ -1,4 +1,5 @@
 export type RuntimeSurface = "desktop" | "web";
+export type ConversationSurface = "chat" | "browser";
 
 export type ProviderId =
   | "openai-compatible"
@@ -102,6 +103,165 @@ export interface RuntimeInfo {
   version: string;
   userDataPath?: string;
   webBaseUrl?: string;
+}
+
+export type BrowserAction =
+  | "snapshot"
+  | "resolve"
+  | "navigate"
+  | "click"
+  | "type"
+  | "scroll"
+  | "screenshot"
+  | "refresh"
+  | "back"
+  | "forward";
+
+export interface BrowserBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface BrowserElementSnapshot {
+  ref: string;
+  tag: string;
+  role?: string;
+  name: string;
+  text?: string;
+  value?: string;
+  type?: string;
+  href?: string;
+  editable?: boolean;
+  disabled?: boolean;
+  checked?: boolean;
+  selected?: boolean;
+  bounds?: BrowserBounds;
+}
+
+export interface BrowserElementDescriptor extends BrowserElementSnapshot {
+  ariaLabel?: string;
+  label?: string;
+  title?: string;
+  placeholder?: string;
+  identity?: string;
+  heading?: string;
+  context?: string;
+  nearbyText?: string;
+  descriptorText?: string;
+  visible?: boolean;
+  enabled?: boolean;
+}
+
+export interface BrowserResolveCandidate extends BrowserElementDescriptor {
+  confidence: number;
+  lexicalScore: number;
+  semanticScore?: number;
+  roleScore: number;
+  contextScore: number;
+  stateScore: number;
+  reasons: string[];
+}
+
+export interface BrowserResolveResult {
+  query: string;
+  candidates: BrowserResolveCandidate[];
+  semanticModel: "Xenova/all-MiniLM-L6-v2";
+  semanticReady: boolean;
+  semanticPending?: boolean;
+  semanticError?: string;
+  needsDisambiguation?: boolean;
+  needsVisionFallback?: boolean;
+  strictActionMismatch?: boolean;
+  selectedRef?: string;
+  minConfidence: number;
+}
+
+export interface BrowserState {
+  url: string;
+  title: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  presentation: "hidden" | "workbench";
+  zoomFactor?: number;
+  history?: BrowserHistoryEntry[];
+  elements: BrowserElementSnapshot[];
+  resolve?: BrowserResolveResult;
+  text: string;
+  lastAction?: BrowserAction;
+  warning?: string;
+  error?: string;
+}
+
+export interface BrowserHistoryEntry {
+  url: string;
+  title: string;
+  timestamp: string;
+  action: BrowserAction;
+}
+
+export interface BrowserArtifact {
+  url: string;
+  path: string;
+  name: string;
+  type: string;
+  mimeType: string;
+  size: number;
+}
+
+export interface BrowserInteractionResult {
+  action: BrowserAction;
+  ref?: string;
+  query?: string;
+  strategy?: string;
+  bounds?: BrowserBounds;
+  x?: number;
+  y?: number;
+  fallbackX?: number;
+  fallbackY?: number;
+}
+
+export interface BrowserPickedElement {
+  tag: string;
+  role?: string;
+  name: string;
+  text?: string;
+  value?: string;
+  type?: string;
+  href?: string;
+  editable?: boolean;
+  selector?: string;
+  bounds?: BrowserBounds;
+}
+
+export interface BrowserElementPickResult {
+  ok: boolean;
+  url: string;
+  title: string;
+  element?: BrowserPickedElement;
+  error?: string;
+}
+
+export interface BrowserActionRequest {
+  action: BrowserAction;
+  url?: string;
+  ref?: string;
+  query?: string;
+  role?: string;
+  text?: string;
+  submit?: boolean;
+  direction?: "up" | "down" | "left" | "right";
+  amount?: number;
+  limit?: number;
+  minConfidence?: number;
+}
+
+export interface BrowserActionResponse extends BrowserState {
+  ok: boolean;
+  artifact?: BrowserArtifact;
+  interaction?: BrowserInteractionResult;
 }
 
 export type ChatRole = "system" | "user" | "assistant";
