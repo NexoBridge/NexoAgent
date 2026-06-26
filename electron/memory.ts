@@ -701,15 +701,64 @@ function chromaBindingPackage() {
   return null;
 }
 
-function resolveChromaBindingModule(bindingPackage: string) {
+function asarUnpackedPath(candidate: string) {
+  const marker = `${path.sep}app.asar${path.sep}`;
+  if (!candidate.includes(marker)) return candidate;
+  const unpacked = candidate.replace(marker, `${path.sep}app.asar.unpacked${path.sep}`);
+  return fsSync.existsSync(unpacked) ? unpacked : candidate;
+}
+
+function findPackageRoot(packageName: string) {
+  try {
+    let dir = path.dirname(require.resolve(packageName));
+    while (dir && dir !== path.dirname(dir)) {
+      const manifest = path.join(dir, "package.json");
+      try {
+        const parsed = JSON.parse(fsSync.readFileSync(manifest, "utf8")) as { name?: string };
+        if (parsed.name === packageName) return dir;
+      } catch {
+        // Keep walking upward.
+      }
+      dir = path.dirname(dir);
+    }
+  } catch {
+    // Caller will try other layouts.
+  }
+  return null;
+}
+
+function chromaBindingNativeFile(bindingPackage: string) {
+  return `${bindingPackage.replace(/^chromadb-js-bindings-/, "chromadb-js-bindings.")}.node`;
+}
+
+function resolveChromaBindingModule(bindingPackage: string): string | null {
+  const candidates: string[] = [];
   for (const candidate of [bindingPackage, `chromadb/node_modules/${bindingPackage}`]) {
     try {
-      return require.resolve(candidate);
+      candidates.push(require.resolve(candidate));
     } catch {
       // Try the next package layout.
     }
   }
-  return bindingPackage;
+
+  const chromaRoot = findPackageRoot("chromadb");
+  if (chromaRoot) {
+    candidates.push(path.join(chromaRoot, "node_modules", bindingPackage, chromaBindingNativeFile(bindingPackage)));
+  }
+
+  const appRoot = path.resolve(__dirname, "..", "..");
+  candidates.push(
+    path.join(appRoot, "node_modules", bindingPackage, chromaBindingNativeFile(bindingPackage)),
+    path.join(appRoot, "node_modules", "chromadb", "node_modules", bindingPackage, chromaBindingNativeFile(bindingPackage)),
+  );
+
+  for (const candidate of candidates) {
+    const resolved = asarUnpackedPath(candidate);
+    if (fsSync.existsSync(resolved)) return resolved;
+  }
+
+  serverLog(`ERROR Chroma binding package not found. package=${bindingPackage} candidates=${candidates.map(asarUnpackedPath).join("; ")}`);
+  return null;
 }
 
 async function waitForChroma(client: ChromaClient) {
@@ -727,11 +776,18 @@ async function waitForChroma(client: ChromaClient) {
   throw lastError instanceof Error ? lastError : new Error("Chroma did not become ready.");
 }
 
-async function startLocalChromaServer(port: number): Promise<ChildProcess | undefined> {
-  if (!(await isPortFree(port))) return undefined;
+async function startLocalChromaServer(port: number): Promise<ChildProcess> {
+  if (!(await isPortFree(port))) {
+    throw new Error(`Selected Chroma port ${port} is no longer free.`);
+  }
   const bindingPackage = chromaBindingPackage();
-  if (!bindingPackage) return undefined;
+  if (!bindingPackage) {
+    throw new Error(`No Chroma native binding package is defined for ${process.platform}/${process.arch}.`);
+  }
   const bindingModule = resolveChromaBindingModule(bindingPackage);
+  if (!bindingModule) {
+    throw new Error(`Unable to resolve Chroma native binding package ${bindingPackage}.`);
+  }
   await fs.mkdir(CHROMA_DIR, { recursive: true });
   chromaStartupStdout = "";
   chromaStartupStderr = "";
@@ -740,9 +796,25 @@ async function startLocalChromaServer(port: number): Promise<ChildProcess | unde
     return next.length > limit ? next.slice(-limit) : next;
   };
   const script = [
+    `process.on("uncaughtException", (error) => { console.error(error && error.stack ? error.stack : error); process.exit(1); });`,
     `const binding = require(${JSON.stringify(bindingModule)});`,
+    `if (!binding || typeof binding.cli !== "function") throw new Error("Chroma native binding does not expose cli().");`,
     `binding.cli(${JSON.stringify(["chroma", "run", "--path", CHROMA_DIR, "--host", "127.0.0.1", "--port", String(port)])});`,
   ].join("\n");
+  serverLog(
+    [
+      "INFO Starting local Chroma server.",
+      `port=${port}`,
+      `bindingPackage=${bindingPackage}`,
+      `bindingModule=${bindingModule}`,
+      `dataDir=${CHROMA_DIR}`,
+      `execPath=${process.execPath}`,
+      `resourcesPath=${(process as NodeJS.Process & { resourcesPath?: string }).resourcesPath || ""}`,
+      `cwd=${process.cwd()}`,
+      `node=${process.versions.node}`,
+      `electron=${process.versions.electron || ""}`,
+    ].join(" ")
+  );
   const child = spawn(process.execPath, ["-e", script], {
     cwd: process.cwd(),
     env: {
@@ -759,7 +831,17 @@ async function startLocalChromaServer(port: number): Promise<ChildProcess | unde
     chromaStartupStderr = appendLimited(chromaStartupStderr, chunk.toString("utf8"));
   });
   chromaChildren.add(child);
-  child.once("exit", () => chromaChildren.delete(child));
+  child.once("error", (error) => {
+    serverLog(`ERROR Failed to spawn Chroma child process: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  child.once("exit", (code, signal) => {
+    chromaChildren.delete(child);
+    if (code !== 0 && code !== null) {
+      serverLog(`ERROR Chroma child process exited with code=${code} signal=${signal ?? ""}`);
+    } else {
+      serverLog(`INFO Chroma child process exited with code=${code ?? ""} signal=${signal ?? ""}`);
+    }
+  });
   process.once("exit", () => {
     for (const activeChild of chromaChildren) {
       try {

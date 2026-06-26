@@ -84,6 +84,10 @@
       "node_modules/sql.js/dist/sql-wasm.wasm",
       "package.json"
     ],
+    "asarUnpack": [
+      "node_modules/chromadb/**/*",
+      "node_modules/chromadb-js-bindings-*/*"
+    ],
     "win": {
       "icon": "assets/nexoagent-icon.ico",
       "target": [
