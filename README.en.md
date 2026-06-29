@@ -130,7 +130,7 @@ The repository includes a GitHub Actions workflow at `.github/workflows/build-re
 | State management | Zustand |
 | Build tool | Vite 6 |
 | Agent orchestration | LangChain, OpenAI-compatible Chat API |
-| Browser automation | Electron BrowserView, Chrome DevTools Protocol input events, local MiniLM element resolver |
+| Browser automation | Electron BrowserView, Chrome DevTools Protocol input events, AX tree snapshots, stable refs, stale re-resolution, Electron-side browser runtime scripts |
 | Backend service | Express, Server-Sent Events |
 | Local storage | JSON files, SQLite/sql.js |
 | Memory retrieval | OpenAI Embeddings, Chroma, SQLite keyword fallback |
@@ -147,8 +147,7 @@ nexoAgent/
 │   ├── preload.ts                # Electron preload bridge
 │   └── server/
 │       ├── agent.ts              # LangChain Agent loop, tool calls, context assembly
-│       ├── browser-manager.ts    # Shared browser, DOM snapshots, CDP clicks, element picker
-│       ├── browser-embedding.ts  # Browser-only MiniLM element resolver
+│       ├── browser-manager.ts    # Shared browser, AX/ref snapshots, CDP clicks, runtime scripts, element picker
 │       ├── routes/               # settings/chat/session/memory/knowledge/tools APIs
 │       ├── tools/                # Tool executors and registry
 │       ├── skills.ts             # Skill loading, toggles, marketplace installs
@@ -186,7 +185,7 @@ Built-in tools are declared in `nexo/tools.json`, and their executors live in `e
 | `install_skill` | Install a skill from a supported marketplace |
 | `create_scheduled_task` | Create a scheduled task that appears in the Tasks panel and runs through Nexo's scheduler |
 | `shell_command` | Run a terminal command from the workspace |
-| `browser_action` | Operate the shared Electron browser session through DOM snapshots, semantic element resolution, `action="run"` multi-step execution, CDP clicks, typing, scrolling, screenshots, refresh, back, and forward |
+| `browser_action` | Operate the shared Electron browser session through AX/ref snapshots, `action="run"` multi-step execution, Electron-side `action="script"` runtime scripts, CDP clicks, typing, scrolling, screenshots, refresh, back, and forward |
 
 File tools are restricted to the configured workspace and extra file access roots. Add external directories in Settings before using `file_read` or `file_write` against them, or handle the path through a terminal command.
 
@@ -202,7 +201,7 @@ The desktop app includes a conversation-scoped shared browser. It is not a separ
 
 ### DOM-first Operation
 
-Browser automation is DOM-first. For ordinary controls such as buttons, links, inputs, menus, and form submission, the assistant should prefer DOM target resolution instead of screenshot-based visual localization. Fixed actions like `snapshot`, `resolve`, `click`, `type`, and `scroll` remain available for simple tasks, and their locators should be expressed through `target`, while `browser_action` with `action="run"` is preferred for compound or fuzzy browser tasks.
+Browser automation is DOM-first. For ordinary controls such as buttons, links, inputs, menus, and form submission, the assistant should prefer AX tree snapshots plus stable refs with stale re-resolution instead of screenshot-based visual localization. Fixed actions like `snapshot`, `resolve`, `click`, `type`, and `scroll` remain available for simple tasks, and their locators should be expressed through `target`, while `browser_action` with `action="run"` is preferred for compound or fuzzy browser tasks.
 
 The resolver extracts visible interactive elements from the current page, including:
 
@@ -211,11 +210,11 @@ The resolver extracts visible interactive elements from the current page, includ
 - Contenteditable regions
 - Clickable-looking `div` or `span` elements with `cursor:pointer`, click handlers, or common button/action class/id/data attributes
 
-Each candidate keeps its role, name, text, value, href, editability, bounds, nearby context, selector, and a descriptor string used for matching.
+Each candidate keeps its role, name, text, value, href, editability, bounds, nearby context, and a descriptor string used for matching. Refs are stable within the same document and are re-resolved through the accessibility tree when the underlying DOM node goes stale.
 
 ### `browser_action.run`
 
-`action="run"` lets the model send a browser goal, a default target, an ordered `steps` array, an optional `strategy`, and `onFailure` guidance in one tool call. The browser runtime then resolves natural-language targets through DOM descriptors, local MiniLM semantic matching, DOM rules, selectors, xpath, or explicit coordinates before executing each step.
+`action="run"` lets the model send a browser goal, a default target, an ordered `steps` array, an optional `strategy`, and `onFailure` guidance in one tool call. The browser runtime then resolves natural-language targets through AX tree snapshots, stable refs, stale re-resolution, DOM rules, selectors, xpath, or explicit coordinates before executing each step.
 
 Example:
 
@@ -233,19 +232,17 @@ Example:
 }
 ```
 
-### Browser-only MiniLM Resolver
+### High-Privilege Browser Runtime Script
 
-`electron/server/browser-embedding.ts` loads a local `Xenova/all-MiniLM-L6-v2` model from `nexo/models/browser-resolver/`. It is used only for browser element resolution. It is not used for persistent memory, knowledge retrieval, daily memory, dream memory, or conversation compaction.
+`browser_action` also exposes `action="script"` for explicit high-privilege browser-runtime work. This executes Electron-side service JavaScript, not page JavaScript. The script runs in an async function with direct access to:
 
-The resolver combines:
+- `browserView`
+- `webContents`
+- raw debugger/CDP handles through `cdp`, `rawDebugger`, and `sendCommand(...)`
+- `browserManager`
+- Node/Electron runtime objects such as `require`, `Buffer`, `process`, `console`, and timers
 
-- Lexical and exact-name matching
-- Role matching
-- Nearby context and recent interaction context
-- Enabled/visible state checks
-- Local MiniLM semantic similarity for fuzzy element names
-
-For explicit high-impact actions such as send, delete, save, login, and cancel, semantic similarity alone is not enough. The chosen element must contain the requested action anchor, preventing mistakes such as treating "compose" as "send" just because both are mail-related.
+This path is meant for raw BrowserView programming, direct CDP tasks, canvas interaction work, and runtime debugging. Ordinary controls should still prefer AX/ref resolution first.
 
 ### CDP Input Events
 
@@ -259,7 +256,7 @@ Input.dispatchMouseEvent(mouseReleased)
 
 The CDP events include `buttons`, `modifiers`, and second-based `timestamp` values, and they travel through Chromium's native input pipeline. This is more reliable for modern SPAs than calling `HTMLElement.click()`.
 
-Typing supports `target.ref` and `target.query`, and it also falls back to the focused editable element. If a SPA rerenders and a previous ref becomes stale after the field has already been focused, `browser_action.type` and `browser_action.run` type steps can still write into `document.activeElement`.
+Typing supports `target.ref` and `target.query`, and it also falls back to the focused editable element. If a SPA rerenders and a previous ref becomes stale, the runtime first re-resolves the ref through the AX tree before typing.
 
 ### Element Picker
 
@@ -269,7 +266,7 @@ The browser toolbar includes an element picker button. When enabled, the page hi
 
 - DOM-first does not mean vision is never used. Screenshots remain the right fallback for canvas content, charts, images, layout inspection, and cases where the user explicitly wants visual evidence. `browser_action.run` may also request `strategy: "visionFallback"` when DOM evidence is weak.
 - Cross-origin iframe internals, browser plugins, canvas-only UI, and sites with strong anti-automation behavior may still require screenshots, user confirmation, or site-specific adaptation.
-- The browser resolver's MiniLM model is scoped to browser parsing only and should not be reused as a memory or knowledge embedding model.
+- `action="script"` is intentionally high privilege. It can directly program the live BrowserView and raw CDP session, so it should be used only when the user explicitly needs that level of control.
 
 ## Memory
 

@@ -21,17 +21,37 @@ TBD - created by archiving change add-hidden-browser-agent. Update Purpose after
 - **则** 系统应当使用持久化 Electron partition 保留 Cookie 和站点状态
 
 ### Requirement: 单一 `browser_action` 工具
-系统 SHALL 暴露单一 `browser_action` 工具，通过 `action` 参数执行浏览器导航、快照、交互、截图和历史导航操作。
 
-#### Scenario: 工具目录只暴露一个浏览器工具
-- **当** 工具注册表加载浏览器能力时
-- **则** 它应当暴露 `browser_action`
-- **并且** 不应当暴露独立的 `browser_navigate`、`browser_snapshot`、`browser_click`、`browser_type`、`browser_scroll` 或 `browser_screenshot` 工具
+系统 SHALL 暴露单一 `browser_action` 工具，并在现有固定 action 之外支持 `action: "run"`，使 Agent 能够自主编写浏览器操作目标、目标定位参数、步骤和执行策略。
 
-#### Scenario: 拒绝未知 action
-- **当** Agent 使用未知 `action` 调用 `browser_action` 时
-- **则** 系统应当返回明确错误
-- **并且** 错误应当列出支持的 action 范围
+#### Scenario: 工具暴露 run action
+
+- **WHEN** Agent 查看可用工具 schema
+- **THEN** `browser_action.action` 应当包含 `run`
+- **AND** `browser_action` 应当接受 `goal`、`target`、`steps`、`strategy` 和 `onFailure` 等参数
+
+#### Scenario: run 支持多步执行
+
+- **WHEN** Agent 使用 `action: "run"` 并提供多个 steps
+- **THEN** 浏览器运行时应当按顺序执行这些 steps
+- **AND** 每个 step 可以声明操作类型、目标、文本、按键、滚动量、策略和失败处理
+
+#### Scenario: run 复用 DOM resolver
+
+- **WHEN** run step 需要定位自然语言描述的页面元素
+- **THEN** 系统应当复用浏览器 DOM descriptor、MiniLM 向量化语义匹配和 DOM 规则融合 resolver
+- **AND** resolver 的结果应当可用于 click、type、hover、wheel、drag 等 step
+
+#### Scenario: run 返回执行轨迹
+
+- **WHEN** `browser_action.run` 执行完成
+- **THEN** 响应应当包含最终浏览器状态
+- **AND** 响应应当包含 run trace，说明每步是否成功、使用的策略、选中的 ref、置信度、MiniLM 状态和失败原因
+
+#### Scenario: 固定 action 向后兼容
+
+- **WHEN** Agent 使用 `snapshot`、`resolve`、`navigate`、`click`、`type`、`scroll`、`screenshot`、`refresh`、`back` 或 `forward`
+- **THEN** 系统应当保持现有行为
 
 ### Requirement: 页面快照
 系统 SHALL 通过 `browser_action` 的 `snapshot` action 返回紧凑的结构化浏览器状态供 Agent 推理使用。
@@ -109,4 +129,35 @@ TBD - created by archiving change add-hidden-browser-agent. Update Purpose after
 #### Scenario: 截图不膨胀普通文本输出
 - **当** 系统返回常规页面状态时
 - **则** 系统不应当将完整截图二进制或大段 base64 嵌入常规文本响应中
+
+### Requirement: `browser_action` 支持高权限脚本动作
+系统 SHALL 继续暴露单一 `browser_action` 工具，并为该工具新增一个高权限脚本动作，使 Agent 可以对共享浏览器会话执行 Electron 侧脚本。
+
+#### Scenario: 工具 schema 暴露脚本动作
+- **WHEN** Agent 查看 `browser_action` 的可用 schema
+- **THEN** `browser_action.action` 应当包含高权限脚本动作
+- **AND** 该动作应当接受脚本源码、可选参数和可选超时参数
+
+#### Scenario: 脚本动作与固定 action 共存
+- **WHEN** Agent 继续使用 `snapshot`、`resolve`、`navigate`、`click`、`type`、`scroll`、`run`、`screenshot`、`refresh`、`back` 或 `forward`
+- **THEN** 系统应当保持这些 action 的现有行为
+- **AND** 新增脚本动作不得移除既有 DOM-first 与 AX tree/ref 结构化解析路径
+
+#### Scenario: 脚本动作复用共享浏览器会话
+- **WHEN** Agent 通过 `browser_action` 调用高权限脚本动作
+- **THEN** 脚本应当作用于与固定 action 和可见浏览器视图相同的共享浏览器会话
+- **AND** 该动作不得悄悄切换到单独的隐藏浏览器实例
+
+### Requirement: 标准 DOM 控件继续使用 AX tree + 稳定 ref + stale 重解析
+系统 SHALL 继续为标准 DOM 控件任务提供基于 AX tree、稳定 ref 和 stale 重解析的结构化定位路径。
+
+#### Scenario: 结构化快照为控件分配稳定 ref
+- **WHEN** Agent 通过 `snapshot` 或等价结构化页面感知动作读取页面
+- **THEN** 系统应当基于可访问性树为可交互元素分配稳定 ref
+- **AND** 后续 `click`、`type`、`scroll` 或 `resolve` 应当复用这些 ref
+
+#### Scenario: stale ref 可被结构化重解析
+- **WHEN** 先前返回的元素 ref 因导航、DOM 变化或重渲染而失效
+- **THEN** 系统应当基于同一结构化页面信息执行 stale 重解析
+- **AND** 普通控件任务不应默认退化为 MiniLM 向量匹配或视觉坐标点击
 

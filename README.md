@@ -11,7 +11,7 @@ Nexo Agent 是一个本地优先的 AI Agent 桌面应用与 Web 控制台。它
 - 多会话聊天：支持创建、切换、重命名、删除和持久化历史会话
 - 多模型配置：支持 OpenAI Compatible / Anthropic Compatible 等模型配置与主模型切换
 - Agent 工具调用：支持 `web_search`、`http_request`、`shell_command`、`file_read`、`file_write`、多模态工具等
-- 共享浏览器：桌面端内置与对话绑定的浏览器工作台，支持可视浏览、隐藏后台浏览、DOM-first 元素解析、截图回传、元素选择、历史记录、缩放和网页自动化操作
+- 共享浏览器：桌面端内置与对话绑定的浏览器工作台，支持可视浏览、隐藏后台浏览、AX tree + 稳定 ref + stale 重解析、截图回传、元素选择、历史记录、缩放和网页自动化操作，以及 Electron 侧高权限浏览器脚本
 - 记忆系统：支持 `daily`、`dream`、`script` 三类跨会话持久记忆，使用 SQLite + embedding 检索
 - 知识库：支持本地 Markdown 文件管理、embedding 向量检索、关键词兜底与聊天上下文注入
 - 技能系统：支持内置技能、工作区技能、托管技能、市场技能
@@ -168,7 +168,6 @@ nexoAgent/
 │     ├─ index.ts                 # Express App 入口
 │     ├─ agent.ts                 # Agent 主循环、工具调用、上下文管理
 │     ├─ browser-manager.ts       # 共享浏览器、DOM 快照、CDP 点击、元素选择
-│     ├─ browser-embedding.ts     # 浏览器元素解析专用 MiniLM embedding
 │     ├─ settings.ts              # 运行时设置默认值与合并逻辑
 │     ├─ sessions.ts              # 会话持久化
 │     ├─ knowledge.ts             # 知识库加载与检索
@@ -231,11 +230,11 @@ nexoAgent/
 - `src/components/BrowserWorkbench/`
   提供浏览器工作台 UI。左侧是网页视图，中间竖向控制条提供缩放与布局拖拽，右侧是会话历史和对话面板。浏览器不是独立功能入口，而是会话旁边的可视组件。
 - `browser_action`
-  Agent 通过该工具操作共享浏览器，支持 `snapshot`、`resolve`、`navigate`、`click`、`type`、`scroll`、`run`、`screenshot`、`refresh`、`back`、`forward`。简单任务仍可直接使用固定 action；复合或模糊的网页任务优先使用 `action="run"`，由浏览器运行时在一次工具调用里完成目标解析、步骤执行和重试。
+  Agent 通过该工具操作共享浏览器，支持 `snapshot`、`resolve`、`navigate`、`click`、`type`、`scroll`、`run`、`script`、`screenshot`、`refresh`、`back`、`forward`。简单任务仍可直接使用固定 action；复合或模糊的网页任务优先使用 `action="run"`，由浏览器运行时在一次工具调用里完成目标解析、步骤执行和重试；显式需要直接编程 `BrowserView` / `webContents` / CDP 时使用 `action="script"`。
 - DOM-first 元素解析
-  浏览器会提取可见交互元素，包括标准按钮/链接/输入框、ARIA 控件、`cursor:pointer`、`onclick`、常见按钮 class/id/data 属性等。每个元素会生成描述文本、bounds、role、name、label、上下文和稳定 selector。
+  浏览器会优先通过 AX tree 抓取标准可交互控件，并为同一文档内的节点分配稳定 ref。ref 对应的底层节点失效时，会基于同一条 AX tree 路径按 `(role, name, nth)` 重新解析，而不是回退到向量语义匹配。每个元素仍会保留描述文本、bounds、role、name、label 和上下文信息。
 - `browser_action.run`
-  `action="run"` 允许模型一次性提供 `goal`、默认 `target`、有序 `steps`、`strategy` 和 `onFailure`。浏览器运行时会为每个 step 复用 DOM descriptor、本地 MiniLM 语义匹配、DOM 规则、selector、xpath 和显式坐标回退，然后返回带每步结果的 run trace。
+  `action="run"` 允许模型一次性提供 `goal`、默认 `target`、有序 `steps`、`strategy` 和 `onFailure`。浏览器运行时会为每个 step 复用 AX tree 快照、稳定 ref、stale 重解析、DOM 规则、selector、xpath 和显式坐标回退，然后返回带每步结果的 run trace。
   示例：
   ```json
   {
@@ -250,14 +249,14 @@ nexoAgent/
     "onFailure": { "retry": ["snapshot", "resolve", "scroll"] }
   }
   ```
-- 浏览器专用向量模型
-  `electron/server/browser-embedding.ts` 使用本地 `Xenova/all-MiniLM-L6-v2` 对元素描述和查询做语义匹配，只用于浏览器 DOM 解析，不用于长期记忆、知识库或会话摘要。
+- 高权限浏览器脚本
+  `browser_action.action="script"` 会执行 Electron 侧服务端 JavaScript，而不是页面内 JavaScript。脚本运行在 async 函数里，直接拿到 `browserView`、`webContents`、原始 debugger/CDP 句柄、`sendCommand(...)`、`browserManager` 以及 `require`、`Buffer`、`process`、`console`、计时器等 Node/Electron 运行时对象。
 - 严格动作保护
   对 `发送`、`删除`、`保存`、`登录`、`取消` 等明确动作，resolver 不允许只靠 embedding 语义相似命中。候选元素必须包含对应动作锚点，避免把“发送”误点成“写信”这类相关但错误的控件。
 - CDP 底层点击
   点击时先通过 DOM/ref 获取元素中心坐标，再使用 `webContents.debugger.sendCommand("Input.dispatchMouseEvent", ...)` 发送 `mouseMoved -> mousePressed -> mouseReleased` 事件序列。事件走 Chrome DevTools Protocol 输入管道，带 `buttons`、`modifiers` 和 `timestamp`，比 `HTMLElement.click()` 更接近真实鼠标操作。
 - 输入兜底
-  `type` 支持 ref/query，也支持当前焦点元素。当 SPA 重渲染导致旧 ref 失效，但输入框已经聚焦时，会回退到 `document.activeElement` 写入，避免 stale ref 直接失败；`browser_action.run` 中的 `type` step 也复用这一路径。
+  `type` 支持 ref/query，也支持当前焦点元素。当 SPA 重渲染导致旧 ref 失效时，运行时会先沿 AX tree 对 ref 做 stale 重解析，再继续输入；如果页面已经把目标输入框保持在焦点上，`browser_action.run` 中的 `type` step 也仍可复用当前焦点路径。
 - 元素选择
   浏览器工具栏提供元素选择按钮。启用后页面 hover 会高亮元素，下一次点击会阻止网页默认行为，并把被选元素的名称、标签、role、文本、selector、bounds 和 URL 写入右侧聊天输入框，方便把页面元素作为对话上下文。
 - 截图回传
@@ -355,7 +354,6 @@ release/
 - 修改 Agent 行为优先看 `electron/server/agent.ts`
 - 修改共享浏览器行为优先看：
   - `electron/server/browser-manager.ts`
-  - `electron/server/browser-embedding.ts`
   - `src/components/BrowserWorkbench/`
   - `nexo/tools.json` 中的 `browser_action`
 - 新增工具时同步更新：
@@ -377,7 +375,7 @@ release/
 - 知识库检索是本地 Markdown 的向量/关键词混合召回，不等同企业级 RAG，引用、权限和高级排序仍需进一步完善
 - 多模态能力依赖模型配置是否具备图像/音频能力
 - 浏览器自动化优先依赖页面 DOM、ARIA 和 CDP 输入事件。Canvas、插件控件、跨域 iframe 内部元素、强反自动化页面和依赖站点私有协议的操作仍可能需要截图、人工确认或站点级适配。
-- 浏览器 MiniLM 模型只服务 DOM 元素解析，不参与记忆、知识库或用户长期数据召回。
+- 普通控件优先走 AX tree + 稳定 ref + stale 重解析；`action="script"` 仅在显式需要高权限浏览器运行时控制时使用。
 
 ## License
 

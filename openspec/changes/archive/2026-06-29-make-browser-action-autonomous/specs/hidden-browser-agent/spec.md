@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: 单一 `browser_action` 工具支持自主执行入口
+### Requirement: 单一 `browser_action` 工具
 
 系统 SHALL 暴露单一 `browser_action` 工具，并在现有固定 action 之外支持 `action: "run"`，使 Agent 能够自主编写浏览器操作目标、目标定位参数、步骤和执行策略。
 

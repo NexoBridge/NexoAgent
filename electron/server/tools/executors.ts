@@ -96,6 +96,8 @@ export const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
       url: getOptionalStringArg(args, "url"),
       text: getOptionalStringArg(args, "text"),
       goal: getOptionalStringArg(args, "goal"),
+      script: getOptionalStringArg(args, "script"),
+      args: readArrayArg(args, "args"),
       target: readObjectArg(args, "target"),
       steps: readArrayArg(args, "steps"),
       strategy: getOptionalStringArg(args, "strategy") as Parameters<typeof browserManager.executeAction>[0]["strategy"],
@@ -108,6 +110,7 @@ export const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
       deltaY: args.deltaY === undefined ? undefined : getOptionalNumberArg(args, "deltaY", 0),
       waitMs: args.waitMs === undefined ? undefined : getOptionalNumberArg(args, "waitMs", 0),
       durationMs: args.durationMs === undefined ? undefined : getOptionalNumberArg(args, "durationMs", 0),
+      timeoutMs: args.timeoutMs === undefined ? undefined : getOptionalNumberArg(args, "timeoutMs", 15_000),
       limit,
       minConfidence,
     });

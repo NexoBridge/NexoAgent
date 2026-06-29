@@ -197,17 +197,23 @@
       "name": "browser_action",
       "label": "Browser Action",
       "group": "extension",
-      "description": "Operate the shared Electron browser session for conversational web browsing and web app control. Use only when the task explicitly involves navigating a website, checking a page, or interacting with a web app in the current conversation. Do not present it as a standalone feature, and do not use it for general HTTP requests, web search, file access, or credentialless automation. Fixed actions such as snapshot, resolve, navigate, click, type, scroll, screenshot, refresh, back, and forward remain available for simple tasks. For compound or fuzzy browser tasks, use action=run with goal, target, steps, strategy, and onFailure so the browser runtime can resolve natural-language targets through DOM descriptors, local all-MiniLM-L6-v2 semantic matching, DOM rules, and CDP-backed input events. Do not use shell commands, PowerShell, or OS-level mouse/keyboard automation to operate ordinary browser UI controls. When visual state matters or the user asks to see the current page, call action=screenshot so the runtime can attach the screenshot to the assistant response. Before typing sensitive data or submitting forms, confirm the user intends that action.",
+      "description": "Operate the shared Electron browser session for conversational web browsing and web app control. Use only when the task explicitly involves navigating a website, checking a page, or interacting with a web app in the current conversation. Do not present it as a standalone feature, and do not use it for general HTTP requests, web search, file access, or credentialless automation. Fixed actions such as snapshot, resolve, navigate, click, type, scroll, screenshot, refresh, back, and forward remain available for simple tasks. Standard control resolution is AX tree plus stable refs with stale re-resolution. For compound or fuzzy browser tasks, use action=run with goal, target, steps, strategy, and onFailure so the browser runtime can resolve natural-language targets and execute the sequence inside one tool call. For explicit BrowserView programming, raw CDP control, canvas/runtime-debug work, or when the user explicitly asks for raw browser-runtime control, use action=script to run Electron-side service JavaScript with direct access to browserView, webContents, debugger/CDP, browserManager, and Node/Electron runtime objects. Do not use shell commands, PowerShell, or OS-level mouse/keyboard automation to operate ordinary browser UI controls. When visual state matters or the user asks to see the current page, call action=screenshot so the runtime can attach the screenshot to the assistant response. Before typing sensitive data or submitting forms, confirm the user intends that action.",
       "parameters": {
         "type": "object",
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["snapshot", "resolve", "navigate", "click", "type", "scroll", "run", "screenshot", "refresh", "back", "forward"]
+            "enum": ["snapshot", "resolve", "navigate", "click", "type", "scroll", "run", "script", "screenshot", "refresh", "back", "forward"]
           },
           "url": { "type": "string" },
           "text": { "type": "string", "description": "Text to type for action=type." },
           "goal": { "type": "string", "description": "High-level objective for action=run." },
+          "script": { "type": "string", "description": "Electron-side service JavaScript body for action=script. The script runs in an async function and can directly use browserView, webContents, debugger/CDP, browserManager, require, Buffer, process, and Electron runtime objects." },
+          "args": {
+            "type": "array",
+            "description": "Optional positional arguments exposed to action=script as args.",
+            "items": {}
+          },
           "target": {
             "type": "object",
             "description": "Target descriptor for click/type/resolve, or the default target for action=run.",
@@ -281,7 +287,7 @@
                 },
                 "strategy": {
                   "type": "string",
-                  "enum": ["auto", "dom", "semantic", "css", "xpath", "cdp", "coordinate", "visionFallback"]
+                  "enum": ["auto", "dom", "css", "xpath", "cdp", "coordinate", "visionFallback"]
                 },
                 "onFailure": {
                   "type": "object",
@@ -322,7 +328,7 @@
           },
           "strategy": {
             "type": "string",
-            "enum": ["auto", "dom", "semantic", "css", "xpath", "cdp", "coordinate", "visionFallback"]
+            "enum": ["auto", "dom", "css", "xpath", "cdp", "coordinate", "visionFallback"]
           },
           "onFailure": {
             "type": "object",
@@ -354,6 +360,7 @@
           "deltaY": { "type": "number" },
           "waitMs": { "type": "number" },
           "durationMs": { "type": "number" },
+          "timeoutMs": { "type": "number", "description": "Optional timeout in milliseconds for action=script." },
           "limit": { "type": "number", "description": "Maximum resolve candidates to return." },
           "minConfidence": { "type": "number", "description": "Minimum resolver confidence for query-based click/type." }
         },

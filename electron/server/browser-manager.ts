@@ -1,4 +1,5 @@
 import type { BrowserView, BrowserWindow } from "electron";
+import { inspect } from "node:util";
 import type {
   BrowserAction,
   BrowserActionRequest,
@@ -17,12 +18,20 @@ import type {
   BrowserRunStep,
   BrowserRunStepResult,
   BrowserRunTrace,
+  BrowserScriptError,
+  BrowserScriptExecutionResult,
   BrowserTargetDescriptor,
   BrowserResolveCandidate,
   BrowserResolveResult,
   BrowserState,
 } from "../../src/shared/types";
-import { browserEmbeddingService } from "./browser-embedding";
+import {
+  type BrowserAxNode,
+  type BrowserRefEntry,
+  BrowserRefMap,
+  findBackendNodeIdForRef,
+  iterActionableAxNodes,
+} from "./browser-ax";
 import { saveGeneratedArtifact } from "./media";
 import { serverLog } from "./logger";
 
@@ -41,6 +50,8 @@ const AMBIGUITY_MARGIN = 0.08;
 const DEFAULT_RUN_WAIT_MS = 250;
 const DEFAULT_WHEEL_DELTA = 720;
 const DEFAULT_RUN_ATTEMPTS = 2;
+const DEFAULT_SCRIPT_TIMEOUT_MS = 15_000;
+const MAX_SCRIPT_RESULT_CHARS = 12_000;
 
 const SNAPSHOT_HELPER = String.raw`
 (() => {
@@ -698,20 +709,6 @@ function computeStateScore(item: BrowserElementDescriptor) {
   return { score: 1, reasons: ["enabled-visible"] };
 }
 
-function cosineSimilarity(a?: number[], b?: number[]) {
-  if (!a?.length || !b?.length || a.length !== b.length) return undefined;
-  let dot = 0;
-  let magA = 0;
-  let magB = 0;
-  for (let index = 0; index < a.length; index += 1) {
-    dot += a[index] * b[index];
-    magA += a[index] * a[index];
-    magB += b[index] * b[index];
-  }
-  if (!magA || !magB) return undefined;
-  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
-}
-
 function browserScript(kind: "click" | "type" | "scroll", payload: Record<string, unknown>) {
   return `(() => {
     const payload = ${JSON.stringify(payload)};
@@ -860,7 +857,9 @@ type BrowserSnapshot = {
   title: string;
   text: string;
   elements: BrowserElementDescriptor[];
-  refs: Array<[string, string]>;
+  refs: BrowserRefMap;
+  documentId?: string;
+  frameId?: string;
   warning?: string;
 };
 
@@ -877,6 +876,45 @@ type BrowserLocateScriptResult = {
   bounds?: BrowserBounds;
 };
 
+type BrowserDomNodeMetadata = {
+  tag?: string;
+  text?: string;
+  value?: string;
+  type?: string;
+  href?: string;
+  editable?: boolean;
+  disabled?: boolean;
+  checked?: boolean;
+  selected?: boolean;
+  bounds?: BrowserBounds;
+  ariaLabel?: string;
+  label?: string;
+  title?: string;
+  placeholder?: string;
+  identity?: string;
+  heading?: string;
+  context?: string;
+  nearbyText?: string;
+  visible?: boolean;
+  enabled?: boolean;
+};
+
+type BrowserFrameTreeNode = {
+  frame: {
+    id: string;
+    loaderId?: string;
+    url?: string;
+    urlFragment?: string;
+  };
+  childFrames?: BrowserFrameTreeNode[];
+};
+
+type BrowserDocumentState = {
+  frameId?: string;
+  documentId?: string;
+  url: string;
+};
+
 type BrowserPoint = {
   x: number;
   y: number;
@@ -887,6 +925,7 @@ type ResolvedBrowserTarget = {
   requestedStrategy: BrowserActionStrategy;
   actualStrategy: string;
   ref?: string;
+  backendNodeId?: number;
   selector?: string;
   xpath?: string;
   bounds?: BrowserBounds;
@@ -1019,6 +1058,64 @@ function requestUsesNaturalLanguageTargets(request: BrowserActionRequest) {
   return Boolean(request.steps?.some((step) => hasNaturalLanguageTarget(step.target)));
 }
 
+function frameDocumentId(frame: BrowserFrameTreeNode["frame"]): string | undefined {
+  if (frame.loaderId === undefined) return undefined;
+  return `${frame.id}:${frame.loaderId}`;
+}
+
+function frameUrl(frame: BrowserFrameTreeNode["frame"]): string {
+  return frame.url ? `${frame.url}${frame.urlFragment ?? ""}` : "unknown";
+}
+
+function truncateReadableText(value: string, maxChars = MAX_SCRIPT_RESULT_CHARS) {
+  if (value.length <= maxChars) {
+    return { text: value, truncated: false };
+  }
+  return {
+    text: `${value.slice(0, maxChars)}\n... [truncated by Nexo]`,
+    truncated: true,
+  };
+}
+
+function browserScriptError(error: unknown): BrowserScriptError {
+  if (error instanceof Error) {
+    return {
+      name: error.name || "Error",
+      message: error.message || String(error),
+      stack: error.stack,
+    };
+  }
+  return {
+    name: "Error",
+    message: String(error),
+  };
+}
+
+function browserScriptResultValue(value: unknown): BrowserScriptExecutionResult["result"] {
+  const type = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+  try {
+    return {
+      format: "json",
+      type,
+      value: JSON.parse(JSON.stringify(value)) as unknown,
+    };
+  } catch {
+    const rendered = inspect(value, {
+      depth: 4,
+      breakLength: 100,
+      maxArrayLength: 50,
+      maxStringLength: 4_000,
+    });
+    const { text, truncated } = truncateReadableText(rendered);
+    return {
+      format: "inspect",
+      type,
+      text,
+      truncated: truncated || undefined,
+    };
+  }
+}
+
 export class BrowserManager {
   private mainWindow: BrowserWindow | null = null;
   private browserView: BrowserView | null = null;
@@ -1037,19 +1134,25 @@ export class BrowserManager {
     elements: [],
     text: "",
   };
-  private elementSelectors = new Map<string, string>();
+  private elementRefs = new BrowserRefMap();
   private elementDescriptors = new Map<string, BrowserElementDescriptor>();
+  private snapshotDocument?: BrowserDocumentState;
   private history: BrowserHistoryEntry[] = [];
   private recentInteractionRef = "";
   private elementPickActive = false;
 
   // Exposed for local verification scripts that exercise resolver logic without a live BrowserView.
   setTestSnapshotData(
-    selectors: Array<[string, string]>,
+    refs: BrowserRefEntry[],
     descriptors: BrowserElementDescriptor[],
     recentRef = "",
   ) {
-    this.elementSelectors = new Map(selectors);
+    const refMap = new BrowserRefMap();
+    refMap.beginSnapshot();
+    for (const entry of refs) {
+      refMap.byRef.set(entry.ref, { ...entry });
+    }
+    this.elementRefs = refMap;
     this.elementDescriptors = new Map(descriptors.map((descriptor) => [descriptor.ref, descriptor]));
     this.recentInteractionRef = recentRef;
   }
@@ -1073,14 +1176,14 @@ export class BrowserManager {
   destroy() {
     this.detach();
     this.browserView = null;
-    this.elementSelectors.clear();
+    this.elementRefs.reset();
     this.elementDescriptors.clear();
+    this.snapshotDocument = undefined;
   }
 
   async openWorkbench() {
     this.mode = "workbench";
     await this.ensure();
-    browserEmbeddingService.warmup();
     this.layout();
     this.emit();
   }
@@ -1135,9 +1238,6 @@ export class BrowserManager {
     const run = async () => {
       this.assertModernBrowserActionRequest(request);
       await this.ensure();
-      if (request.action === "resolve" || requestUsesNaturalLanguageTargets(request)) {
-        browserEmbeddingService.warmup();
-      }
       switch (request.action) {
         case "snapshot":
           return this.snapshot("snapshot");
@@ -1153,6 +1253,8 @@ export class BrowserManager {
           return this.scroll(request.direction ?? "down", request.amount);
         case "run":
           return this.run(request);
+        case "script":
+          return this.executeScript(request);
         case "screenshot":
           return this.screenshot();
         case "refresh":
@@ -1162,7 +1264,7 @@ export class BrowserManager {
         case "forward":
           return this.forward();
         default:
-          throw new Error(`Unsupported browser_action.action: ${String(request.action)}. Supported actions: snapshot, resolve, navigate, click, type, scroll, run, screenshot, refresh, back, forward.`);
+          throw new Error(`Unsupported browser_action.action: ${String(request.action)}. Supported actions: snapshot, resolve, navigate, click, type, scroll, run, script, screenshot, refresh, back, forward.`);
       }
     };
 
@@ -1301,8 +1403,9 @@ export class BrowserManager {
     const sync = (clearSnapshot = false, historyAction?: BrowserAction) => {
       if (!this.browserView) return;
       if (clearSnapshot) {
-        this.elementSelectors.clear();
+        this.elementRefs.reset();
         this.elementDescriptors.clear();
+        this.snapshotDocument = undefined;
       }
       this.state = {
         ...this.state,
@@ -1474,13 +1577,272 @@ export class BrowserManager {
     await this.waitForDomSettled();
   }
 
+  private async withCdp<T>(run: (cdp: Electron.Debugger) => Promise<T>): Promise<T> {
+    if (!this.browserView) throw new Error("Browser runtime is not available.");
+    const cdp = this.browserView.webContents.debugger;
+    const wasAttached = cdp.isAttached();
+    try {
+      if (!wasAttached) cdp.attach("1.3");
+      return await run(cdp);
+    } finally {
+      if (!wasAttached && cdp.isAttached()) {
+        try {
+          cdp.detach();
+        } catch {
+          // no-op
+        }
+      }
+    }
+  }
+
+  private async withResolvedBackendNode<T>(
+    backendNodeId: number,
+    run: (cdp: Electron.Debugger, objectId: string) => Promise<T>,
+  ): Promise<T> {
+    return this.withCdp(async (cdp) => {
+      const resolved = await cdp.sendCommand("DOM.resolveNode", { backendNodeId }) as { object?: { objectId?: string } };
+      const objectId = resolved.object?.objectId;
+      if (!objectId) {
+        throw new Error(`Backend DOM node ${backendNodeId} is not resolvable.`);
+      }
+      try {
+        return await run(cdp, objectId);
+      } finally {
+        await cdp.sendCommand("Runtime.releaseObject", { objectId }).catch(() => undefined);
+      }
+    });
+  }
+
+  private async readRootDocumentState(): Promise<BrowserDocumentState> {
+    if (!this.browserView) throw new Error("Browser runtime is not available.");
+    return this.withCdp(async (cdp) => {
+      try {
+        const result = await cdp.sendCommand("Page.getFrameTree") as { frameTree?: BrowserFrameTreeNode };
+        const frame = result.frameTree?.frame;
+        if (!frame) {
+          return {
+            url: this.browserView?.webContents.getURL() || this.state.url,
+          };
+        }
+        return {
+          frameId: frame.id,
+          documentId: frameDocumentId(frame),
+          url: frameUrl(frame),
+        };
+      } catch {
+        return {
+          url: this.browserView?.webContents.getURL() || this.state.url,
+        };
+      }
+    });
+  }
+
+  private async fetchAxTree(frameId?: string): Promise<BrowserAxNode[]> {
+    return this.withCdp(async (cdp) => {
+      const result = await cdp.sendCommand("Accessibility.getFullAXTree", frameId ? { frameId } : {}) as { nodes?: BrowserAxNode[] };
+      return result.nodes ?? [];
+    });
+  }
+
+  private async isBackendNodeLive(backendNodeId: number): Promise<boolean> {
+    try {
+      await this.withResolvedBackendNode(backendNodeId, async () => undefined);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async captureReadablePageText(): Promise<string> {
+    if (!this.browserView) return "";
+    return await this.browserView.webContents.executeJavaScript(
+      String.raw`(() => String(document.body?.innerText || document.documentElement?.innerText || "").replace(/\s+/g, " ").trim())()`,
+      true,
+    ).catch(() => "") as string;
+  }
+
+  private async readDomNodeMetadata(backendNodeId: number): Promise<BrowserDomNodeMetadata | undefined> {
+    return this.withResolvedBackendNode(backendNodeId, async (cdp, objectId) => {
+      const result = await cdp.sendCommand("Runtime.callFunctionOn", {
+        objectId,
+        returnByValue: true,
+        awaitPromise: true,
+        functionDeclaration: String.raw`function() {
+          const el = this;
+          if (!(el instanceof Element)) return { visible: false, enabled: false };
+          const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+          const escapeCss = (value) => {
+            if (typeof CSS !== "undefined" && typeof CSS.escape === "function") return CSS.escape(value);
+            return String(value).replace(/[^a-zA-Z0-9_-]/g, (ch) => "\\" + ch);
+          };
+          const textFromIdRefs = (value) => clean(String(value ?? "")
+            .split(/\s+/)
+            .map((id) => document.getElementById(id)?.innerText || document.getElementById(id)?.textContent || "")
+            .join(" "));
+          const associatedLabel = () => {
+            const labels = "labels" in el && el.labels ? Array.from(el.labels).map((label) => clean(label.innerText || label.textContent || "")).filter(Boolean) : [];
+            if (labels.length) return labels[0];
+            if ("id" in el && el.id) {
+              const label = document.querySelector('label[for="' + escapeCss(el.id) + '"]');
+              if (label) return clean(label.innerText || label.textContent || "");
+            }
+            const wrapped = el.closest("label");
+            return wrapped ? clean(wrapped.innerText || wrapped.textContent || "") : "";
+          };
+          const nearestHeading = () => {
+            const container = el.closest("form,dialog,[role='dialog'],[role='main'],main,section,article,[aria-labelledby]");
+            const labelled = textFromIdRefs(container?.getAttribute("aria-labelledby"));
+            if (labelled) return labelled;
+            const heading = container?.querySelector?.("h1,h2,h3,h4,h5,h6");
+            if (heading) return clean(heading.innerText || heading.textContent || "");
+            let node = el;
+            while (node && node.previousElementSibling) {
+              node = node.previousElementSibling;
+              if (node.matches?.("h1,h2,h3,h4,h5,h6")) return clean(node.innerText || node.textContent || "");
+              const nested = node.querySelector?.("h1,h2,h3,h4,h5,h6");
+              if (nested) return clean(nested.innerText || nested.textContent || "");
+            }
+            return "";
+          };
+          const contextName = () => {
+            const owner = el.closest("form,dialog,[role='dialog'],[role='toolbar'],[role='menu'],nav,header,footer,section,article");
+            if (!owner) return "";
+            const role = clean(owner.getAttribute("role")) || owner.tagName.toLowerCase();
+            const label = owner.getAttribute("aria-label")
+              || textFromIdRefs(owner.getAttribute("aria-labelledby"))
+              || owner.getAttribute("title")
+              || owner.querySelector?.("h1,h2,h3,h4,h5,h6")?.textContent
+              || "";
+            return clean([role, label].filter(Boolean).join(" "));
+          };
+          const nearbyText = () => {
+            const parent = el.parentElement;
+            if (!parent) return "";
+            const text = clean(parent.innerText || parent.textContent || "");
+            return text.length > 160 ? text.slice(0, 160) : text;
+          };
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          const visible = style.display !== "none"
+            && style.visibility !== "hidden"
+            && style.opacity !== "0"
+            && rect.width > 0
+            && rect.height > 0
+            && rect.bottom >= 0
+            && rect.right >= 0;
+          const enabled = el.getAttribute("aria-disabled") !== "true" && !("disabled" in el && Boolean(el.disabled));
+          return {
+            tag: el.tagName.toLowerCase(),
+            text: clean(el.innerText || el.textContent || "") || undefined,
+            value: "value" in el ? clean(String(el.value ?? "")) || undefined : undefined,
+            type: "type" in el ? clean(String(el.type ?? "")) || undefined : undefined,
+            href: el instanceof HTMLAnchorElement ? el.href : undefined,
+            editable: Boolean(el.isContentEditable || el.matches("input,textarea,select")),
+            disabled: "disabled" in el ? Boolean(el.disabled) : undefined,
+            checked: "checked" in el ? Boolean(el.checked) : undefined,
+            selected: "selected" in el ? Boolean(el.selected) : undefined,
+            bounds: {
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            },
+            ariaLabel: clean(el.getAttribute("aria-label")) || undefined,
+            label: associatedLabel() || undefined,
+            title: clean(el.getAttribute("title") || el.getAttribute("data-tooltip") || el.getAttribute("data-title") || el.getAttribute("data-original-title")) || undefined,
+            placeholder: clean(el.getAttribute("placeholder")) || undefined,
+            identity: [
+              clean("id" in el ? el.id : ""),
+              clean("className" in el ? String(el.className ?? "") : ""),
+              clean(el.getAttribute("name")),
+              clean(el.getAttribute("data-action")),
+              clean(el.getAttribute("data-cmd")),
+              clean(el.getAttribute("data-testid")),
+              clean(el.getAttribute("data-test")),
+            ].filter(Boolean).join(" ") || undefined,
+            heading: nearestHeading() || undefined,
+            context: contextName() || undefined,
+            nearbyText: nearbyText() || undefined,
+            visible,
+            enabled,
+          };
+        }`,
+      }) as { result?: { value?: BrowserDomNodeMetadata } };
+      return result.result?.value;
+    }).catch(() => undefined);
+  }
+
   private async snapshot(action: BrowserAction): Promise<BrowserActionResponse> {
     if (!this.browserView) throw new Error("Browser runtime is not available.");
     await this.waitForIdle();
     await this.waitForDomSettled(700, 160);
-    const payload = await this.browserView.webContents.executeJavaScript(SNAPSHOT_HELPER, true) as BrowserSnapshot;
-    this.elementSelectors = new Map(payload.refs);
+    const documentState = await this.readRootDocumentState();
+    const sameDocument = Boolean(
+      this.snapshotDocument?.documentId
+      && documentState.documentId
+      && this.snapshotDocument.documentId === documentState.documentId
+      && this.snapshotDocument.url === documentState.url,
+    );
+    const refs = sameDocument ? this.elementRefs.forkForSnapshot() : new BrowserRefMap();
+    refs.beginSnapshot();
+    const nodes = await this.fetchAxTree(documentState.frameId);
+    const actionable = iterActionableAxNodes(nodes);
+    const elements: BrowserElementDescriptor[] = [];
+    for (const node of actionable) {
+      const ref = refs.mint({
+        backendNodeId: node.backendNodeId,
+        role: node.role,
+        name: node.name,
+        documentId: documentState.documentId,
+      });
+      const metadata = await this.readDomNodeMetadata(node.backendNodeId);
+      const bounds = normalizeTargetBounds(metadata?.bounds);
+      if (metadata?.visible === false) continue;
+      if (bounds && (bounds.width <= 0 || bounds.height <= 0)) continue;
+      const descriptor: BrowserElementDescriptor = {
+        ref,
+        tag: metadata?.tag || "unknown",
+        role: node.role || undefined,
+        name: metadata?.ariaLabel || node.name || metadata?.label || metadata?.title || metadata?.placeholder || metadata?.tag || node.role,
+        text: metadata?.text || undefined,
+        value: metadata?.value || node.value || undefined,
+        type: metadata?.type || undefined,
+        href: metadata?.href || undefined,
+        editable: metadata?.editable,
+        disabled: metadata?.disabled,
+        checked: metadata?.checked ?? (node.states.includes("checked") ? true : undefined),
+        selected: metadata?.selected ?? (node.states.includes("selected") ? true : undefined),
+        bounds,
+        ariaLabel: metadata?.ariaLabel,
+        label: metadata?.label,
+        title: metadata?.title,
+        placeholder: metadata?.placeholder,
+        identity: metadata?.identity,
+        heading: metadata?.heading,
+        context: metadata?.context,
+        nearbyText: metadata?.nearbyText,
+        visible: metadata?.visible ?? true,
+        enabled: metadata?.enabled ?? !node.states.includes("disabled"),
+      };
+      descriptor.descriptorText = descriptorSearchText(descriptor);
+      elements.push(descriptor);
+    }
+    const payload: BrowserSnapshot = {
+      url: this.browserView.webContents.getURL() || documentState.url || this.state.url,
+      title: this.browserView.webContents.getTitle() || this.state.title,
+      text: await this.captureReadablePageText(),
+      elements,
+      refs,
+      documentId: documentState.documentId,
+      frameId: documentState.frameId,
+    };
+    this.elementRefs = payload.refs;
     this.elementDescriptors = new Map(payload.elements.map((element) => [element.ref, element]));
+    this.snapshotDocument = {
+      documentId: payload.documentId,
+      frameId: payload.frameId,
+      url: payload.url,
+    };
     this.state = {
       ...this.state,
       url: payload.url,
@@ -1534,35 +1896,24 @@ export class BrowserManager {
     const limit = Math.max(1, Math.min(20, Math.floor(Number(options.limit ?? DEFAULT_RESOLVE_LIMIT) || DEFAULT_RESOLVE_LIMIT)));
     const minConfidence = Math.max(0, Math.min(1, Number(options.minConfidence ?? DEFAULT_MIN_CONFIDENCE)));
     const descriptors = Array.from(this.elementDescriptors.values());
-    const descriptorTexts = descriptors.map((item) => item.descriptorText || descriptorSearchText(item));
-    const embedding = await browserEmbeddingService.embed([cleanQuery, ...descriptorTexts]);
-    const queryVector = embedding.vectors.get(cleanQuery);
     const recent = this.getRecentDescriptor();
 
     const candidates: BrowserResolveCandidate[] = descriptors.map((item) => {
-      const descriptorText = item.descriptorText || descriptorSearchText(item);
-      const semanticRaw = cosineSimilarity(queryVector, embedding.vectors.get(descriptorText));
-      const semanticScore = typeof semanticRaw === "number" ? Math.max(0, Math.min(1, (semanticRaw + 1) / 2)) : undefined;
       const lexical = computeLexicalScore(cleanQuery, item);
       const role = computeRoleScore(cleanQuery, item, options.role ?? "", options.action);
       const context = computeContextScore(cleanQuery, item, recent);
       const state = computeStateScore(item);
-      const semanticReady = typeof semanticScore === "number";
-      const confidence = semanticReady
-        ? semanticScore * 0.4 + lexical.score * 0.25 + role.score * 0.15 + context.score * 0.15 + state.score * 0.05
-        : lexical.score * 0.45 + role.score * 0.25 + context.score * 0.2 + state.score * 0.1;
+      const confidence = lexical.score * 0.48 + role.score * 0.22 + context.score * 0.18 + state.score * 0.12;
       const reasons = [
         ...lexical.reasons,
         ...role.reasons,
         ...context.reasons,
         ...state.reasons,
-        ...(semanticReady ? ["semantic-minilm"] : []),
       ];
       return {
         ...item,
         confidence: Number(confidence.toFixed(4)),
         lexicalScore: Number(lexical.score.toFixed(4)),
-        semanticScore: typeof semanticScore === "number" ? Number(semanticScore.toFixed(4)) : undefined,
         roleScore: Number(role.score.toFixed(4)),
         contextScore: Number(context.score.toFixed(4)),
         stateScore: Number(state.score.toFixed(4)),
@@ -1595,10 +1946,7 @@ export class BrowserManager {
     return {
       query: cleanQuery,
       candidates: top,
-      semanticModel: browserEmbeddingService.model,
-      semanticReady: embedding.ready,
-      semanticPending: embedding.pending || undefined,
-      semanticError: embedding.error,
+      resolver: "ax-tree",
       needsDisambiguation: ambiguous || undefined,
       needsVisionFallback: (!best || best.confidence < Math.min(0.55, minConfidence)) || undefined,
       strictActionMismatch: strictActionMismatch || undefined,
@@ -1670,6 +2018,159 @@ export class BrowserManager {
     ) as BrowserLocateScriptResult;
   }
 
+  private async callBackendNodeFunction<T>(
+    backendNodeId: number,
+    functionDeclaration: string,
+    args: unknown[] = [],
+  ): Promise<T> {
+    return this.withResolvedBackendNode(backendNodeId, async (cdp, objectId) => {
+      const result = await cdp.sendCommand("Runtime.callFunctionOn", {
+        objectId,
+        awaitPromise: true,
+        returnByValue: true,
+        functionDeclaration,
+        arguments: args.map((value) => ({ value })),
+      }) as { result?: { value?: T }; exceptionDetails?: { text?: string } };
+      if (result.exceptionDetails) {
+        throw new Error(result.exceptionDetails.text || "Backend node function failed.");
+      }
+      return result.result?.value as T;
+    });
+  }
+
+  private async resolveRefEntry(ref: string): Promise<BrowserRefEntry> {
+    if (!this.elementRefs.get(ref) && this.browserView) {
+      await this.snapshot("resolve");
+    }
+    const entry = this.elementRefs.get(ref);
+    if (!entry) {
+      throw new Error(refError(ref));
+    }
+    if (await this.isBackendNodeLive(entry.backendNodeId)) {
+      return entry;
+    }
+    const documentState = await this.readRootDocumentState().catch(() => this.snapshotDocument ?? { url: this.state.url });
+    const nodes = await this.fetchAxTree(documentState.frameId);
+    const refreshedBackendNodeId = findBackendNodeIdForRef(nodes, entry);
+    if (refreshedBackendNodeId === undefined) {
+      throw new Error(`Stale browser element ref: ${entry.ref} (${entry.role} "${entry.name}"). Take a new snapshot.`);
+    }
+    entry.backendNodeId = refreshedBackendNodeId;
+    return entry;
+  }
+
+  private async refreshDescriptorFromBackendNode(ref: string, backendNodeId: number) {
+    const descriptor = this.elementDescriptors.get(ref);
+    if (!descriptor) return undefined;
+    const metadata = await this.readDomNodeMetadata(backendNodeId);
+    if (!metadata) return descriptor;
+    const next: BrowserElementDescriptor = {
+      ...descriptor,
+      tag: metadata.tag || descriptor.tag,
+      text: metadata.text ?? descriptor.text,
+      value: metadata.value ?? descriptor.value,
+      type: metadata.type ?? descriptor.type,
+      href: metadata.href ?? descriptor.href,
+      editable: metadata.editable ?? descriptor.editable,
+      disabled: metadata.disabled ?? descriptor.disabled,
+      checked: metadata.checked ?? descriptor.checked,
+      selected: metadata.selected ?? descriptor.selected,
+      bounds: normalizeTargetBounds(metadata.bounds) ?? descriptor.bounds,
+      ariaLabel: metadata.ariaLabel ?? descriptor.ariaLabel,
+      label: metadata.label ?? descriptor.label,
+      title: metadata.title ?? descriptor.title,
+      placeholder: metadata.placeholder ?? descriptor.placeholder,
+      identity: metadata.identity ?? descriptor.identity,
+      heading: metadata.heading ?? descriptor.heading,
+      context: metadata.context ?? descriptor.context,
+      nearbyText: metadata.nearbyText ?? descriptor.nearbyText,
+      visible: metadata.visible ?? descriptor.visible,
+      enabled: metadata.enabled ?? descriptor.enabled,
+    };
+    next.descriptorText = descriptorSearchText(next);
+    this.elementDescriptors.set(ref, next);
+    return next;
+  }
+
+  private async scrollBackendNodeIntoView(backendNodeId: number) {
+    await this.callBackendNodeFunction(
+      backendNodeId,
+      String.raw`function() {
+        if (this && typeof this.scrollIntoView === "function") {
+          this.scrollIntoView({ block: "center", inline: "center" });
+        }
+        if (this && typeof this.focus === "function") {
+          this.focus();
+        }
+        return true;
+      }`,
+    ).catch(() => undefined);
+  }
+
+  private async typeIntoBackendNode(backendNodeId: number, text: string, submit: boolean) {
+    return this.callBackendNodeFunction<{ ok?: boolean; error?: string }>(
+      backendNodeId,
+      String.raw`function(value, shouldSubmit) {
+        const el = this;
+        if (!(el instanceof Element)) {
+          return { ok: false, error: "Resolved backend node is not a DOM element." };
+        }
+        if (typeof el.scrollIntoView === "function") {
+          el.scrollIntoView({ block: "center", inline: "center" });
+        }
+        if (el.isContentEditable) {
+          el.focus();
+          const selection = window.getSelection();
+          if (selection) {
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }
+          if (!document.execCommand("insertText", false, value)) {
+            el.textContent = value;
+          }
+          el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: value }));
+          if (shouldSubmit) {
+            const form = el.closest("form");
+            if (form && typeof form.requestSubmit === "function") form.requestSubmit();
+          }
+          return { ok: true };
+        }
+        if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) {
+          return { ok: false, error: "browser_action.type requires an editable input, textarea, select, or contenteditable element." };
+        }
+        el.focus();
+        if (el instanceof HTMLSelectElement) {
+          el.value = String(value ?? "");
+          el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+          if (shouldSubmit) {
+            const form = el.closest("form");
+            if (form && typeof form.requestSubmit === "function") form.requestSubmit();
+          }
+          return { ok: true };
+        }
+        const nextValue = String(value ?? "");
+        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+        setter?.call(el, nextValue);
+        if (typeof el.setSelectionRange === "function") {
+          el.setSelectionRange(nextValue.length, nextValue.length);
+        }
+        el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+        if (shouldSubmit) {
+          const form = el.closest("form");
+          if (form && typeof form.requestSubmit === "function") form.requestSubmit();
+        }
+        return { ok: true };
+      }`,
+      [text, submit],
+    );
+  }
+
   private getViewportPoint(relativePosition?: { xRatio: number; yRatio: number }): BrowserPoint {
     return {
       x: Math.round((this.browserView?.getBounds().width ?? this.bounds.width) * clampRatio(relativePosition?.xRatio)),
@@ -1692,23 +2193,33 @@ export class BrowserManager {
 
     if (normalizedTarget?.ref?.trim()) {
       const ref = normalizedTarget.ref.trim();
-      if (!this.elementSelectors.has(ref) && !this.elementDescriptors.has(ref)) {
-        await this.snapshot("resolve");
-      }
-      const selector = this.elementSelectors.get(ref);
-      const descriptor = this.elementDescriptors.get(ref);
-      if (selector || descriptor?.bounds) {
+      try {
+        const entry = await this.resolveRefEntry(ref);
+        const descriptor = await this.refreshDescriptorFromBackendNode(ref, entry.backendNodeId)
+          ?? this.elementDescriptors.get(ref);
         return {
           target: normalizedTarget,
           requestedStrategy,
           actualStrategy: "ref",
           ref,
-          selector,
+          backendNodeId: entry.backendNodeId,
           bounds: normalizeTargetBounds(descriptor?.bounds),
           query: naturalQuery,
           role,
           confidence: 1,
         };
+      } catch (error) {
+        if (!naturalQuery) {
+          return {
+            target: normalizedTarget,
+            requestedStrategy,
+            actualStrategy: "ref",
+            ref,
+            query: naturalQuery,
+            role,
+            warning: error instanceof Error ? error.message : String(error),
+          };
+        }
       }
     }
 
@@ -1787,34 +2298,36 @@ export class BrowserManager {
       const candidate = resolve.candidates[0];
       if (resolve.selectedRef) {
         const ref = resolve.selectedRef;
-        const selector = this.elementSelectors.get(ref);
-        const descriptor = this.elementDescriptors.get(ref);
+        const entry = await this.resolveRefEntry(ref).catch(() => undefined);
+        const descriptor = entry
+          ? await this.refreshDescriptorFromBackendNode(ref, entry.backendNodeId).catch(() => this.elementDescriptors.get(ref))
+          : this.elementDescriptors.get(ref);
         return {
           target: normalizedTarget,
           requestedStrategy,
-          actualStrategy: resolve.semanticReady ? "semantic" : "dom",
+          actualStrategy: "ax",
           ref,
-          selector,
+          backendNodeId: entry?.backendNodeId,
           bounds: normalizeTargetBounds(descriptor?.bounds),
           query: naturalQuery,
           role,
           confidence: candidate?.confidence,
           resolve,
           warning: shouldCaptureVisionFallback(requestedStrategy, resolve)
-            ? "DOM evidence is weak; vision fallback may be required."
+            ? "AX/DOM evidence is weak; vision fallback may be required."
             : undefined,
         };
       }
       return {
         target: normalizedTarget,
         requestedStrategy,
-        actualStrategy: resolve.semanticReady ? "semantic" : "dom",
+        actualStrategy: "ax",
         query: naturalQuery,
         role,
         confidence: candidate?.confidence,
         resolve,
         warning: shouldCaptureVisionFallback(requestedStrategy, resolve)
-          ? "DOM resolver could not produce enough evidence; vision fallback may be required."
+          ? "AX/ref resolver could not produce enough evidence; vision fallback may be required."
           : undefined,
       };
     }
@@ -1885,6 +2398,114 @@ export class BrowserManager {
     this.state = { ...this.state, lastAction: "run", error: undefined };
     this.emit();
     return { ...this.getState(), ok: true, run: trace };
+  }
+
+  private async executeScript(request: BrowserActionRequest): Promise<BrowserActionResponse> {
+    if (!this.browserView) throw new Error("Browser runtime is not available.");
+    const source = String(request.script ?? "");
+    if (!source.trim()) {
+      throw new Error("browser_action.script requires script.");
+    }
+
+    const timeoutMs = Math.max(1, Math.floor(Number(request.timeoutMs ?? DEFAULT_SCRIPT_TIMEOUT_MS) || DEFAULT_SCRIPT_TIMEOUT_MS));
+    const previousUrl = this.browserView.webContents.getURL();
+    const electron = await import("electron").catch(() => {
+      throw new Error("Browser runtime is only available in the Electron desktop app.");
+    });
+    const runtimeArgs = request.args ?? [];
+    const sendCommand = async (method: string, params?: Record<string, unknown>) => (
+      this.withCdp((cdp) => cdp.sendCommand(method, params ?? {}))
+    );
+    const context = {
+      browserView: this.browserView,
+      webContents: this.browserView.webContents,
+      cdp: this.browserView.webContents.debugger,
+      rawDebugger: this.browserView.webContents.debugger,
+      sendCommand,
+      cdpSend: sendCommand,
+      browserManager: this,
+      electron,
+      require,
+      Buffer,
+      process,
+      console,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+    } satisfies Record<string, unknown>;
+
+    const AsyncFunction = Object.getPrototypeOf(async function noop() {
+      return undefined;
+    }).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<unknown>;
+
+    let runner: (...values: unknown[]) => Promise<unknown>;
+    try {
+      runner = new AsyncFunction(...Object.keys(context), "args", source);
+    } catch (error) {
+      const snapshot = await this.snapshot("script");
+      return {
+        ...snapshot,
+        ok: false,
+        script: {
+          durationMs: 0,
+          error: browserScriptError(error),
+        },
+      };
+    }
+
+    const startedAt = Date.now();
+    const executionPromise = Promise.resolve().then(() => runner(...Object.values(context), runtimeArgs));
+    const settledExecution = executionPromise
+      .then((value) => ({ kind: "result" as const, value }))
+      .catch((error) => ({ kind: "error" as const, error }));
+    let timer: NodeJS.Timeout | undefined;
+    const outcome = await Promise.race([
+      settledExecution,
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
+      }),
+    ]) as { kind: "result"; value: unknown } | { kind: "error"; error: unknown } | { kind: "timeout" };
+    if (timer) clearTimeout(timer);
+
+    if (outcome.kind === "timeout") {
+      executionPromise.catch(() => undefined);
+      const snapshot = await this.snapshot("script");
+      return {
+        ...snapshot,
+        ok: false,
+        script: {
+          durationMs: timeoutMs,
+          timedOut: true,
+          error: {
+            name: "TimeoutError",
+            message: `Browser runtime script timed out after ${timeoutMs}ms.`,
+          },
+        },
+      };
+    }
+
+    await this.waitForActionSettled(previousUrl);
+    const snapshot = await this.snapshot("script");
+    if (outcome.kind === "error") {
+      return {
+        ...snapshot,
+        ok: false,
+        script: {
+          durationMs: Date.now() - startedAt,
+          error: browserScriptError(outcome.error),
+        },
+      };
+    }
+
+    return {
+      ...snapshot,
+      ok: true,
+      script: {
+        durationMs: Date.now() - startedAt,
+        result: browserScriptResultValue(outcome.value),
+      },
+    };
   }
 
   private async executeRunStep(
@@ -2010,16 +2631,13 @@ export class BrowserManager {
           return {
             ...base,
             ok: Boolean(resolve.selectedRef || (!resolve.needsDisambiguation && resolve.candidates.length)),
-            strategy: resolve.semanticReady ? "semantic" : "dom",
+            strategy: "ax",
             resolve,
             selectedRef: resolve.selectedRef,
             confidence: resolve.candidates[0]?.confidence,
-            semanticReady: resolve.semanticReady,
-            semanticPending: resolve.semanticPending,
-            semanticError: resolve.semanticError,
             error: resolve.selectedRef || (!resolve.needsDisambiguation && resolve.candidates.length)
               ? undefined
-              : "DOM resolver could not confidently resolve the requested target.",
+              : "AX/ref resolver could not confidently resolve the requested target.",
           };
         }
         case "click":
@@ -2083,9 +2701,6 @@ export class BrowserManager {
       selectedBounds: resolved.bounds,
       confidence: resolved.confidence ?? topCandidate?.confidence,
       resolve: resolved.resolve,
-      semanticReady: resolved.resolve?.semanticReady,
-      semanticPending: resolved.resolve?.semanticPending,
-      semanticError: resolved.resolve?.semanticError,
       warning: resolved.warning,
       error,
     };
@@ -2105,14 +2720,22 @@ export class BrowserManager {
         base,
         resolved,
         resolved.resolve?.strictActionMismatch
-          ? "DOM resolver refused to click because the best candidate is only semantically related and does not contain the requested action text."
+          ? "AX/ref resolver refused to click because the best candidate does not contain the requested action text."
           : resolved.warning || "No browser element could be resolved for click.",
       );
     }
 
     const previousUrl = this.browserView.webContents.getURL();
     let bounds = resolved.bounds;
-    if (resolved.selector || resolved.xpath) {
+    if (resolved.backendNodeId) {
+      await this.scrollBackendNodeIntoView(resolved.backendNodeId);
+      if (resolved.ref) {
+        const descriptor = await this.refreshDescriptorFromBackendNode(resolved.ref, resolved.backendNodeId);
+        bounds = normalizeTargetBounds(descriptor?.bounds) ?? bounds;
+      } else {
+        bounds = normalizeTargetBounds((await this.readDomNodeMetadata(resolved.backendNodeId))?.bounds) ?? bounds;
+      }
+    } else if (resolved.selector || resolved.xpath) {
       const result = await this.browserView.webContents.executeJavaScript(
         browserScript("click", { ref: resolved.ref ?? "", selector: resolved.selector, xpath: resolved.xpath }),
         true,
@@ -2177,16 +2800,18 @@ export class BrowserManager {
     }
 
     const previousUrl = this.browserView.webContents.getURL();
-    const result = await this.browserView.webContents.executeJavaScript(
-      browserScript("type", {
-        ref: resolved.ref ?? "",
-        selector: resolved.selector,
-        xpath: resolved.xpath,
-        text,
-        submit: Boolean(step.submit),
-      }),
-      true,
-    ) as { ok?: boolean; error?: string };
+    const result = resolved.backendNodeId
+      ? await this.typeIntoBackendNode(resolved.backendNodeId, text, Boolean(step.submit))
+      : await this.browserView.webContents.executeJavaScript(
+        browserScript("type", {
+          ref: resolved.ref ?? "",
+          selector: resolved.selector,
+          xpath: resolved.xpath,
+          text,
+          submit: Boolean(step.submit),
+        }),
+        true,
+      ) as { ok?: boolean; error?: string };
     if (!result?.ok) {
       return this.resultFromResolvedTarget(base, resolved, result?.error || "Typing failed.");
     }
@@ -2425,7 +3050,7 @@ export class BrowserManager {
   private async sendMouseClickAt(bounds?: BrowserBounds): Promise<Omit<BrowserInteractionResult, "action">> {
     if (!this.browserView) throw new Error("Browser runtime is not available.");
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
-      throw new Error("DOM resolver found the element, but it has no clickable bounds.");
+      throw new Error("AX/ref resolver found the element, but it has no clickable bounds.");
     }
     const x = Math.round(bounds.x + bounds.width / 2);
     const y = Math.round(bounds.y + bounds.height / 2);

@@ -113,6 +113,7 @@ export type BrowserAction =
   | "type"
   | "scroll"
   | "run"
+  | "script"
   | "screenshot"
   | "refresh"
   | "back"
@@ -177,7 +178,6 @@ export interface BrowserElementDescriptor extends BrowserElementSnapshot {
 export interface BrowserResolveCandidate extends BrowserElementDescriptor {
   confidence: number;
   lexicalScore: number;
-  semanticScore?: number;
   roleScore: number;
   contextScore: number;
   stateScore: number;
@@ -187,10 +187,7 @@ export interface BrowserResolveCandidate extends BrowserElementDescriptor {
 export interface BrowserResolveResult {
   query: string;
   candidates: BrowserResolveCandidate[];
-  semanticModel: "Xenova/all-MiniLM-L6-v2";
-  semanticReady: boolean;
-  semanticPending?: boolean;
-  semanticError?: string;
+  resolver: "ax-tree";
   needsDisambiguation?: boolean;
   needsVisionFallback?: boolean;
   strictActionMismatch?: boolean;
@@ -217,7 +214,6 @@ export type BrowserRunOperation =
 export type BrowserActionStrategy =
   | "auto"
   | "dom"
-  | "semantic"
   | "css"
   | "xpath"
   | "cdp"
@@ -265,15 +261,33 @@ export interface BrowserRunStepResult {
   selectedRef?: string;
   selectedBounds?: BrowserBounds;
   confidence?: number;
-  semanticReady?: boolean;
-  semanticPending?: boolean;
-  semanticError?: string;
   resolve?: BrowserResolveResult;
   interaction?: BrowserInteractionResult;
   artifact?: BrowserArtifact;
   retries?: BrowserRunFailureAction[];
   warning?: string;
   error?: string;
+}
+
+export interface BrowserScriptResultValue {
+  format: "json" | "inspect";
+  type: string;
+  value?: unknown;
+  text?: string;
+  truncated?: boolean;
+}
+
+export interface BrowserScriptError {
+  name: string;
+  message: string;
+  stack?: string;
+}
+
+export interface BrowserScriptExecutionResult {
+  durationMs: number;
+  timedOut?: boolean;
+  result?: BrowserScriptResultValue;
+  error?: BrowserScriptError;
 }
 
 export interface BrowserRunTrace {
@@ -358,6 +372,8 @@ export interface BrowserActionRequest {
   url?: string;
   text?: string;
   goal?: string;
+  script?: string;
+  args?: unknown[];
   target?: BrowserTargetDescriptor;
   steps?: BrowserRunStep[];
   strategy?: BrowserActionStrategy;
@@ -370,6 +386,7 @@ export interface BrowserActionRequest {
   deltaY?: number;
   waitMs?: number;
   durationMs?: number;
+  timeoutMs?: number;
   limit?: number;
   minConfidence?: number;
 }
@@ -379,6 +396,7 @@ export interface BrowserActionResponse extends BrowserState {
   artifact?: BrowserArtifact;
   interaction?: BrowserInteractionResult;
   run?: BrowserRunTrace;
+  script?: BrowserScriptExecutionResult;
 }
 
 export type ChatRole = "system" | "user" | "assistant";
