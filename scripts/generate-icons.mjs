@@ -5,6 +5,7 @@ import sharp from "sharp";
 
 const rootDir = process.cwd();
 const assetsDir = path.join(rootDir, "assets");
+const publicAssetsDir = path.join(rootDir, "public", "assets");
 const sourcePath = path.join(assetsDir, "nexoagent-logo-source.png");
 
 const pngSizes = [1024, 512, 256, 128, 64, 48, 32, 16];
@@ -12,15 +13,24 @@ const icoSizes = new Set([256, 128, 64, 48, 32, 16]);
 const icoSources = [];
 const crop = { left: 202, top: 0, width: 850, height: 850 };
 
+await fs.mkdir(publicAssetsDir, { recursive: true });
+
 for (const size of pngSizes) {
   const pngData = await sharp(sourcePath)
     .extract(crop)
     .resize(size, size, { fit: "contain" })
     .png()
     .toBuffer();
-  const outputPath = path.join(assetsDir, `nexoagent-icon-${size}.png`);
-  await fs.writeFile(outputPath, pngData);
-  console.log(`wrote ${path.relative(rootDir, outputPath)}`);
+  const relativeName = `nexoagent-icon-${size}.png`;
+  const outputPaths = [
+    path.join(assetsDir, relativeName),
+    path.join(publicAssetsDir, relativeName),
+  ];
+
+  for (const outputPath of outputPaths) {
+    await fs.writeFile(outputPath, pngData);
+    console.log(`wrote ${path.relative(rootDir, outputPath)}`);
+  }
 
   if (icoSizes.has(size)) {
     icoSources.push(pngData);
@@ -29,7 +39,11 @@ for (const size of pngSizes) {
 
 await fs.copyFile(path.join(assetsDir, "nexoagent-icon-512.png"), path.join(assetsDir, "nexoagent-icon.png"));
 console.log("wrote assets/nexoagent-icon.png");
+await fs.copyFile(path.join(assetsDir, "nexoagent-icon-512.png"), path.join(publicAssetsDir, "nexoagent-icon.png"));
+console.log("wrote public/assets/nexoagent-icon.png");
 
 const icoData = await pngToIco(icoSources);
 await fs.writeFile(path.join(assetsDir, "nexoagent-icon.ico"), icoData);
 console.log("wrote assets/nexoagent-icon.ico");
+await fs.writeFile(path.join(publicAssetsDir, "nexoagent-icon.ico"), icoData);
+console.log("wrote public/assets/nexoagent-icon.ico");

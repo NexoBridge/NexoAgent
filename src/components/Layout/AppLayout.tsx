@@ -59,7 +59,9 @@ export const AppLayout: React.FC = () => {
   const [resizingSessionSider, setResizingSessionSider] = useState(false);
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [hoveredWindowControl, setHoveredWindowControl] = useState<"minimize" | "maximize" | "close" | null>(null);
-  const isWindowsDesktop = isElectron() && navigator.userAgent.includes("Windows");
+  const isDesktopApp = isElectron();
+  const browserWorkbenchAvailable = isDesktopApp;
+  const isWindowsDesktop = isDesktopApp && navigator.userAgent.includes("Windows");
   const { ensureRuntimeReady, loadSessions, newSession, loadSettings } = useChatStore();
   const { mode, colors, toggleTheme } = useTheme();
   const { lang, setLang, t } = useI18n();
@@ -121,6 +123,12 @@ export const AppLayout: React.FC = () => {
       }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!browserWorkbenchAvailable && view === "browser") {
+      setView("chat");
+    }
+  }, [browserWorkbenchAvailable, view]);
 
   useEffect(() => {
     localStorage.setItem("nexo-session-sider-collapsed", String(sessionSiderCollapsed));
@@ -345,7 +353,7 @@ export const AppLayout: React.FC = () => {
           /> */}
 
           {navItem("chat", <MessageOutlined />, t("chat"))}
-          {navItem("browser", <GlobalOutlined />, t("browserWorkbench"))}
+          {browserWorkbenchAvailable && navItem("browser", <GlobalOutlined />, t("browserWorkbench"))}
 
           <Divider style={{ margin: "4px 0", borderColor: colors.border, minWidth: 36, width: 36 }} />
 
@@ -415,7 +423,7 @@ export const AppLayout: React.FC = () => {
 
       <Content style={{ display: "flex", flexDirection: "column", overflow: "hidden", background: colors.bgPrimary }}>
         {view === "chat" && <ChatPanel />}
-        {view === "browser" && <BrowserWorkbench />}
+        {browserWorkbenchAvailable && view === "browser" && <BrowserWorkbench />}
         {view === "memory" && <MemoryPanel />}
         {view === "knowledge" && <Knowledge />}
         {view === "tools" && <Tools />}

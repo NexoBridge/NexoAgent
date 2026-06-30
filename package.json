@@ -16,9 +16,9 @@
     "dist:win": "electron-builder --publish never --win nsis zip",
     "dist:mac": "electron-builder --publish never --mac dmg zip",
     "dist:linux": "electron-builder --publish never --linux AppImage tar.gz",
-    "package:win": "npm run build && npm run dist:win",
-    "package:mac": "npm run build && npm run dist:mac",
-    "package:linux": "npm run build && npm run dist:linux",
+    "package:win": "npm run icons:build && npm run build && npm run dist:win",
+    "package:mac": "npm run icons:build && npm run build && npm run dist:mac",
+    "package:linux": "npm run icons:build && npm run build && npm run dist:linux",
     "serve:web-console": "node dist-electron/electron/standalone.js",
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
@@ -26,7 +26,7 @@
     "verify:browser-action-run": "npm run build:electron && node scripts/verify-browser-action-run.mjs",
     "verify:provider-embeddings": "npm run build:electron && node scripts/verify-provider-embeddings.mjs",
     "verify:multimodal-models": "npm run build:electron && node scripts/verify-multimodal-models.mjs",
-    "package": "npm run build && electron-builder --publish never"
+    "package": "npm run icons:build && npm run build && electron-builder --publish never"
   },
   "dependencies": {
     "@ant-design/icons": "^5.6.1",
