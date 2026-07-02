@@ -38,6 +38,7 @@ const DREAM_DEBOUNCE_MS = 1200;
 const EMBEDDING_TIMEOUT_MS = 8000;
 const CHROMA_BACKFILL_BATCH_SIZE = 50;
 const CHROMA_RETRY_DELAY_MS = 30_000;
+const EMBEDDING_FAILURE_BACKOFF_MS = 30_000;
 
 export type MemoryKind = "daily" | "dream" | "script";
 
@@ -100,7 +101,9 @@ let chromaUnavailable = false;
 let chromaRetryAt = 0;
 let chromaStartupStdout = "";
 let chromaStartupStderr = "";
+let chromaBackfillPromise: Promise<void> | null = null;
 const pendingChromaUpserts = new Set<string>();
+const embeddingFailureBackoff = new Map<string, number>();
 const dreamTimers = new Map<string, NodeJS.Timeout>();
 const chromaChildren = new Set<ChildProcess>();
 const MEMORY_TABLE_COLUMNS = ["id", "kind", "day_key", "content", "session_id", "key", "scope", "metadata", "created_at", "updated_at"];
@@ -360,7 +363,9 @@ export async function loadMemory() {
     }
     db.run("PRAGMA foreign_keys = ON;");
     await ensureSchema(db);
-    await queueMissingChromaBackfill();
+    void queueMissingChromaBackfill().catch((error) => {
+      serverLog(`WARN Deferred Chroma memory backfill inspection failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
     await writeMemoryMarkdown();
   })();
   return dbReady;
@@ -566,6 +571,31 @@ function normalizeGeminiModel(model: string) {
   return model.startsWith("models/") ? model : `models/${model}`;
 }
 
+function embeddingBackoffKey(config: ResolvedEmbeddingConfig) {
+  return [
+    config.transport,
+    config.providerName,
+    config.apiBase.replace(/\/+$/, ""),
+    config.model,
+  ].join("::");
+}
+
+function isEmbeddingBackoffActive(config: ResolvedEmbeddingConfig) {
+  const key = embeddingBackoffKey(config);
+  const until = embeddingFailureBackoff.get(key) ?? 0;
+  if (until > Date.now()) return true;
+  if (until) embeddingFailureBackoff.delete(key);
+  return false;
+}
+
+function markEmbeddingFailure(config: ResolvedEmbeddingConfig) {
+  embeddingFailureBackoff.set(embeddingBackoffKey(config), Date.now() + EMBEDDING_FAILURE_BACKOFF_MS);
+}
+
+function clearEmbeddingFailure(config: ResolvedEmbeddingConfig) {
+  embeddingFailureBackoff.delete(embeddingBackoffKey(config));
+}
+
 async function requestOpenAICompatibleEmbeddings(
   inputs: string[],
   config: ResolvedEmbeddingConfig,
@@ -658,10 +688,13 @@ async function embedText(
 ) {
   const config = resolvedConfig ?? await resolveEmbeddingConfig(settings);
   if (!config) return null;
+  if (isEmbeddingBackoffActive(config)) return null;
   const vectors = await requestEmbeddings([text], config, purpose).catch((error) => {
+    markEmbeddingFailure(config);
     serverLog(`WARN ${config.providerName} embedding request failed for ${purpose}: ${error instanceof Error ? error.message : String(error)}`);
     return null;
   });
+  if (vectors) clearEmbeddingFailure(config);
   return vectors?.[0] ?? null;
 }
 
@@ -977,9 +1010,24 @@ async function backfillPendingChroma(settings: MemoryEmbeddingSettings = {}) {
   const ids = Array.from(pendingChromaUpserts).slice(0, CHROMA_BACKFILL_BATCH_SIZE);
   for (const id of ids) {
     const memory = getMemoryById(id);
-    if (memory) await upsertChromaMemory(memory, settings);
-    else pendingChromaUpserts.delete(id);
+    if (!memory) {
+      pendingChromaUpserts.delete(id);
+      continue;
+    }
+    const ok = await upsertChromaMemory(memory, settings);
+    if (!ok) break;
   }
+}
+
+function schedulePendingChromaBackfill(settings: MemoryEmbeddingSettings = {}) {
+  if (pendingChromaUpserts.size === 0 || chromaBackfillPromise) return;
+  chromaBackfillPromise = backfillPendingChroma(settings)
+    .catch((error) => {
+      serverLog(`WARN Chroma memory backfill failed: ${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      chromaBackfillPromise = null;
+    });
 }
 
 function chromaWhere(options: RecallOptions): Where | undefined {
@@ -1020,7 +1068,7 @@ function formatRecallEntry(entry: MemoryEntry) {
 
 async function semanticSearchEntries(query: string, settings: MemoryEmbeddingSettings = {}, options: RecallOptions = {}) {
   const k = options.k ?? 6;
-  await backfillPendingChroma(settings);
+  schedulePendingChromaBackfill(settings);
   const config = await resolveEmbeddingConfig(settings);
   if (!config) return null;
   const vector = await embedText(query, settings, "retrieval_query", config);

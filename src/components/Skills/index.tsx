@@ -169,7 +169,8 @@ export default function Skills() {
   );
 
   return (
-    <div style={{ background: colors.bgPrimary, minHeight: "100%", padding: 24, color: colors.textPrimary }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: colors.bgPrimary, color: colors.textPrimary }}>
+      <div style={{ flexShrink: 0, padding: "24px 24px 0 24px" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 20 }}>
         <div>
           <Title level={4} style={{ color: colors.textPrimary, margin: 0 }}>
@@ -205,6 +206,9 @@ export default function Skills() {
           showIcon
           message={t("skillsInjected")}
         />
+      </Space>
+      </div>
+      <div style={{ flex: 1, overflow: "auto", padding: "0 24px 24px 24px", minHeight: 0 }}>
 
         <div style={sectionStyle}>
           <Title level={5} style={{ color: colors.textPrimary, marginTop: 0 }}>
@@ -226,7 +230,7 @@ export default function Skills() {
           </Title>
           {renderSkillList(builtInSkills, t("noBuiltInSkills"))}
         </div>
-      </Space>
+      </div>
     </div>
   );
 }

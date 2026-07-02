@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useState } from "react";
 import { Tree, Button, Input, Modal, message } from "antd";
 import { BookOutlined, FileOutlined, InboxOutlined } from "@ant-design/icons";
 import ReactMarkdown from "react-markdown";
@@ -228,7 +228,7 @@ export default function Knowledge() {
 
   return (
     <div
-      style={{ display: "flex", height: "100%", background: colors.bgPrimary, color: colors.textPrimary, position: "relative" }}
+      style={{ display: "flex", height: "100%", background: colors.bgPrimary, color: colors.textPrimary, position: "relative", overflow: "hidden" }}
       onDragEnter={(event) => {
         if (!event.dataTransfer.types.includes("Files")) return;
         event.preventDefault();

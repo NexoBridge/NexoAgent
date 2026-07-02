@@ -304,7 +304,8 @@ export default function Tools() {
   const errorCount = mcpServers.filter((server) => server.runtimeStatus?.status === "error").length;
 
   return (
-    <div style={{ background: colors.bgPrimary, minHeight: "100%", padding: 24, color: colors.textPrimary }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: colors.bgPrimary, color: colors.textPrimary }}>
+      <div style={{ flexShrink: 0, padding: "24px 24px 0 24px" }}>
       {messageContext}
       <div style={{ marginBottom: 18 }}>
         <Title level={4} style={{ color: colors.textPrimary, marginBottom: 6 }}>
@@ -312,8 +313,14 @@ export default function Tools() {
         </Title>
         <Text style={{ color: colors.textMuted }}>{ui.subtitle}</Text>
       </div>
-
+      </div>
+      <div style={{ flex: 1, overflow: "auto", padding: "0 24px 24px 24px", minHeight: 0 }}>
       <Tabs
+        renderTabBar={(props, DefaultTabBar) => (
+          <div style={{ position: "sticky", top: 0, zIndex: 10, background: colors.bgPrimary, paddingTop: 8 }}>
+            <DefaultTabBar {...props} />
+          </div>
+        )}
         items={[
           {
             key: "builtins",
@@ -543,6 +550,7 @@ export default function Tools() {
           </Form.Item>
         </Form>
       </Modal>
+      </div>
     </div>
   );
 }
