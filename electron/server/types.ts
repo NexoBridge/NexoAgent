@@ -1,6 +1,6 @@
 ﻿import type { AgentSettings, ChatMessage, ModelCapability, TurnCompletionStatus } from "../../src/shared/types";
 
-import type { MessageBlock, ToolCallTrace } from "../../src/shared/types";
+import type { MessageBlock, ToolCallTrace, ToolOutputStats, ToolRawOutputRef } from "../../src/shared/types";
 
 export type TurnStopReason =
   | "completed"
@@ -12,7 +12,16 @@ export type TurnStopReason =
 export type StreamEvent =
   | { type: "token"; content: string }
   | { type: "tool_call"; id: string; name: string; input: unknown }
-  | { type: "tool_result"; id: string; output: string; elapsed: number }
+  | {
+      type: "tool_result";
+      id: string;
+      output: string;
+      elapsed: number;
+      outputSummary?: string;
+      outputPreview?: string;
+      rawOutput?: ToolRawOutputRef;
+      outputStats?: ToolOutputStats;
+    }
   | {
       type: "done";
       content: string;
@@ -45,6 +54,8 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   threadSummary?: string;
+  /** Number of non-system conversation messages covered by threadSummary. */
+  threadSummaryMessageCount?: number;
   threadSummaryUpdatedAt?: string;
   threadSummaryVersion?: number;
 }

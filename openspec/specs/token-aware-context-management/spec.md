@@ -51,6 +51,11 @@ The system SHALL automatically compact thread history when the estimated prompt 
 - **WHEN** estimated input usage reaches or exceeds the configured auto-compaction limit for the active model
 - **THEN** the runtime SHALL summarize older thread context and rebuild the prompt before sending the next model request
 
+#### Scenario: Message count exceeds compact threshold
+- **WHEN** the number of non-system conversation messages not yet covered by the rolling session summary reaches the configured `contextCompactionThreshold`
+- **THEN** the runtime SHALL summarize older uncovered messages even if the active model's token budget has not been reached
+- **AND** the live prompt SHALL retain the rolling session summary plus the configured recent raw message window
+
 #### Scenario: Long task requires repeated compaction
 - **WHEN** a session continues to grow after one compact pass
 - **THEN** the runtime SHALL allow additional compaction passes to keep the conversation within the active model budget
@@ -66,6 +71,23 @@ The system SHALL maintain a rolling summary for the current thread and keep only
 - **WHEN** a user resumes a thread that already has a rolling session summary
 - **THEN** the runtime SHALL include that summary as thread-local context for continued work
 
+#### Scenario: Avoid re-summarizing the same messages
+- **WHEN** a thread has a rolling session summary from an earlier compaction pass
+- **THEN** the runtime SHALL track how many non-system conversation messages are already covered by that summary
+- **AND** later compaction passes SHALL summarize only newly uncovered older messages before the recent raw window
+
+### Requirement: Tool-grounded compaction summaries
+The system SHALL preserve the difference between tool-backed facts and unverified assistant narration when compacting conversation history.
+
+#### Scenario: Assistant claim has no tool result
+- **WHEN** earlier conversation text claims that a browser action, shell command, file edit, network request, or verification occurred without a corresponding retained tool result
+- **THEN** the compaction summary SHALL NOT record that claim as completed work
+- **AND** the summary SHALL mark it as planned, requested, assumed, or unverified as appropriate
+
+#### Scenario: Tool result exists
+- **WHEN** earlier conversation contains a tool call result, command output, browser state, or error
+- **THEN** the compaction summary SHALL preserve the relevant result, error, attempted action, and remaining task state needed for the next model call
+
 ### Requirement: Shared budget across auxiliary context
 The system SHALL budget memories, knowledge, attachments, and tool outputs against the same model input allowance used for conversation history.
 
@@ -76,4 +98,35 @@ The system SHALL budget memories, knowledge, attachments, and tool outputs again
 #### Scenario: Tool output is large
 - **WHEN** a tool result is larger than the allowed retained prompt budget
 - **THEN** the runtime SHALL keep a bounded representation of that tool output in prompt context
+
+### Requirement: Out-of-band storage for oversized tool outputs
+The system SHALL keep oversized tool outputs out of the default model context while preserving a retrievable raw reference.
+
+#### Scenario: Tool output exceeds inline budget
+- **WHEN** a tool result exceeds the configured inline character or token budget
+- **THEN** the runtime SHALL store the complete raw output out-of-band when it is within the raw-output storage limit
+- **AND** the model context SHALL receive only a compact summary, short preview, raw reference, and size/truncation metadata
+
+#### Scenario: Tool output exceeds raw storage budget
+- **WHEN** a tool result exceeds the configured raw-output storage budget
+- **THEN** the runtime SHALL store a bounded head/tail sample and statistics instead of the complete payload
+- **AND** the model context SHALL state that the raw output itself was too large to retain fully
+
+#### Scenario: Compacting a conversation with raw output references
+- **WHEN** conversation compaction summarizes earlier tool calls that used raw output references
+- **THEN** the compaction summary SHALL preserve the reference, summary, and important diagnostics
+- **AND** it SHALL NOT inline the complete raw output into the rolling session summary
+
+### Requirement: Lazy raw tool output retrieval
+The system SHALL allow raw tool output to be retrieved by reference without sending it through the default chat message stream.
+
+#### Scenario: User expands raw output in the UI
+- **WHEN** the user opens the raw output section for a bounded tool result
+- **THEN** the frontend SHALL fetch the raw output by reference on demand
+- **AND** the chat history payload SHALL remain bounded before that explicit fetch
+
+#### Scenario: Model needs full raw output
+- **WHEN** the assistant needs the complete raw output for a later step
+- **THEN** it SHALL explicitly request or invoke a supported retrieval path for the raw reference
+- **AND** it SHALL not assume the complete raw output is already present in prompt context
 

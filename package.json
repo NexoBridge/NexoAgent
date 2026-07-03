@@ -1,6 +1,6 @@
 {
   "name": "nexo-agent",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "private": true,
   "description": "Nexo Agent desktop and web console built with Electron, React, TypeScript, and Ant Design.",
   "main": "dist-electron/electron/bootstrap.js",
@@ -23,6 +23,7 @@
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "verify:context-management": "npm run build:electron && node scripts/verify-context-management.mjs",
+    "verify:tool-output-bounds": "npm run build:electron && node scripts/verify-tool-output-bounds.mjs",
     "verify:browser-action-run": "npm run build:electron && node scripts/verify-browser-action-run.mjs",
     "verify:provider-embeddings": "npm run build:electron && node scripts/verify-provider-embeddings.mjs",
     "verify:memory-recall": "npm run build:electron && node scripts/verify-memory-recall.mjs",

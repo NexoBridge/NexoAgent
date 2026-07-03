@@ -8,6 +8,8 @@ import type {
   ConversationSurface,
   MessageBlock as SharedMessageBlock,
   ModelProfile,
+  ToolOutputStats,
+  ToolRawOutputRef,
 } from "../shared/types";
 import { apiDelete, apiGet, apiPatch, apiPost, getRuntimeApiBase, setRuntimeApiBase, subscribeStream } from "../services/api";
 import { sanitizeApiKeyForSave } from "../shared/settings";
@@ -450,6 +452,14 @@ export const useChatStore = create<ChatStore>((set, get) => {
         if (event.type === "tool_result") {
           const output = String(event.output ?? "");
           const isError = output.trim().startsWith("Error:");
+          const outputSummary = typeof event.outputSummary === "string" ? event.outputSummary : undefined;
+          const outputPreview = typeof event.outputPreview === "string" ? event.outputPreview : undefined;
+          const rawOutput = event.rawOutput && typeof event.rawOutput === "object"
+            ? event.rawOutput as ToolRawOutputRef
+            : undefined;
+          const outputStats = event.outputStats && typeof event.outputStats === "object"
+            ? event.outputStats as ToolOutputStats
+            : undefined;
           const elapsed = toolStartTimes[event.id as string]
             ? (Date.now() - toolStartTimes[event.id as string]) / 1000
             : 0;
@@ -458,7 +468,16 @@ export const useChatStore = create<ChatStore>((set, get) => {
               ...state.toolCalls,
               [serverTurnId]: (state.toolCalls[serverTurnId] ?? []).map((toolCall) =>
                 toolCall.id === event.id
-                  ? { ...toolCall, output, elapsed, status: isError ? "error" : "done" }
+                  ? {
+                      ...toolCall,
+                      output,
+                      outputSummary,
+                      outputPreview,
+                      rawOutput,
+                      outputStats,
+                      elapsed,
+                      status: isError ? "error" : "done",
+                    }
                   : toolCall
               ),
             },

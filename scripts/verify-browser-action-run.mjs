@@ -421,6 +421,95 @@ function createScriptManager() {
 }
 
 {
+  const { manager, cdpCalls } = createScriptManager();
+  manager.setTestSnapshotData([
+    { ref: "e2", backendNodeId: 102, role: "textbox", name: "Recipient", nth: 0 },
+  ], [
+    {
+      ref: "e2",
+      tag: "input",
+      role: "textbox",
+      name: "Recipient",
+      placeholder: "Recipient",
+      editable: true,
+      visible: true,
+      enabled: true,
+      descriptorText: "Recipient | textbox | enabled",
+      bounds: { x: 20, y: 80, width: 240, height: 32 },
+    },
+  ]);
+  manager.resolveRefEntry = async (ref) => ({ ref, backendNodeId: 102, role: "textbox", name: "Recipient", nth: 0 });
+  manager.scrollBackendNodeIntoView = async () => {};
+  manager.refreshDescriptorFromBackendNode = async () => ({
+    ref: "e2",
+    tag: "input",
+    role: "textbox",
+    name: "Recipient",
+    editable: true,
+    visible: true,
+    enabled: true,
+    bounds: { x: 20, y: 80, width: 240, height: 32 },
+  });
+
+  const response = await manager.executeAction({
+    action: "type",
+    target: "e2",
+    text: "hello@example.test",
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.interaction?.strategy, "cdp-type");
+  assert.deepEqual(response.interaction?.bounds, { x: 20, y: 80, width: 240, height: 32 });
+  assert.equal(cdpCalls.some((call) => call.method === "Input.dispatchMouseEvent" && call.params.type === "mousePressed"), true);
+  assert.deepEqual(
+    cdpCalls.find((call) => call.method === "Input.insertText")?.params,
+    { text: "hello@example.test" },
+  );
+}
+
+{
+  const { manager, executedPageScripts } = createScriptManager();
+  manager.setTestSnapshotData([
+    { ref: "e2", backendNodeId: 102, role: "textbox", name: "Recipient", nth: 0 },
+  ], [
+    {
+      ref: "e2",
+      tag: "input",
+      role: "textbox",
+      name: "Recipient",
+      editable: true,
+      visible: true,
+      enabled: true,
+      descriptorText: "Recipient | textbox | enabled",
+      bounds: { x: 20, y: 80, width: 240, height: 32 },
+    },
+  ]);
+  manager.resolveRefEntry = async (ref) => ({ ref, backendNodeId: 102, role: "textbox", name: "Recipient", nth: 0 });
+  manager.scrollBackendNodeIntoView = async () => {};
+  manager.refreshDescriptorFromBackendNode = async () => ({
+    ref: "e2",
+    tag: "input",
+    role: "textbox",
+    name: "Recipient",
+    editable: true,
+    visible: true,
+    enabled: true,
+    bounds: { x: 20, y: 80, width: 240, height: 32 },
+  });
+  manager.sendCdpInsertText = async () => false;
+
+  const response = await manager.executeAction({
+    action: "type",
+    target: "e2",
+    text: "hello@example.test",
+  });
+
+  assert.equal(response.ok, false);
+  assert.equal(response.error, "CDP text input failed.");
+  assert.deepEqual(executedPageScripts, []);
+}
+
+{
   const { manager } = createScriptManager();
   const response = await manager.executeAction({
     action: "script",
@@ -471,6 +560,139 @@ function createScriptManager() {
     method: "Input.dispatchMouseEvent",
     params: { type: "mouseMoved", x: 12, y: 34 },
   });
+}
+
+{
+  const { manager } = createScriptManager();
+  const response = await manager.executeAction({
+    action: "script",
+    script: `
+      const write = scriptCache.set("capture:test", {
+        requests: [{ method: "POST", url: "https://api.test/orders", headers: { "x-test": "1" }, body: "sku=42" }]
+      }, { ttlMs: 60000, metadata: { kind: "verification" } });
+      const value = scriptCache.get("capture:test");
+      const deleted = scriptCache.delete("capture:test");
+      return { write, value, deleted, existsAfterDelete: Boolean(scriptCache.get("capture:test")) };
+    `,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.script?.cache?.writes?.[0]?.key, "capture:test");
+  assert.deepEqual(response.script?.cache?.deletedKeys, ["capture:test"]);
+  assert.equal(response.script?.result?.value?.deleted, true);
+  assert.equal(response.script?.result?.value?.existsAfterDelete, false);
+  assert.equal(response.script?.result?.value?.value?.requests?.[0]?.method, "POST");
+}
+
+{
+  const { manager } = createScriptManager();
+  const response = await manager.executeAction({
+    action: "script",
+    script: `
+      scriptCache.set("capture:consume", { once: true });
+      const value = scriptCache.consume("capture:consume");
+      return {
+        value,
+        existsAfterConsume: Boolean(scriptCache.get("capture:consume")),
+      };
+    `,
+  });
+  assert.equal(response.ok, true);
+  assert.deepEqual(response.script?.cache?.deletedKeys, ["capture:consume"]);
+  assert.deepEqual(response.script?.result?.value, {
+    value: { once: true },
+    existsAfterConsume: false,
+  });
+}
+
+{
+  const { manager } = createScriptManager();
+  const response = await manager.executeAction({
+    action: "script",
+    script: `
+      scriptCache.set("capture:ttl", { ok: true }, { ttlMs: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return {
+        value: scriptCache.get("capture:ttl"),
+        list: scriptCache.list({ prefix: "capture:ttl" })
+      };
+    `,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.script?.result?.value?.value, undefined);
+  assert.deepEqual(response.script?.result?.value?.list, []);
+}
+
+{
+  const { manager } = createScriptManager();
+  const response = await manager.executeAction({
+    action: "script",
+    scriptCacheKey: "capture:auto-test",
+    scriptCacheTtlMs: 60000,
+    script: `
+      return {
+        requests: [{
+          method: "POST",
+          url: "https://api.test/orders",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sku: 42 }),
+          status: 200
+        }]
+      };
+    `,
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.script?.cache?.automatic?.key, "capture:auto-test");
+
+  const read = await manager.executeAction({
+    action: "script",
+    script: 'return scriptCache.getEntry("capture:auto-test");',
+  });
+  assert.equal(read.ok, true);
+  assert.equal(read.script?.result?.value?.key, "capture:auto-test");
+  assert.equal(read.script?.result?.value?.value?.requests?.[0]?.url, "https://api.test/orders");
+}
+
+{
+  const { manager } = createScriptManager();
+  await manager.executeAction({
+    action: "script",
+    script: `
+      scriptCache.set("capture:replay", {
+        method: "POST",
+        url: "https://api.test/orders",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sku: 7 })
+      });
+    `,
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), "https://api.test/orders");
+    assert.equal(init.method, "POST");
+    assert.equal(init.body, JSON.stringify({ sku: 7 }));
+    return new Response("created", { status: 201, statusText: "Created", headers: { "x-replay": "yes" } });
+  };
+  try {
+    const response = await manager.executeAction({
+      action: "script",
+      script: 'return await scriptCache.replay("capture:replay", { deleteAfter: true });',
+    });
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.script?.cache?.deletedKeys, ["capture:replay"]);
+    assert.equal(response.script?.result?.value?.status, 201);
+    assert.equal(response.script?.result?.value?.body, "created");
+    assert.equal(response.script?.result?.value?.replayedRequest?.method, "POST");
+    assert.equal(response.script?.result?.value?.deletedSourceKey, "capture:replay");
+
+    const read = await manager.executeAction({
+      action: "script",
+      script: 'return scriptCache.get("capture:replay");',
+    });
+    assert.equal(read.ok, true);
+    assert.equal(read.script?.result?.value, undefined);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 {

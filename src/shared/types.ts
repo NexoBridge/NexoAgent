@@ -226,11 +226,40 @@ export interface BrowserScriptError {
   stack?: string;
 }
 
+export type BrowserScriptCacheSource = "script" | "auto-capture" | "replay";
+
+export interface BrowserScriptCacheSummary {
+  key: string;
+  source: BrowserScriptCacheSource;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string;
+  ttlMs: number;
+  size: number;
+  truncated?: boolean;
+  replaced?: boolean;
+  url?: string;
+  title?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface BrowserScriptCacheEntry extends BrowserScriptCacheSummary {
+  value: unknown;
+}
+
+export interface BrowserScriptCacheReport {
+  automatic?: BrowserScriptCacheSummary;
+  writes?: BrowserScriptCacheSummary[];
+  deletedKeys?: string[];
+  cleared?: number;
+}
+
 export interface BrowserScriptExecutionResult {
   durationMs: number;
   timedOut?: boolean;
   result?: BrowserScriptResultValue;
   error?: BrowserScriptError;
+  cache?: BrowserScriptCacheReport;
 }
 
 export interface BrowserState {
@@ -305,6 +334,8 @@ export interface BrowserActionRequest {
   text?: string;
   script?: string;
   args?: unknown[];
+  scriptCacheKey?: string;
+  scriptCacheTtlMs?: number;
   target?: BrowserTargetDescriptor;
   strategy?: BrowserActionStrategy;
   key?: string;
@@ -343,8 +374,32 @@ export interface ToolCallTrace {
   name: string;
   input: unknown;
   output?: string;
+  outputSummary?: string;
+  outputPreview?: string;
+  rawOutput?: ToolRawOutputRef;
+  outputStats?: ToolOutputStats;
   elapsed?: number;
   status: "running" | "done" | "error";
+}
+
+export interface ToolRawOutputRef {
+  url: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  originalBytes: number;
+  storedBytes: number;
+  truncated: boolean;
+}
+
+export interface ToolOutputStats {
+  originalChars: number;
+  originalBytes: number;
+  inlineChars: number;
+  previewChars: number;
+  storedBytes?: number;
+  truncated: boolean;
+  reason?: "inline" | "oversized" | "raw-storage-limit";
 }
 
 export type MessageBlock =

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import type { AgentSettings, DiscoveredModel, ModelContextBudget, ModelContextSource, ModelProfile } from "../../src/shared/types";
 import { providerConnectionAllowsEmptyApiKey } from "../../src/shared/providers";
 import { MODEL_CONTEXT_CACHE_FILE, DATA_DIR } from "./config";
-import { callChatCompletion, resolvePrimaryModelConfig, type ChatCompletionMessage } from "./model-runtime";
+import type { ChatCompletionMessage } from "./model-runtime";
 import { getWebSettings } from "./settings";
 
 type ContextDictionaryEntry = {
@@ -375,6 +375,7 @@ export async function lookupModelContextBudgetWithLLM(
   const webSettings = getWebSettings();
   const effectiveSettings = { ...webSettings, ...settings } as AgentSettings;
   const apiKey = effectiveSettings.apiKey || "";
+  const { callChatCompletion, resolvePrimaryModelConfig } = await import("./model-runtime");
   const config = await resolvePrimaryModelConfig(effectiveSettings, apiKey);
   if (!config.apiKey.trim() && !providerConnectionAllowsEmptyApiKey({
     providerId: config.providerId,

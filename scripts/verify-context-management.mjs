@@ -10,6 +10,7 @@ const tokenBudgetModule = await import(pathToFileURL(path.join(distRoot, "token-
 const modelContextModule = await import(pathToFileURL(path.join(distRoot, "model-context.js")));
 const settingsModule = await import(pathToFileURL(path.join(distRoot, "settings.js")));
 const configModule = await import(pathToFileURL(path.join(distRoot, "config.js")));
+const conversationContextModule = await import(pathToFileURL(path.join(distRoot, "conversation-context.js")));
 
 const {
   estimateTokens,
@@ -25,6 +26,7 @@ const {
 } = modelContextModule;
 const { DEFAULT_AGENT_SETTINGS } = settingsModule;
 const { MODEL_CONTEXT_CACHE_FILE } = configModule;
+const { buildBudgetAwareConversationContext } = conversationContextModule;
 
 async function cleanupCache() {
   await fs.rm(MODEL_CONTEXT_CACHE_FILE, { force: true }).catch(() => {});
@@ -150,6 +152,61 @@ await cleanupCache();
   const longText = "abc ".repeat(3000);
   const truncated = truncateTextToTokenBudget(longText, 300);
   assert.ok(estimateTokens(truncated) <= 300);
+}
+
+{
+  const now = new Date().toISOString();
+  const message = (index) => ({
+    id: `m-${index}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `short message ${index}`,
+    createdAt: now,
+  });
+  const session = {
+    id: "message-count-compaction",
+    title: "Message count compaction",
+    messages: Array.from({ length: 6 }, (_, index) => message(index + 1)),
+    createdAt: now,
+    updatedAt: now,
+  };
+  const settings = {
+    ...DEFAULT_AGENT_SETTINGS,
+    enableContextCompaction: true,
+    contextCompactionThreshold: 6,
+    maxContextTurns: 3,
+  };
+  const budget = computePromptBudget(settings, {
+    contextWindowTokens: 128_000,
+    reservedOutputTokens: 8_192,
+    autoCompactTokenLimit: 96_000,
+    compactionTargetRatio: 0.6,
+  }, 2_000);
+  const summarizedTranscripts = [];
+  const summarize = async (transcript) => {
+    summarizedTranscripts.push(transcript);
+    return `summary-${summarizedTranscripts.length}`;
+  };
+
+  const firstContext = await buildBudgetAwareConversationContext(settings, session, summarize, [], budget);
+  assert.equal(firstContext.compacted, true);
+  assert.equal(firstContext.recentRawMessages.length, 3);
+  assert.equal(session.threadSummary, "summary-1");
+  assert.equal(session.threadSummaryMessageCount, 3);
+  assert.equal(session.threadSummaryVersion, 1);
+
+  const secondContext = await buildBudgetAwareConversationContext(settings, session, summarize, [], budget);
+  assert.equal(secondContext.compacted, false);
+  assert.equal(secondContext.recentRawMessages.length, 3);
+  assert.equal(summarizedTranscripts.length, 1);
+  assert.equal(session.threadSummaryMessageCount, 3);
+
+  session.messages.push(message(7), message(8), message(9));
+  const thirdContext = await buildBudgetAwareConversationContext(settings, session, summarize, [], budget);
+  assert.equal(thirdContext.compacted, true);
+  assert.equal(thirdContext.recentRawMessages.length, 3);
+  assert.equal(summarizedTranscripts.length, 2);
+  assert.equal(session.threadSummary, "summary-1\n\nsummary-2");
+  assert.equal(session.threadSummaryMessageCount, 6);
 }
 
 await cleanupCache();

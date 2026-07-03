@@ -121,6 +121,10 @@ export const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
       text: getOptionalStringArg(args, "text"),
       script: getOptionalStringArg(args, "script"),
       args: readArrayArg(args, "args"),
+      scriptCacheKey: getOptionalStringArg(args, "scriptCacheKey") || getOptionalStringArg(args, "cacheKey"),
+      scriptCacheTtlMs: args.scriptCacheTtlMs === undefined && args.cacheTtlMs === undefined
+        ? undefined
+        : getOptionalNumberArg(args, args.scriptCacheTtlMs === undefined ? "cacheTtlMs" : "scriptCacheTtlMs", 30 * 60 * 1000),
       target: readBrowserTargetArg(args),
       strategy: getOptionalStringArg(args, "strategy") as Parameters<typeof browserManager.executeAction>[0]["strategy"],
       key: getOptionalStringArg(args, "key"),

@@ -3,6 +3,30 @@
 ## Purpose
 TBD - created by archiving change multimodal-model-orchestration. Update Purpose after archive.
 ## Requirements
+### Requirement: 编排器管理浏览器脚本短期缓存生命周期
+
+编排器 SHALL 在请求捕获和重放任务中优先使用 `action="script"` 的短期 `scriptCache` 保存临时抓包样本，并负责在样本完成用途后主动移除；只有稳定、可跨会话复用的脚本、runbook 或回放模板才应升格到 `store_script_memory`。
+
+#### Scenario: 短期抓包样本进入 scriptCache
+- **WHEN** 用户要求捕获网页网络请求、监听表单提交、保存一次性请求样本或临时重放请求
+- **THEN** 编排器应当让 `action="script"` 使用 `scriptCache` 保存短期样本
+- **AND** 编排器不应为了短期抓包样本默认调用 `store_script_memory`
+
+#### Scenario: 用完临时样本后主动清理
+- **WHEN** 缓存样本已经完成一次性检查、提取、对比或重放
+- **THEN** 编排器应当让脚本调用 `scriptCache.consume`、`scriptCache.delete`、`scriptCache.clear`
+- **AND** 在重放时也可以使用 `scriptCache.replay(key, { deleteAfter: true })` 或 `scriptCache.replay(key, { deleteOnSuccess: true })`
+
+#### Scenario: 稳定复用内容升格长期记忆
+- **WHEN** 捕获样本已经被整理成稳定的复用脚本、回放模板、操作 runbook 或跨会话工作流
+- **THEN** 编排器可以调用 `store_script_memory` 保存该稳定内容
+- **AND** 长期记忆内容应当是提炼后的模板或脚本，而不是未清理的短期抓包流水
+
+#### Scenario: 缓存清理结果可用于后续推理
+- **WHEN** 脚本响应包含 `script.cache.deletedKeys`、`script.cache.cleared` 或自动缓存摘要
+- **THEN** 编排器应当把该摘要作为缓存生命周期状态使用
+- **AND** 编排器不应假设已删除的缓存 key 仍可用于后续重放
+
 ### Requirement: Single primary orchestrator profile
 The system MUST allow exactly one enabled model profile to be marked as the primary orchestrator, and the runtime MUST use that profile as the default planning model when one is configured. The same profile data model MUST also support optional context-budget metadata used by the runtime to manage prompt assembly and compaction.
 
@@ -154,4 +178,22 @@ The orchestrator SHALL operate with the reduced built-in tool catalog and MUST n
 - **WHEN** 编排器先使用高权限浏览器脚本完成部分浏览器运行时操作
 - **THEN** 它后续仍应当可以继续使用 `snapshot`、`resolve`、`click`、`type`、`run` 或 `screenshot`
 - **AND** DOM + AX tree/ref/stale 重解析路径应当继续可用
+
+### Requirement: Orchestrate from bounded tool output summaries
+编排器 SHALL 基于工具输出摘要、缓存 key 和 raw 引用继续工作，而不是依赖完整大输出默认存在于上下文中。
+
+#### Scenario: 工具返回 raw 引用
+- **WHEN** 工具结果包含 `rawRef`、artifact 引用或 `scriptCache` key
+- **THEN** 编排器 SHALL 使用摘要判断下一步
+- **AND** 只有在确实需要完整原文时才显式读取该引用
+
+#### Scenario: 浏览器脚本产生大量抓包数据
+- **WHEN** `browser_action.action="script"` 用于网络请求捕获、CDP 日志或页面调试
+- **THEN** 编排器 SHALL 指导脚本把短期样本放入 `scriptCache`
+- **AND** 编排器 SHALL 避免要求脚本直接返回完整日志数组作为普通工具输出
+
+#### Scenario: 用户要求查看完整原始输出
+- **WHEN** 用户明确要求查看、复制或下载完整原始输出
+- **THEN** 编排器 SHALL 使用 raw 引用或 UI/API 检索路径提供原始数据
+- **AND** 不应把完整原文自动塞回后续模型上下文
 

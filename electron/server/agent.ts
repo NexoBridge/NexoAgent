@@ -21,7 +21,9 @@ import { isRunInterrupted } from "./run-control";
 import { pushEvent } from "./sse";
 import { getWebSettings } from "./settings";
 import { getEnabledSkillInstructions } from "./skills";
-import { computePromptBudget, estimateMessagesTokens, estimateSectionTokens, estimateTokens, trimSectionsToBudget, truncateTextToTokenBudget } from "./token-budget";
+import { computePromptBudget, trimSectionsToBudget, truncateTextToTokenBudget } from "./token-budget";
+import { buildBudgetAwareConversationContext, formatCurrentSessionContextForRecall } from "./conversation-context";
+import { normalizeToolOutputForModel, type BoundedToolOutput } from "./tool-output";
 import { getAllEnabledToolDefs, toLcTool } from "./tools/registry";
 import { extractArtifactsFromToolOutput } from "./tools/multimodal";
 import type { ChatAttachment, Session, StreamEvent, ToolDef, ToolExecutionContext } from "./types";
@@ -129,7 +131,13 @@ function buildBrowserSurfacePrompt(surface: ConversationSurface) {
     "- When the user refers to the current page, this page, what is on screen, or a website already opened in the shared browser, use browser_action against that shared session.",
     "- Do not use browser_action as a generic HTTP client, crawler, search API, or file access tool.",
     "- browser_action performs exactly one browser operation per call: use snapshot, resolve, navigate, click, type, scroll, wheel, hover, drag, key, screenshot, refresh, back, or forward. For multi-step workflows, call one action, inspect the returned page state, then choose the next action.",
-    "- Use action=\"script\" only for explicit raw browser-runtime requests, raw CDP tasks, canvas/runtime-debug work, or BrowserView programming tasks.",
+    "- Use action=\"script\" when the user explicitly asks for raw browser-runtime, raw CDP, BrowserView programming, request capture, runtime debugging, or reusable page instrumentation. It is not the normal path for ordinary clicking, typing, or scrolling.",
+    "- For request capture tasks such as listening to the user's form submission and replaying it later, action=\"script\" may write its own host/runtime script, including page instrumentation through webContents/CDP when needed. Return compact structured logs with method, URL, headers, body, status, and response snippets.",
+    "- action=\"script\" injects scriptCache for short-lived capture samples. Scripts can call scriptCache.set/get/getEntry/list/delete/clear/capture/consume/consumeEntry/replay, and capture-like return values are automatically stored with a TTL.",
+    "- Use scriptCache for temporary request logs and replay samples. When a sample has served its one-time purpose, consume/delete it or call replay with deleteAfter/deleteOnSuccess so temporary captures do not linger.",
+    "- Large tool outputs are bounded before they enter model context. For action=\"script\", return concise summaries plus scriptCache keys or raw-output references instead of complete history/log/body arrays whenever possible.",
+    "- Promote only stable reusable scripts, runbooks, or replay templates to store_script_memory so future sessions can recall them with recall_memory.",
+    "- For canvas, 3D model, or map gestures, use snapshot or screenshot to obtain target bounds/coordinates, then use action=\"drag\"/wheel/click. If raw CDP is explicitly required, action=\"script\" should send CDP Input events with already-known coordinates.",
     "- Standard browser control resolution is AX tree plus stable refs with stale re-resolution. That path is browser-only and is used for ordinary browser DOM target resolution, not for memory, knowledge retrieval, or general question answering.",
     "- When a snapshot returns a stable element ref such as e1, use target:{ ref:\"e1\" } for click/type/hover/drag/wheel. Do not put the ref in a description field.",
     "- When a snapshot or selected-element block provides bounds, pass target.bounds with strategy=\"coordinate\" so the runtime can click the element center; do not invent target.x/y from the top-left corner or nearby toolbar area.",
@@ -202,7 +210,13 @@ function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): T
           "When a tool result gives a stable ref such as e1, call with target:{ref:\"e1\"}; do not put the ref in description or a free-text sentence.",
           "When a snapshot or selected-element block provides bounds, pass target.bounds with strategy=coordinate so the runtime clicks the element center; do not invent target.x/y from a nearby toolbar area.",
           "When only an explicit viewport point is available or a semantic click did not affect the page, use target.x and target.y with strategy=coordinate.",
-          "Use action=\"script\" when you need Electron-side service JavaScript with direct access to browserView, webContents, debugger/CDP, browserManager, and Node/Electron runtime objects.",
+          "Use action=\"script\" when the user explicitly asks for Electron-side service JavaScript, raw CDP, BrowserView programming, request capture, runtime debugging, or reusable page instrumentation. Ordinary controls should still use click/type/drag/wheel.",
+          "For request capture tasks such as listening to the user's form submission and replaying it later, action=\"script\" may write its own host/runtime script, including page instrumentation through webContents/CDP when needed. Return compact structured logs with method, URL, headers, body, status, and response snippets.",
+          "action=\"script\" injects scriptCache for short-lived capture samples. Scripts can call scriptCache.set/get/getEntry/list/delete/clear/capture/consume/consumeEntry/replay, and capture-like return values are automatically stored with a TTL.",
+          "Use scriptCache for temporary request logs and replay samples. When a sample has served its one-time purpose, consume/delete it or call replay with deleteAfter/deleteOnSuccess so temporary captures do not linger.",
+          "Large tool outputs are bounded before they enter model context. For action=script, return concise summaries plus scriptCache keys or raw-output references instead of complete history/log/body arrays whenever possible.",
+          "Promote only stable reusable scripts, runbooks, or replay templates to store_script_memory; in a later session, call recall_memory before recreating durable workflows.",
+          "For canvas, 3D model, or map gestures, use snapshot or screenshot to obtain target bounds/coordinates, then call action=drag/wheel/click. If raw CDP is explicitly required, send CDP Input events through sendCommand/cdpSend with already-known coordinates.",
           "Do not use shell commands, PowerShell, or OS-level mouse/keyboard automation to operate ordinary browser UI controls.",
           "When visual state matters or the user asks to see the current page, call action=screenshot; screenshot artifacts are attached to the assistant response automatically. Vision fallback is allowed only when DOM evidence is insufficient or strategy explicitly asks for it.",
           "Before typing passwords, tokens, or other sensitive values, make sure the user explicitly asked for that action.",
@@ -378,18 +392,6 @@ function createDsmlStreamBuffer() {
   };
 }
 
-function normalizePositiveInteger(value: number | undefined, fallback: number, min = 1) {
-  const normalized = Math.floor(Number(value));
-  return Number.isFinite(normalized) ? Math.max(min, normalized) : fallback;
-}
-
-function trimForPrompt(text: string, maxChars: number) {
-  const clean = text.replace(/\s+\n/g, "\n").trim();
-  if (clean.length <= maxChars) return clean;
-  const half = Math.floor((maxChars - 32) / 2);
-  return `${clean.slice(0, half)}\n...[truncated]...\n${clean.slice(-half)}`;
-}
-
 function browserScreenshotAttachmentFromToolResult(
   name: string,
   args: Record<string, unknown>,
@@ -524,67 +526,6 @@ function appendUniqueAttachment(attachments: ChatAttachment[], attachment: ChatA
   attachments.push(attachment);
 }
 
-function formatMessageForCompaction(message: ChatMessage, index: number) {
-  const role = message.role === "assistant" ? "Assistant" : "User";
-  const attachmentText = message.attachments?.length
-    ? `\nAttachments: ${message.attachments.map((attachment) => `${attachment.name} (${attachment.type}, ${attachment.url})`).join("; ")}`
-    : "";
-  return `#${index + 1} ${role} at ${message.createdAt}\n${trimForPrompt(message.content, 2400)}${attachmentText}`;
-}
-
-function buildCompactionTranscript(messages: ChatMessage[], maxChars = 28_000) {
-  const entries = messages.map(formatMessageForCompaction);
-  const selected: string[] = [];
-  let used = 0;
-
-  for (let index = entries.length - 1; index >= 0; index--) {
-    const entry = entries[index];
-    const nextUsed = used + entry.length + 2;
-    if (selected.length > 0 && nextUsed > maxChars) break;
-    selected.unshift(entry);
-    used = nextUsed;
-  }
-
-  if (selected.length < entries.length) {
-    selected.unshift(`[${entries.length - selected.length} earlier message(s) were omitted before compaction because the transcript was very large.]`);
-  }
-
-  return selected.join("\n\n");
-}
-
-function formatCurrentSessionContextForRecall(session: Session, maxChars = 28_000) {
-  const conversationMessages = session.messages.filter((message) => message.role !== "system");
-  const transcript = buildCompactionTranscript(conversationMessages, maxChars);
-  return [
-    session.threadSummary?.trim()
-      ? `Compressed earlier current-session context:\n${session.threadSummary.trim()}`
-      : "",
-    transcript
-      ? `Current-session transcript:\n${transcript}`
-      : "",
-  ].filter(Boolean).join("\n\n");
-}
-
-function fallbackCompactMessages(messages: ChatMessage[]) {
-  const transcript = buildCompactionTranscript(messages, 7000);
-  return [
-    "Automatic summary of earlier conversation:",
-    trimForPrompt(transcript, 4000),
-  ].join("\n");
-}
-
-async function compactOlderMessages(messages: ChatMessage[], summarize: (transcript: string) => Promise<string>) {
-  if (messages.length === 0) return "";
-
-  try {
-    const transcript = buildCompactionTranscript(messages);
-    const content = await summarize(transcript);
-    return content || fallbackCompactMessages(messages);
-  } catch {
-    return fallbackCompactMessages(messages);
-  }
-}
-
 function formatAuxiliarySection(title: string, content: string) {
   if (!content.trim()) return "";
   return `${title}:\n${content.trim()}`;
@@ -626,74 +567,6 @@ async function buildCurrentUserMultimodalContent(
     { type: "text" as const, text: content || "Please analyze the attached image." },
     ...imageParts,
   ];
-}
-
-async function buildBudgetAwareConversationContext(
-  settings: AgentSettings,
-  session: Session,
-  summarize: (transcript: string) => Promise<string>,
-  baseSections: Array<{ key: string; label: string; content: string }>,
-  budgetConfig: ReturnType<typeof computePromptBudget>
-) {
-  const conversationMessages = session.messages.filter((message) => message.role !== "system");
-  const recentWindow = normalizePositiveInteger(settings.maxContextTurns, 12);
-  let recentMessages = [...conversationMessages];
-  let olderMessages: ChatMessage[] = [];
-  let threadSummary = session.threadSummary?.trim() ?? "";
-  let compacted = false;
-  let passes = 0;
-
-  const estimateBase = () => baseSections.reduce((sum, section) => sum + estimateSectionTokens(section.label, section.content), 0);
-  const estimateSummary = () => estimateSectionTokens("Earlier conversation summary", threadSummary);
-  const estimateRecent = () => estimateMessagesTokens(recentMessages);
-  const estimateTotal = () => estimateBase() + estimateSummary() + estimateRecent();
-
-  while (
-    settings.enableContextCompaction
-    && estimateTotal() >= budgetConfig.autoCompactTokenLimit
-    && passes < 4
-  ) {
-    const targetRawTurns = Math.max(2, Math.min(recentWindow, Math.floor(recentMessages.length / 2)));
-    olderMessages = recentMessages.slice(0, Math.max(0, recentMessages.length - targetRawTurns));
-    const summaryInput = olderMessages.length > 0 ? olderMessages : recentMessages.slice(0, Math.max(0, recentMessages.length - 2));
-    if (!summaryInput.length) break;
-
-    const nextSummary = await compactOlderMessages(summaryInput, summarize);
-    threadSummary = [threadSummary, nextSummary].filter(Boolean).join("\n\n");
-    compacted = true;
-    passes += 1;
-    recentMessages = recentMessages.slice(-Math.max(2, Math.min(recentWindow, recentMessages.length - summaryInput.length)));
-    olderMessages = [];
-
-    while (estimateTotal() > budgetConfig.compactionTargetTokens && recentMessages.length > 2) {
-      const shifted = recentMessages.shift();
-      if (!shifted) break;
-      const fragment = await compactOlderMessages([shifted], summarize);
-      threadSummary = [threadSummary, fragment].filter(Boolean).join("\n\n");
-      compacted = true;
-    }
-
-    if (estimateTokens(threadSummary) > Math.max(512, Math.floor(budgetConfig.maxInputTokens * 0.35))) {
-      threadSummary = truncateTextToTokenBudget(threadSummary, Math.max(512, Math.floor(budgetConfig.maxInputTokens * 0.3)));
-    }
-  }
-
-  if (threadSummary && estimateTotal() > budgetConfig.maxInputTokens) {
-    threadSummary = truncateTextToTokenBudget(threadSummary, Math.max(384, Math.floor(budgetConfig.compactionTargetTokens * 0.35)));
-  }
-
-  session.threadSummary = threadSummary || undefined;
-  if (threadSummary) {
-    session.threadSummaryUpdatedAt = new Date().toISOString();
-    session.threadSummaryVersion = (session.threadSummaryVersion ?? 0) + (compacted ? 1 : 0);
-  }
-
-  return {
-    compactedSummary: threadSummary,
-    estimatedPromptTokens: estimateTotal(),
-    compacted,
-    recentRawMessages: recentMessages,
-  };
 }
 
 export async function streamFromLLM(
@@ -820,6 +693,9 @@ export async function streamFromLLM(
     "Context priority: current user message and the current session transcript are authoritative for resolving omitted references, targets, surfaces, and project context. Current-session compressed summaries come next. Recalled memories, knowledge notes, and skills are background only; ignore them whenever they conflict with or would change the target implied by the current session.",
     "When the current session established a target such as admin, client, server, management console, or a specific page, keep using that target for follow-up requests unless the user explicitly switches it.",
     "Use tools when they are helpful.",
+    "Never claim that you clicked, navigated, refreshed, submitted, requested, queried, read, wrote, ran, verified, or inspected something unless an actual tool result in the current turn or retained context proves it. If no tool was called, describe the next step or limitation instead of reporting it as completed.",
+    "When summarizing or continuing from compacted context, distinguish completed tool-backed actions from plans, intentions, assumptions, and user requests.",
+    "Tool results may be bounded: a result can contain only a summary/preview plus a raw output reference. Do not assume the complete raw payload is already in context; retrieve or inspect the reference only when the full payload is necessary.",
     "When current user attachments include images, the images are included directly in this model request. Inspect attached images directly and do not call invoke_model just to analyze them.",
     "Never write DSML/XML-like tool call tags in the user-visible response. Use the provided tool-calling interface only.",
     "Use shell_command for terminal tasks, filesystem inspection, and command-line workflows.",
@@ -845,7 +721,9 @@ export async function streamFromLLM(
     const summaryInstruction = [
       "Summarize the earlier conversation so a new model call can continue with less context.",
       "Preserve user preferences, project constraints, decisions already made, pending tasks, file paths, commands, tool results, errors, attempts, and unfinished work.",
-      "Do not invent details. Keep the summary concise but operational.",
+      "Treat tool results as the only proof that a browser action, shell command, file edit, network request, or verification actually happened.",
+      "If the transcript only contains a plan, intention, or assistant claim without a corresponding tool result, record it as unverified or planned rather than completed.",
+      "Do not invent details or convert planned work into finished work. Keep the summary concise but operational.",
     ].join("\n");
 
     const summaryLlm = createLangChainChatModel(primaryConfig, effectiveApiKey, settings, {
@@ -911,11 +789,14 @@ export async function streamFromLLM(
     persistentToolCalls.push({ id, name, input, status: "running" });
     persistentMessageBlocks.push({ type: "tool", id });
   };
-  const recordPersistentToolResult = (id: string, output: string, elapsed: number) => {
-    const isError = output.trim().startsWith("Error:");
+  const recordPersistentToolResult = (id: string, boundedOutput: BoundedToolOutput, elapsed: number, isError: boolean) => {
     const existing = persistentToolCalls.find((toolCall) => toolCall.id === id);
     if (existing) {
-      existing.output = output;
+      existing.output = boundedOutput.displayOutput;
+      existing.outputSummary = boundedOutput.outputSummary;
+      existing.outputPreview = boundedOutput.outputPreview;
+      existing.rawOutput = boundedOutput.rawOutput;
+      existing.outputStats = boundedOutput.outputStats;
       existing.elapsed = elapsed;
       existing.status = isError ? "error" : "done";
     }
@@ -1085,28 +966,45 @@ export async function streamFromLLM(
           browserResolveAttempted = true;
         }
         const elapsed = (Date.now() - t0) / 1000;
+        const rawOutputText = String(output);
         appendUniqueAttachment(
           assistantAttachments,
-          browserScreenshotAttachmentFromToolResult(tc.name, parsedArgs, String(output)),
+          browserScreenshotAttachmentFromToolResult(tc.name, parsedArgs, rawOutputText),
         );
-        for (const attachment of generatedAttachmentsFromToolResult(tc.name, parsedArgs, String(output))) {
+        for (const attachment of generatedAttachmentsFromToolResult(tc.name, parsedArgs, rawOutputText)) {
           appendUniqueAttachment(assistantAttachments, attachment);
         }
 
-        recordPersistentToolResult(tc.id, String(output), elapsed);
-        pushEvent(requestId, { type: "tool_result", id: tc.id, output: String(output), elapsed });
+        const boundedOutput = await normalizeToolOutputForModel({
+          toolName: tc.name,
+          args: parsedArgs,
+          output: rawOutputText,
+        });
+        const isError = rawOutputText.trim().startsWith("Error:");
+
+        recordPersistentToolResult(tc.id, boundedOutput, elapsed, isError);
+        pushEvent(requestId, {
+          type: "tool_result",
+          id: tc.id,
+          output: boundedOutput.displayOutput,
+          elapsed,
+          outputSummary: boundedOutput.outputSummary,
+          outputPreview: boundedOutput.outputPreview,
+          rawOutput: boundedOutput.rawOutput,
+          outputStats: boundedOutput.outputStats,
+        });
         circuitBreaker?.recordToolResult({
           name: tc.name,
           args: parsedArgs,
-          output: String(output),
+          output: boundedOutput.modelOutput,
           elapsedSeconds: elapsed,
         });
         lcMessages.push(new ToolMessage({
-          content: truncateTextToTokenBudget(String(output), Math.max(128, Math.floor(budgetConfig.maxInputTokens * 0.08))),
+          content: truncateTextToTokenBudget(boundedOutput.modelOutput, Math.max(128, Math.floor(budgetConfig.maxInputTokens * 0.08))),
           tool_call_id: tc.id,
         }));
 
-        const summary = summarizeTerminalToolOutput(tc.name, String(output));
+        const summary = summarizeTerminalToolOutput(tc.name, boundedOutput.modelOutput);
         if (summary) {
           terminalSummary = summary;
         }

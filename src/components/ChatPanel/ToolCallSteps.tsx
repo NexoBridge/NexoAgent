@@ -1,14 +1,20 @@
 import React, { useMemo, useState } from "react";
-import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, RightOutlined, ToolOutlined } from "@ant-design/icons";
-import { Tag } from "antd";
+import { CheckCircleOutlined, CloseCircleOutlined, DownloadOutlined, LoadingOutlined, RightOutlined, ToolOutlined } from "@ant-design/icons";
+import { Button, Tag } from "antd";
 import { useI18n } from "../../i18n";
 import { useTheme } from "../../theme";
+import { getApiBase } from "../../services/api";
+import type { ToolOutputStats, ToolRawOutputRef } from "../../shared/types";
 
 export interface ToolCallEvent {
   id: string;
   name: string;
   input: unknown;
   output?: string;
+  outputSummary?: string;
+  outputPreview?: string;
+  rawOutput?: ToolRawOutputRef;
+  outputStats?: ToolOutputStats;
   elapsed?: number;
   status: "running" | "done" | "error";
 }
@@ -95,13 +101,46 @@ function summarizeInput(input: unknown) {
   }
 }
 
+function formatBytes(value?: number) {
+  if (!Number.isFinite(value ?? NaN)) return "";
+  const bytes = Number(value);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function resolveRawOutputHref(rawOutput?: ToolRawOutputRef) {
+  if (!rawOutput?.url) return "";
+  if (/^https?:\/\//i.test(rawOutput.url)) return rawOutput.url;
+  return `${getApiBase()}${rawOutput.url}`;
+}
+
 export const ToolCallItem: React.FC<{ call: ToolCallEvent }> = ({ call }) => {
   const [open, setOpen] = useState(false);
+  const [rawOutputText, setRawOutputText] = useState<string | null>(null);
+  const [rawOutputLoading, setRawOutputLoading] = useState(false);
+  const [rawOutputError, setRawOutputError] = useState("");
   const { colors } = useTheme();
   const { t } = useI18n();
   const parsed = useMemo(() => parseToolName(call.name), [call.name]);
-  const summary = summarizeOutput(call.output);
+  const summary = call.outputSummary || summarizeOutput(call.output);
   const inputSummary = summarizeInput(call.input);
+  const rawOutputHref = useMemo(() => resolveRawOutputHref(call.rawOutput), [call.rawOutput]);
+
+  const loadRawOutput = async () => {
+    if (!rawOutputHref || rawOutputLoading || rawOutputText !== null) return;
+    setRawOutputLoading(true);
+    setRawOutputError("");
+    try {
+      const response = await fetch(rawOutputHref);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setRawOutputText(await response.text());
+    } catch (error) {
+      setRawOutputError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRawOutputLoading(false);
+    }
+  };
 
   const statusMeta = useMemo(() => {
     switch (call.status) {
@@ -252,6 +291,41 @@ export const ToolCallItem: React.FC<{ call: ToolCallEvent }> = ({ call }) => {
           {call.output !== undefined ? (
             <>
               <div style={{ color: colors.textMuted, fontSize: 12, marginBottom: 6 }}>{t("rawOutput")}</div>
+              {call.rawOutput ? (
+                <div
+                  style={{
+                    background: colors.bgSecondary,
+                    border: `1px solid ${colors.border}`,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    margin: "0 0 12px",
+                    color: colors.textSecondary,
+                    fontSize: 12,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                  }}
+                >
+                  <div>
+                    {t("rawOutputStored")} {formatBytes(call.rawOutput.originalBytes)}
+                    {call.rawOutput.truncated ? ` -> ${formatBytes(call.rawOutput.storedBytes)} sample` : ""}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <Button size="small" onClick={() => void loadRawOutput()} loading={rawOutputLoading}>
+                      {rawOutputLoading ? t("loadingRawOutput") : t("loadRawOutput")}
+                    </Button>
+                    <Button size="small" href={rawOutputHref} target="_blank" icon={<DownloadOutlined />}>
+                      {t("downloadAttachment")}
+                    </Button>
+                  </div>
+                  {rawOutputError ? (
+                    <div style={{ color: "#fca5a5" }}>{t("rawOutputUnavailable")} {rawOutputError}</div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div style={{ color: colors.textMuted, fontSize: 12, marginBottom: 6 }}>
+                {call.rawOutput && rawOutputText === null ? t("rawOutputPreview") : t("rawOutput")}
+              </div>
               <pre
                 style={{
                   background: colors.bgSecondary,
@@ -260,11 +334,15 @@ export const ToolCallItem: React.FC<{ call: ToolCallEvent }> = ({ call }) => {
                   borderRadius: 8,
                   margin: 0,
                   overflow: "auto",
+                  maxHeight: "min(42vh, 360px)",
+                  overscrollBehavior: "contain",
+                  scrollbarGutter: "stable",
                   border: `1px solid ${colors.border}`,
                   whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
                 }}
               >
-                {call.output}
+                {rawOutputText ?? (call.rawOutput ? call.outputPreview : call.output) ?? ""}
               </pre>
             </>
           ) : null}

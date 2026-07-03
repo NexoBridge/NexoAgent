@@ -18,6 +18,10 @@ import type {
   BrowserTargetDescriptor,
   BrowserResolveCandidate,
   BrowserResolveResult,
+  BrowserScriptCacheEntry,
+  BrowserScriptCacheReport,
+  BrowserScriptCacheSource,
+  BrowserScriptCacheSummary,
   BrowserState,
 } from "../../src/shared/types";
 import {
@@ -45,6 +49,50 @@ const AMBIGUITY_MARGIN = 0.08;
 const DEFAULT_WHEEL_DELTA = 720;
 const DEFAULT_SCRIPT_TIMEOUT_MS = 15_000;
 const MAX_SCRIPT_RESULT_CHARS = 12_000;
+const DEFAULT_SCRIPT_CACHE_TTL_MS = 30 * 60 * 1000;
+const MAX_SCRIPT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_SCRIPT_CACHE_ENTRIES = 100;
+const MAX_SCRIPT_CACHE_VALUE_CHARS = 120_000;
+
+type ScriptCacheInternalEntry = BrowserScriptCacheEntry & {
+  expiresAtMs: number;
+};
+
+type ScriptCacheSetOptions = {
+  ttlMs?: unknown;
+  source?: BrowserScriptCacheSource;
+  metadata?: unknown;
+  url?: string;
+  title?: string;
+};
+
+type ScriptCacheActivity = {
+  writes: BrowserScriptCacheSummary[];
+  deletedKeys: string[];
+  cleared: number;
+};
+
+type ScriptCacheListOptions = {
+  prefix?: unknown;
+  includeExpired?: unknown;
+};
+
+type ScriptCacheReplayOptions = {
+  index?: unknown;
+  method?: unknown;
+  url?: unknown;
+  headers?: unknown;
+  body?: unknown;
+  json?: unknown;
+  cacheKey?: unknown;
+  ttlMs?: unknown;
+  metadata?: unknown;
+  responseBodyLimit?: unknown;
+  deleteAfter?: unknown;
+  deleteOnSuccess?: unknown;
+  removeAfterReplay?: unknown;
+  removeOnSuccess?: unknown;
+};
 
 const SNAPSHOT_HELPER = String.raw`
 (() => {
@@ -781,7 +829,7 @@ function computeStateScore(item: BrowserElementDescriptor) {
   return { score: 1, reasons: ["enabled-visible"] };
 }
 
-function browserScript(kind: "click" | "type" | "scroll", payload: Record<string, unknown>) {
+function browserScript(kind: "click" | "scroll", payload: Record<string, unknown>) {
   return `(() => {
     const payload = ${JSON.stringify(payload)};
     const lookupElement = () => {
@@ -789,9 +837,7 @@ function browserScript(kind: "click" | "type" | "scroll", payload: Record<string
       if (payload.xpath) {
         return document.evaluate(payload.xpath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
       }
-      return ${JSON.stringify(kind)} === "type" && document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
+      return null;
     };
     const el = lookupElement();
     try {
@@ -824,65 +870,7 @@ function browserScript(kind: "click" | "type" | "scroll", payload: Record<string
           },
         };
       }
-
-      const value = String(payload.text ?? "");
-      const shouldSubmit = Boolean(payload.submit);
-
-      if (el.isContentEditable) {
-        el.focus();
-        const selection = window.getSelection();
-        if (selection) {
-          const range = document.createRange();
-          range.selectNodeContents(el);
-          range.collapse(false);
-          selection.removeAllRanges();
-          selection.addRange(range);
-        }
-        if (!document.execCommand("insertText", false, value)) {
-          el.textContent = value;
-        }
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: value }));
-        if (shouldSubmit) {
-          const form = el.closest("form");
-          if (form && typeof form.requestSubmit === "function") form.requestSubmit();
-        }
-        return { ok: true };
-      }
-
-      if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) {
-        return { ok: false, error: "browser_action.type requires an editable input, textarea, select, or contenteditable element." };
-      }
-
-      el.focus();
-      if (el instanceof HTMLSelectElement) {
-        el.value = value;
-        el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        if (shouldSubmit) {
-          const form = el.closest("form");
-          if (form && typeof form.requestSubmit === "function") form.requestSubmit();
-        }
-        return { ok: true };
-      }
-
-      const currentValue = "value" in el ? String(el.value ?? "") : "";
-      const start = typeof el.selectionStart === "number" ? el.selectionStart : currentValue.length;
-      const end = typeof el.selectionEnd === "number" ? el.selectionEnd : currentValue.length;
-      const nextValue = currentValue.slice(0, start) + value + currentValue.slice(end);
-      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-      setter?.call(el, nextValue);
-      if (typeof el.setSelectionRange === "function") {
-        const cursor = start + value.length;
-        el.setSelectionRange(cursor, cursor);
-      }
-      el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-      if (shouldSubmit) {
-        const form = el.closest("form");
-        if (form && typeof form.requestSubmit === "function") form.requestSubmit();
-      }
-      return { ok: true };
+      return { ok: false, error: "Unsupported browser script operation." };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -1285,6 +1273,211 @@ function browserScriptResultValue(value: unknown): BrowserScriptExecutionResult[
   }
 }
 
+function normalizeScriptCacheTtlMs(value: unknown, fallback = DEFAULT_SCRIPT_CACHE_TTL_MS) {
+  const raw = Number(value ?? fallback);
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return Math.min(MAX_SCRIPT_CACHE_TTL_MS, Math.max(1, Math.floor(raw)));
+}
+
+function normalizePositiveInteger(value: unknown, fallback: number, max: number) {
+  const raw = Number(value ?? fallback);
+  if (!Number.isFinite(raw) || raw <= 0) return fallback;
+  return Math.min(max, Math.max(1, Math.floor(raw)));
+}
+
+function normalizeScriptCacheKey(value: unknown) {
+  const key = String(value ?? "").trim();
+  if (!key) {
+    throw new Error("scriptCache key is required.");
+  }
+  if (key.length > 180) {
+    throw new Error("scriptCache key must be 180 characters or fewer.");
+  }
+  return key;
+}
+
+function normalizeScriptCachePrefix(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function optionEnabled(value: unknown) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
+function cloneJsonValue<T>(value: T): T {
+  try {
+    return JSON.parse(JSON.stringify(value)) as T;
+  } catch {
+    return value;
+  }
+}
+
+function normalizeScriptCacheMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  try {
+    const cloned = JSON.parse(JSON.stringify(value)) as unknown;
+    return cloned && typeof cloned === "object" && !Array.isArray(cloned)
+      ? cloned as Record<string, unknown>
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function serializeScriptCacheValue(value: unknown) {
+  try {
+    const json = JSON.stringify(value);
+    const size = Buffer.byteLength(json ?? "", "utf8");
+    if (json.length <= MAX_SCRIPT_CACHE_VALUE_CHARS) {
+      return {
+        value: JSON.parse(json) as unknown,
+        size,
+        truncated: false,
+      };
+    }
+    const { text, truncated } = truncateReadableText(json, MAX_SCRIPT_CACHE_VALUE_CHARS);
+    return {
+      value: {
+        format: "json-text",
+        text,
+        truncated,
+      },
+      size,
+      truncated,
+    };
+  } catch {
+    const rendered = inspect(value, {
+      depth: 5,
+      breakLength: 100,
+      maxArrayLength: 80,
+      maxStringLength: 8_000,
+    });
+    const { text, truncated } = truncateReadableText(rendered, MAX_SCRIPT_CACHE_VALUE_CHARS);
+    return {
+      value: {
+        format: "inspect",
+        text,
+        truncated,
+      },
+      size: Buffer.byteLength(text, "utf8"),
+      truncated,
+    };
+  }
+}
+
+function scriptCacheSummary(entry: ScriptCacheInternalEntry, replaced?: boolean): BrowserScriptCacheSummary {
+  return {
+    key: entry.key,
+    source: entry.source,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    expiresAt: entry.expiresAt,
+    ttlMs: entry.ttlMs,
+    size: entry.size,
+    truncated: entry.truncated || undefined,
+    replaced: replaced || undefined,
+    url: entry.url,
+    title: entry.title,
+    metadata: entry.metadata,
+  };
+}
+
+function scriptCacheEntryView(entry: ScriptCacheInternalEntry): BrowserScriptCacheEntry {
+  return {
+    ...scriptCacheSummary(entry),
+    value: cloneJsonValue(entry.value),
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasStringField(record: Record<string, unknown>, key: string) {
+  return typeof record[key] === "string" && String(record[key]).trim().length > 0;
+}
+
+function looksLikeNetworkCapture(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(looksLikeNetworkCapture);
+  }
+  if (!isRecord(value)) return false;
+  if (hasStringField(value, "url") && (hasStringField(value, "method") || "headers" in value || "body" in value || "postData" in value || "status" in value)) {
+    return true;
+  }
+  if (isRecord(value.request) && looksLikeNetworkCapture(value.request)) {
+    return true;
+  }
+  if (Array.isArray(value.requests) || Array.isArray(value.captures) || Array.isArray(value.captureLogs) || Array.isArray(value.networkLog) || Array.isArray(value.entries)) {
+    return true;
+  }
+  return false;
+}
+
+function extractScriptCapturePayload(value: unknown): unknown | undefined {
+  if (looksLikeNetworkCapture(value)) return value;
+  if (!isRecord(value)) return undefined;
+  for (const key of ["capture", "captures", "captureLog", "captureLogs", "networkLog", "requestLog", "requests", "entries", "events", "logs"]) {
+    const candidate = value[key];
+    if (looksLikeNetworkCapture(candidate) || (Array.isArray(candidate) && candidate.length > 0)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function normalizeReplayHeaders(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+  const blocked = new Set(["host", "content-length", "transfer-encoding", "connection"]);
+  const headers: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    const normalizedKey = key.trim();
+    if (!normalizedKey || blocked.has(normalizedKey.toLowerCase())) continue;
+    if (Array.isArray(raw)) {
+      headers[normalizedKey] = raw.map((item) => String(item)).join(", ");
+    } else if (raw !== undefined && raw !== null) {
+      headers[normalizedKey] = String(raw);
+    }
+  }
+  return headers;
+}
+
+function firstReplayCandidate(value: unknown, index = 0): Record<string, unknown> | undefined {
+  if (Array.isArray(value)) {
+    const candidate = value[Math.max(0, Math.floor(index))];
+    return isRecord(candidate) ? candidate : undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  if (isRecord(value.request)) return value.request;
+  for (const key of ["requests", "captures", "captureLogs", "networkLog", "entries", "logs"]) {
+    const child = value[key];
+    if (Array.isArray(child)) {
+      const candidate = child[Math.max(0, Math.floor(index))];
+      if (isRecord(candidate)) {
+        return isRecord(candidate.request) ? candidate.request : candidate;
+      }
+    }
+  }
+  return value;
+}
+
+function readReplayBody(record: Record<string, unknown>, options: ScriptCacheReplayOptions) {
+  if (options.json !== undefined) return JSON.stringify(options.json);
+  const body = options.body ?? record.body ?? record.postData ?? record.payload ?? record.data;
+  if (body === undefined || body === null) return undefined;
+  if (typeof body === "string" || body instanceof Uint8Array) return body;
+  return JSON.stringify(body);
+}
+
+function buildScriptCacheReport(activity: ScriptCacheActivity, automatic?: BrowserScriptCacheSummary): BrowserScriptCacheReport | undefined {
+  const report: BrowserScriptCacheReport = {};
+  if (automatic) report.automatic = automatic;
+  if (activity.writes.length) report.writes = activity.writes;
+  if (activity.deletedKeys.length) report.deletedKeys = activity.deletedKeys;
+  if (activity.cleared > 0) report.cleared = activity.cleared;
+  return Object.keys(report).length ? report : undefined;
+}
+
 export class BrowserManager {
   private mainWindow: BrowserWindow | null = null;
   private browserView: BrowserView | null = null;
@@ -1309,6 +1502,9 @@ export class BrowserManager {
   private history: BrowserHistoryEntry[] = [];
   private recentInteractionRef = "";
   private elementPickActive = false;
+  private scriptCache = new Map<string, ScriptCacheInternalEntry>();
+  private scriptCacheSweepTimer: NodeJS.Timeout | undefined;
+  private scriptCacheSequence = 0;
 
   // Exposed for local verification scripts that exercise resolver logic without a live BrowserView.
   setTestSnapshotData(
@@ -1348,6 +1544,11 @@ export class BrowserManager {
     this.elementRefs.reset();
     this.elementDescriptors.clear();
     this.snapshotDocument = undefined;
+    this.scriptCache.clear();
+    if (this.scriptCacheSweepTimer) {
+      clearTimeout(this.scriptCacheSweepTimer);
+      this.scriptCacheSweepTimer = undefined;
+    }
   }
 
   async openWorkbench() {
@@ -1386,6 +1587,286 @@ export class BrowserManager {
       zoomFactor: this.browserView?.webContents.getZoomFactor() ?? this.state.zoomFactor ?? 1,
       history: this.history,
     };
+  }
+
+  private nextScriptCacheKey(prefix = "capture") {
+    this.scriptCacheSequence += 1;
+    const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+    let host = "page";
+    try {
+      const url = this.browserView?.webContents.getURL() || this.state.url;
+      host = new URL(url).hostname.replace(/[^a-z0-9.-]+/gi, "-").slice(0, 60) || "page";
+    } catch {
+      // keep fallback
+    }
+    return `${prefix}:${host}:${stamp}:${this.scriptCacheSequence}`;
+  }
+
+  private pruneScriptCache(now = Date.now()) {
+    let pruned = 0;
+    for (const [key, entry] of this.scriptCache.entries()) {
+      if (entry.expiresAtMs <= now) {
+        this.scriptCache.delete(key);
+        pruned += 1;
+      }
+    }
+    return pruned;
+  }
+
+  private scheduleScriptCacheSweep() {
+    if (this.scriptCacheSweepTimer) {
+      clearTimeout(this.scriptCacheSweepTimer);
+      this.scriptCacheSweepTimer = undefined;
+    }
+    let nextExpiry = Number.POSITIVE_INFINITY;
+    for (const entry of this.scriptCache.values()) {
+      nextExpiry = Math.min(nextExpiry, entry.expiresAtMs);
+    }
+    if (!Number.isFinite(nextExpiry)) return;
+    const delayMs = Math.max(1, Math.min(nextExpiry - Date.now(), 2_147_483_647));
+    this.scriptCacheSweepTimer = setTimeout(() => {
+      this.scriptCacheSweepTimer = undefined;
+      this.pruneScriptCache();
+      this.scheduleScriptCacheSweep();
+    }, delayMs);
+    this.scriptCacheSweepTimer.unref?.();
+  }
+
+  private evictScriptCacheIfNeeded(protectedKey?: string) {
+    this.pruneScriptCache();
+    while (this.scriptCache.size >= MAX_SCRIPT_CACHE_ENTRIES) {
+      const oldest = [...this.scriptCache.values()]
+        .filter((entry) => entry.key !== protectedKey)
+        .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt))[0];
+      if (!oldest) break;
+      this.scriptCache.delete(oldest.key);
+    }
+  }
+
+  private setScriptCacheEntry(keyValue: unknown, value: unknown, options: ScriptCacheSetOptions = {}) {
+    const key = normalizeScriptCacheKey(keyValue);
+    const ttlMs = normalizeScriptCacheTtlMs(options.ttlMs);
+    const now = Date.now();
+    const existing = this.scriptCache.get(key);
+    this.evictScriptCacheIfNeeded(key);
+    const serialized = serializeScriptCacheValue(value);
+    const entry: ScriptCacheInternalEntry = {
+      key,
+      value: serialized.value,
+      source: options.source ?? "script",
+      createdAt: existing?.createdAt ?? new Date(now).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+      expiresAt: new Date(now + ttlMs).toISOString(),
+      expiresAtMs: now + ttlMs,
+      ttlMs,
+      size: serialized.size,
+      truncated: serialized.truncated || undefined,
+      url: options.url ?? this.browserView?.webContents.getURL() ?? this.state.url,
+      title: options.title ?? this.browserView?.webContents.getTitle() ?? this.state.title,
+      metadata: normalizeScriptCacheMetadata(options.metadata),
+    };
+    this.scriptCache.set(key, entry);
+    this.scheduleScriptCacheSweep();
+    return scriptCacheSummary(entry, Boolean(existing));
+  }
+
+  private getScriptCacheEntry(keyValue: unknown): BrowserScriptCacheEntry | undefined {
+    const key = normalizeScriptCacheKey(keyValue);
+    this.pruneScriptCache();
+    const entry = this.scriptCache.get(key);
+    if (!entry) return undefined;
+    if (entry.expiresAtMs <= Date.now()) {
+      this.scriptCache.delete(key);
+      this.scheduleScriptCacheSweep();
+      return undefined;
+    }
+    return scriptCacheEntryView(entry);
+  }
+
+  private listScriptCacheEntries(options: ScriptCacheListOptions = {}) {
+    if (!options.includeExpired) {
+      this.pruneScriptCache();
+    }
+    const prefix = normalizeScriptCachePrefix(options.prefix);
+    return [...this.scriptCache.values()]
+      .filter((entry) => !prefix || entry.key.startsWith(prefix))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .map((entry) => scriptCacheSummary(entry));
+  }
+
+  private deleteScriptCacheEntry(keyValue: unknown) {
+    const key = normalizeScriptCacheKey(keyValue);
+    const deleted = this.scriptCache.delete(key);
+    if (deleted) this.scheduleScriptCacheSweep();
+    return deleted;
+  }
+
+  private consumeScriptCacheEntry(keyValue: unknown): BrowserScriptCacheEntry | undefined {
+    const key = normalizeScriptCacheKey(keyValue);
+    const entry = this.getScriptCacheEntry(key);
+    if (!entry) return undefined;
+    this.deleteScriptCacheEntry(key);
+    return entry;
+  }
+
+  private clearScriptCacheEntries(options: ScriptCacheListOptions = {}) {
+    this.pruneScriptCache();
+    const prefix = normalizeScriptCachePrefix(options.prefix);
+    const deletedKeys: string[] = [];
+    for (const key of this.scriptCache.keys()) {
+      if (prefix && !key.startsWith(prefix)) continue;
+      this.scriptCache.delete(key);
+      deletedKeys.push(key);
+    }
+    if (deletedKeys.length) this.scheduleScriptCacheSweep();
+    return deletedKeys;
+  }
+
+  private async replayCachedRequest(keyOrValue: unknown, options: ScriptCacheReplayOptions = {}) {
+    const sourceKey = typeof keyOrValue === "string" ? normalizeScriptCacheKey(keyOrValue) : undefined;
+    const cached = sourceKey
+      ? this.getScriptCacheEntry(sourceKey)?.value
+      : keyOrValue;
+    const index = Number.isFinite(Number(options.index)) ? Number(options.index) : 0;
+    const request = firstReplayCandidate(cached, index);
+    if (!request) {
+      throw new Error("No replayable cached request was found.");
+    }
+
+    const url = String(options.url ?? request.url ?? "").trim();
+    if (!url) throw new Error("Cached request does not include a URL.");
+    const method = String(options.method ?? request.method ?? "GET").toUpperCase();
+    const headers = {
+      ...normalizeReplayHeaders(request.headers),
+      ...normalizeReplayHeaders(options.headers),
+    };
+    if (options.json !== undefined && !Object.keys(headers).some((key) => key.toLowerCase() === "content-type")) {
+      headers["content-type"] = "application/json";
+    }
+
+    const body = readReplayBody(request, options);
+    const init: RequestInit = {
+      method,
+      headers,
+      redirect: "manual",
+    };
+    if (body !== undefined && method !== "GET" && method !== "HEAD") {
+      init.body = body as BodyInit;
+    }
+
+    const response = await fetch(url, init);
+    const responseText = await response.text();
+    const bodyLimit = normalizePositiveInteger(options.responseBodyLimit, MAX_SCRIPT_RESULT_CHARS, MAX_SCRIPT_CACHE_VALUE_CHARS);
+    const { text, truncated } = truncateReadableText(responseText, bodyLimit);
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((value, key) => {
+      responseHeaders[key] = value;
+    });
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      url: response.url,
+      headers: responseHeaders,
+      body: text,
+      bodyTruncated: truncated || undefined,
+      replayedRequest: {
+        method,
+        url,
+        headers,
+        hasBody: body !== undefined,
+      },
+    };
+
+    const shouldDeleteAfter = optionEnabled(options.deleteAfter) || optionEnabled(options.removeAfterReplay);
+    const shouldDeleteOnSuccess = optionEnabled(options.deleteOnSuccess) || optionEnabled(options.removeOnSuccess);
+    let deletedSourceKey: string | undefined;
+    if (sourceKey && (shouldDeleteAfter || (shouldDeleteOnSuccess && response.ok))) {
+      if (this.deleteScriptCacheEntry(sourceKey)) {
+        deletedSourceKey = sourceKey;
+      }
+    }
+
+    if (options.cacheKey) {
+      this.setScriptCacheEntry(options.cacheKey, result, {
+        ttlMs: options.ttlMs,
+        source: "replay",
+        metadata: options.metadata,
+        url,
+      });
+    }
+    return {
+      ...result,
+      deletedSourceKey,
+    };
+  }
+
+  private createScriptCacheApi(activity: ScriptCacheActivity, defaultTtlMs: number) {
+    return {
+      set: (key: unknown, value: unknown, options: ScriptCacheSetOptions = {}) => {
+        const summary = this.setScriptCacheEntry(key, value, { ...options, ttlMs: options.ttlMs ?? defaultTtlMs, source: options.source ?? "script" });
+        activity.writes.push(summary);
+        return summary;
+      },
+      capture: (value: unknown, options: ScriptCacheSetOptions & { key?: unknown } = {}) => {
+        const summary = this.setScriptCacheEntry(options.key ?? this.nextScriptCacheKey("capture"), value, {
+          ...options,
+          ttlMs: options.ttlMs ?? defaultTtlMs,
+          source: options.source ?? "script",
+        });
+        activity.writes.push(summary);
+        return summary;
+      },
+      get: (key: unknown) => this.getScriptCacheEntry(key)?.value,
+      getEntry: (key: unknown) => this.getScriptCacheEntry(key),
+      list: (options: ScriptCacheListOptions = {}) => this.listScriptCacheEntries(options),
+      delete: (key: unknown) => {
+        const normalizedKey = normalizeScriptCacheKey(key);
+        const deleted = this.deleteScriptCacheEntry(normalizedKey);
+        if (deleted) activity.deletedKeys.push(normalizedKey);
+        return deleted;
+      },
+      clear: (options: ScriptCacheListOptions = {}) => {
+        const deletedKeys = this.clearScriptCacheEntries(options);
+        activity.deletedKeys.push(...deletedKeys);
+        activity.cleared += deletedKeys.length;
+        return deletedKeys.length;
+      },
+      consume: (key: unknown) => {
+        const normalizedKey = normalizeScriptCacheKey(key);
+        const entry = this.consumeScriptCacheEntry(normalizedKey);
+        if (entry) activity.deletedKeys.push(normalizedKey);
+        return entry?.value;
+      },
+      consumeEntry: (key: unknown) => {
+        const normalizedKey = normalizeScriptCacheKey(key);
+        const entry = this.consumeScriptCacheEntry(normalizedKey);
+        if (entry) activity.deletedKeys.push(normalizedKey);
+        return entry;
+      },
+      replay: async (keyOrValue: unknown, options: ScriptCacheReplayOptions = {}) => {
+        const result = await this.replayCachedRequest(keyOrValue, options);
+        if (result.deletedSourceKey) activity.deletedKeys.push(result.deletedSourceKey);
+        return result;
+      },
+    };
+  }
+
+  private autoCacheScriptResult(value: unknown, request: BrowserActionRequest, activity: ScriptCacheActivity) {
+    const explicitKey = typeof request.scriptCacheKey === "string" && request.scriptCacheKey.trim()
+      ? request.scriptCacheKey.trim()
+      : undefined;
+    if (!explicitKey && activity.writes.length) return undefined;
+    const payload = explicitKey ? value : extractScriptCapturePayload(value);
+    if (payload === undefined) return undefined;
+    return this.setScriptCacheEntry(explicitKey ?? this.nextScriptCacheKey("capture"), payload, {
+      ttlMs: request.scriptCacheTtlMs,
+      source: "auto-capture",
+      metadata: {
+        action: "browser_action.script",
+        automatic: true,
+      },
+    });
   }
 
   async setZoom(mode: "in" | "out" | "reset"): Promise<BrowserState> {
@@ -2264,70 +2745,6 @@ export class BrowserManager {
     ).catch(() => undefined);
   }
 
-  private async typeIntoBackendNode(backendNodeId: number, text: string, submit: boolean) {
-    return this.callBackendNodeFunction<{ ok?: boolean; error?: string }>(
-      backendNodeId,
-      String.raw`function(value, shouldSubmit) {
-        const el = this;
-        if (!(el instanceof Element)) {
-          return { ok: false, error: "Resolved backend node is not a DOM element." };
-        }
-        if (typeof el.scrollIntoView === "function") {
-          el.scrollIntoView({ block: "center", inline: "center" });
-        }
-        if (el.isContentEditable) {
-          el.focus();
-          const selection = window.getSelection();
-          if (selection) {
-            const range = document.createRange();
-            range.selectNodeContents(el);
-            range.collapse(false);
-            selection.removeAllRanges();
-            selection.addRange(range);
-          }
-          if (!document.execCommand("insertText", false, value)) {
-            el.textContent = value;
-          }
-          el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: value }));
-          if (shouldSubmit) {
-            const form = el.closest("form");
-            if (form && typeof form.requestSubmit === "function") form.requestSubmit();
-          }
-          return { ok: true };
-        }
-        if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement)) {
-          return { ok: false, error: "browser_action.type requires an editable input, textarea, select, or contenteditable element." };
-        }
-        el.focus();
-        if (el instanceof HTMLSelectElement) {
-          el.value = String(value ?? "");
-          el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-          el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-          if (shouldSubmit) {
-            const form = el.closest("form");
-            if (form && typeof form.requestSubmit === "function") form.requestSubmit();
-          }
-          return { ok: true };
-        }
-        const nextValue = String(value ?? "");
-        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-        setter?.call(el, nextValue);
-        if (typeof el.setSelectionRange === "function") {
-          el.setSelectionRange(nextValue.length, nextValue.length);
-        }
-        el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
-        el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-        if (shouldSubmit) {
-          const form = el.closest("form");
-          if (form && typeof form.requestSubmit === "function") form.requestSubmit();
-        }
-        return { ok: true };
-      }`,
-      [text, submit],
-    );
-  }
-
   private getViewportPoint(relativePosition?: { xRatio: number; yRatio: number }): BrowserPoint {
     return {
       x: Math.round((this.browserView?.getBounds().width ?? this.bounds.width) * clampRatio(relativePosition?.xRatio)),
@@ -2533,8 +2950,23 @@ export class BrowserManager {
     };
   }
 
+  /**
+   * 高权限浏览器运行时脚本（action="script"）。
+   *
+   * 调用链：Agent 工具 browser_action → executors.ts → executeAction("script") → 本方法。
+   *
+   * 与 click/scroll 等内部使用的 webContents.executeJavaScript（页面上下文 IIFE）不同，
+   * 此处通过 AsyncFunction 在 Electron 主进程 / Node 侧动态编译并执行 request.script，
+   * 脚本可访问 BrowserView、CDP、require 等宿主能力，而非网页 DOM。
+   *
+   * 外部脚本注入点：
+   * 1. 编译：new AsyncFunction(...contextKeys, "args", source) — source 即 request.script
+   * 2. 执行：runner(...contextValues, runtimeArgs) — 真正运行注入代码
+   */
   private async executeScript(request: BrowserActionRequest): Promise<BrowserActionResponse> {
     if (!this.browserView) throw new Error("Browser runtime is not available.");
+
+    // request.script 来自 Agent 工具参数，即外部注入的脚本源码
     const source = String(request.script ?? "");
     if (!source.trim()) {
       throw new Error("browser_action.script requires script.");
@@ -2546,9 +2978,16 @@ export class BrowserManager {
       throw new Error("Browser runtime is only available in the Electron desktop app.");
     });
     const runtimeArgs = request.args ?? [];
+    const defaultCacheTtlMs = normalizeScriptCacheTtlMs(request.scriptCacheTtlMs);
+    const cacheActivity: ScriptCacheActivity = { writes: [], deletedKeys: [], cleared: 0 };
+    const scriptCache = this.createScriptCacheApi(cacheActivity, defaultCacheTtlMs);
+
+    // CDP 命令封装，供注入脚本通过 sendCommand / cdpSend 调用
     const sendCommand = async (method: string, params?: Record<string, unknown>) => (
       this.withCdp((cdp) => cdp.sendCommand(method, params ?? {}))
     );
+
+    // 注入到脚本作用域的宿主对象；AsyncFunction 形参名与 Object.keys 顺序一致
     const context = {
       browserView: this.browserView,
       webContents: this.browserView.webContents,
@@ -2556,6 +2995,7 @@ export class BrowserManager {
       rawDebugger: this.browserView.webContents.debugger,
       sendCommand,
       cdpSend: sendCommand,
+      scriptCache,
       browserManager: this,
       electron,
       require,
@@ -2568,12 +3008,14 @@ export class BrowserManager {
       clearInterval,
     } satisfies Record<string, unknown>;
 
+    // 绕过普通 function 的 "use strict" 限制，构造可接受任意源码体的 AsyncFunction
     const AsyncFunction = Object.getPrototypeOf(async function noop() {
       return undefined;
     }).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<unknown>;
 
     let runner: (...values: unknown[]) => Promise<unknown>;
     try {
+      // 【注入点 1 / 编译】将 source 编译为 async (browserView, webContents, ..., args) => { source }
       runner = new AsyncFunction(...Object.keys(context), "args", source);
     } catch (error) {
       const snapshot = await this.snapshot("script");
@@ -2588,10 +3030,13 @@ export class BrowserManager {
     }
 
     const startedAt = Date.now();
+    // 【注入点 2 / 执行】在 Node 主进程运行编译后的函数；返回值经 JSON 序列化后回传 Agent
     const executionPromise = Promise.resolve().then(() => runner(...Object.values(context), runtimeArgs));
     const settledExecution = executionPromise
       .then((value) => ({ kind: "result" as const, value }))
       .catch((error) => ({ kind: "error" as const, error }));
+
+    // 超时与执行竞态；超时后脚本可能仍在后台运行，此处仅不再等待
     let timer: NodeJS.Timeout | undefined;
     const outcome = await Promise.race([
       settledExecution,
@@ -2614,10 +3059,12 @@ export class BrowserManager {
             name: "TimeoutError",
             message: `Browser runtime script timed out after ${timeoutMs}ms.`,
           },
+          cache: buildScriptCacheReport(cacheActivity),
         },
       };
     }
 
+    // 等待导航/加载稳定后再 snapshot，保证返回的页面状态与脚本副作用一致
     await this.waitForActionSettled(previousUrl);
     const snapshot = await this.snapshot("script");
     if (outcome.kind === "error") {
@@ -2627,16 +3074,19 @@ export class BrowserManager {
         script: {
           durationMs: Date.now() - startedAt,
           error: browserScriptError(outcome.error),
+          cache: buildScriptCacheReport(cacheActivity),
         },
       };
     }
 
+    const automaticCache = this.autoCacheScriptResult(outcome.value, request, cacheActivity);
     return {
       ...snapshot,
       ok: true,
       script: {
         durationMs: Date.now() - startedAt,
         result: browserScriptResultValue(outcome.value),
+        cache: buildScriptCacheReport(cacheActivity, automaticCache),
       },
     };
   }
@@ -2668,6 +3118,26 @@ export class BrowserManager {
     this.state = { ...this.state, resolve: result.resolve, error: result.error, lastAction: action };
     this.emit();
     return { ok: false, ...this.getState(), resolve: result.resolve };
+  }
+
+  private async resolveInteractionBounds(resolved: ResolvedBrowserTarget) {
+    let bounds = resolved.bounds;
+    if (resolved.backendNodeId) {
+      await this.scrollBackendNodeIntoView(resolved.backendNodeId);
+      if (resolved.ref) {
+        const descriptor = await this.refreshDescriptorFromBackendNode(resolved.ref, resolved.backendNodeId);
+        bounds = normalizeTargetBounds(descriptor?.bounds) ?? bounds;
+      } else {
+        bounds = normalizeTargetBounds((await this.readDomNodeMetadata(resolved.backendNodeId))?.bounds) ?? bounds;
+      }
+    } else if (resolved.selector) {
+      const located = await this.locateTargetBySelector(resolved.selector);
+      bounds = normalizeTargetBounds(located.bounds) ?? bounds;
+    } else if (resolved.xpath) {
+      const located = await this.locateTargetByXPath(resolved.xpath);
+      bounds = normalizeTargetBounds(located.bounds) ?? bounds;
+    }
+    return bounds;
   }
 
   private async performClickStep(
@@ -2756,38 +3226,42 @@ export class BrowserManager {
         requestedStrategy: strategy,
         actualStrategy: "active-element",
       } as ResolvedBrowserTarget;
-    if (resolutionTarget && !resolved.ref && !resolved.selector && !resolved.xpath) {
+    if (resolutionTarget && !resolved.ref && !resolved.selector && !resolved.xpath && !resolved.point && !resolved.bounds) {
       return this.resultFromResolvedTarget(base, resolved, resolved.warning || "No editable browser element could be resolved for typing.");
     }
 
     const previousUrl = this.browserView.webContents.getURL();
-    const result = resolved.backendNodeId
-      ? await this.typeIntoBackendNode(resolved.backendNodeId, text, Boolean(step.submit))
-      : await this.browserView.webContents.executeJavaScript(
-        browserScript("type", {
-          ref: resolved.ref ?? "",
-          selector: resolved.selector,
-          xpath: resolved.xpath,
-          text,
-          submit: Boolean(step.submit),
-        }),
-        true,
-      ) as { ok?: boolean; error?: string };
-    if (!result?.ok) {
-      return this.resultFromResolvedTarget(base, resolved, result?.error || "Typing failed.");
+    let bounds = await this.resolveInteractionBounds(resolved);
+    const point = resolved.point
+      || (bounds ? buildPointFromBounds(bounds, resolved.target?.relativePosition) : undefined);
+    if (point) {
+      const pointer = await this.sendMouseClickPoint(point.x, point.y, bounds);
+      bounds = normalizeTargetBounds(pointer.bounds) ?? bounds;
+      await delay(60);
+    }
+
+    const typeStrategy = "cdp-type";
+    const inserted = text ? await this.sendCdpInsertText(text) : true;
+    if (!inserted) {
+      return this.resultFromResolvedTarget(base, resolved, "CDP text input failed.");
+    }
+    if (step.submit && !(await this.sendCdpKeyPress("Enter"))) {
+      return this.resultFromResolvedTarget(base, resolved, "CDP Enter key press failed.");
     }
     this.recentInteractionRef = resolved.ref ?? "";
     await this.waitForActionSettled(previousUrl);
     return {
       ...this.resultFromResolvedTarget(base, resolved),
       ok: true,
-      strategy: resolved.actualStrategy,
+      strategy: `${resolved.actualStrategy}+${typeStrategy}`,
       interaction: {
         action: "type",
         ref: resolved.ref,
         query: resolved.query,
-        strategy: resolved.actualStrategy,
-        bounds: resolved.bounds,
+        strategy: typeStrategy,
+        bounds,
+        x: point?.x,
+        y: point?.y,
       },
     };
   }
@@ -2859,6 +3333,40 @@ export class BrowserManager {
       return { strategy: "cdp", x, y, bounds };
     }
     throw new Error(`CDP click failed at viewport point (${x}, ${y}).`);
+  }
+
+  private async sendCdpInsertText(text: string) {
+    if (!this.browserView) return false;
+    try {
+      await this.withCdp((cdp) => cdp.sendCommand("Input.insertText", { text }));
+      return true;
+    } catch (error) {
+      serverLog(`[browser] CDP text input failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  private async sendCdpKeyPress(key: string) {
+    if (!this.browserView) return false;
+    try {
+      await this.withCdp(async (cdp) => {
+        const event = key === "Enter"
+          ? { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }
+          : { key, code: key };
+        await cdp.sendCommand("Input.dispatchKeyEvent", {
+          type: "keyDown",
+          ...event,
+        });
+        await cdp.sendCommand("Input.dispatchKeyEvent", {
+          type: "keyUp",
+          ...event,
+        });
+      });
+      return true;
+    } catch (error) {
+      serverLog(`[browser] CDP key press failed: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
   }
 
   private async sendCdpMouseClick(x: number, y: number) {
@@ -3234,7 +3742,6 @@ export class BrowserManager {
       strategy,
     );
     if (!result.ok) {
-      if (!result.resolve) throw new Error(result.error || "Typing failed.");
       this.state = { ...this.state, resolve: result.resolve, error: result.error, lastAction: "type" };
       this.emit();
       return { ok: false, ...this.getState(), resolve: result.resolve };
