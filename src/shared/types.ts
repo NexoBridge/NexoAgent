@@ -112,7 +112,10 @@ export type BrowserAction =
   | "click"
   | "type"
   | "scroll"
-  | "run"
+  | "wheel"
+  | "hover"
+  | "drag"
+  | "key"
   | "script"
   | "screenshot"
   | "refresh"
@@ -141,6 +144,10 @@ export interface BrowserTargetDescriptor {
   placeholder?: string;
   ariaLabel?: string;
   nearText?: string;
+  /** Raw viewport point. Prefer bounds when an element box is available. */
+  x?: number;
+  y?: number;
+  /** Element box from snapshot or picker; coordinate actions click its center by default. */
   bounds?: BrowserBounds;
   relativePosition?: BrowserRelativePosition;
 }
@@ -154,6 +161,7 @@ export interface BrowserElementSnapshot {
   value?: string;
   type?: string;
   href?: string;
+  selector?: string;
   editable?: boolean;
   disabled?: boolean;
   checked?: boolean;
@@ -195,22 +203,6 @@ export interface BrowserResolveResult {
   minConfidence: number;
 }
 
-export type BrowserRunOperation =
-  | "navigate"
-  | "resolve"
-  | "click"
-  | "type"
-  | "key"
-  | "scroll"
-  | "wheel"
-  | "hover"
-  | "drag"
-  | "wait"
-  | "screenshot"
-  | "back"
-  | "forward"
-  | "refresh";
-
 export type BrowserActionStrategy =
   | "auto"
   | "dom"
@@ -219,55 +211,6 @@ export type BrowserActionStrategy =
   | "cdp"
   | "coordinate"
   | "visionFallback";
-
-export type BrowserRunFailureAction =
-  | "snapshot"
-  | "resolve"
-  | "scroll"
-  | "return-candidates";
-
-export interface BrowserRunFailurePolicy {
-  retry?: BrowserRunFailureAction[];
-  maxAttempts?: number;
-  direction?: "up" | "down" | "left" | "right";
-  amount?: number;
-  continueOnError?: boolean;
-}
-
-export interface BrowserRunStep {
-  op: BrowserRunOperation;
-  target?: BrowserTargetDescriptor;
-  strategy?: BrowserActionStrategy;
-  onFailure?: BrowserRunFailurePolicy;
-  url?: string;
-  text?: string;
-  key?: string;
-  submit?: boolean;
-  direction?: "up" | "down" | "left" | "right";
-  amount?: number;
-  deltaX?: number;
-  deltaY?: number;
-  waitMs?: number;
-  durationMs?: number;
-  minConfidence?: number;
-}
-
-export interface BrowserRunStepResult {
-  index: number;
-  op: BrowserRunOperation;
-  ok: boolean;
-  strategy: string;
-  target?: BrowserTargetDescriptor;
-  selectedRef?: string;
-  selectedBounds?: BrowserBounds;
-  confidence?: number;
-  resolve?: BrowserResolveResult;
-  interaction?: BrowserInteractionResult;
-  artifact?: BrowserArtifact;
-  retries?: BrowserRunFailureAction[];
-  warning?: string;
-  error?: string;
-}
 
 export interface BrowserScriptResultValue {
   format: "json" | "inspect";
@@ -288,17 +231,6 @@ export interface BrowserScriptExecutionResult {
   timedOut?: boolean;
   result?: BrowserScriptResultValue;
   error?: BrowserScriptError;
-}
-
-export interface BrowserRunTrace {
-  goal?: string;
-  strategy?: BrowserActionStrategy;
-  onFailure?: BrowserRunFailurePolicy;
-  steps: BrowserRunStepResult[];
-  completedSteps: number;
-  totalSteps: number;
-  finalUrl: string;
-  finalTitle: string;
 }
 
 export interface BrowserState {
@@ -335,7 +267,7 @@ export interface BrowserArtifact {
 }
 
 export interface BrowserInteractionResult {
-  action: BrowserAction | BrowserRunOperation;
+  action: BrowserAction;
   ref?: string;
   query?: string;
   strategy?: string;
@@ -371,21 +303,16 @@ export interface BrowserActionRequest {
   action: BrowserAction;
   url?: string;
   text?: string;
-  goal?: string;
   script?: string;
   args?: unknown[];
   target?: BrowserTargetDescriptor;
-  steps?: BrowserRunStep[];
   strategy?: BrowserActionStrategy;
-  onFailure?: BrowserRunFailurePolicy;
   key?: string;
   submit?: boolean;
   direction?: "up" | "down" | "left" | "right";
   amount?: number;
   deltaX?: number;
   deltaY?: number;
-  waitMs?: number;
-  durationMs?: number;
   timeoutMs?: number;
   limit?: number;
   minConfidence?: number;
@@ -395,7 +322,6 @@ export interface BrowserActionResponse extends BrowserState {
   ok: boolean;
   artifact?: BrowserArtifact;
   interaction?: BrowserInteractionResult;
-  run?: BrowserRunTrace;
   script?: BrowserScriptExecutionResult;
 }
 

@@ -240,17 +240,16 @@
       "name": "browser_action",
       "label": "Browser Action",
       "group": "extension",
-      "description": "Operate the shared Electron browser session for conversational web browsing and web app control. Use only when the task explicitly involves navigating a website, checking a page, or interacting with a web app in the current conversation. Do not present it as a standalone feature, and do not use it for general HTTP requests, web search, file access, or credentialless automation. Fixed actions such as snapshot, resolve, navigate, click, type, scroll, screenshot, refresh, back, and forward remain available for simple tasks. Standard control resolution is AX tree plus stable refs with stale re-resolution. For compound or fuzzy browser tasks, use action=run with goal, target, steps, strategy, and onFailure so the browser runtime can resolve natural-language targets and execute the sequence inside one tool call. For explicit BrowserView programming, raw CDP control, canvas/runtime-debug work, or when the user explicitly asks for raw browser-runtime control, use action=script to run Electron-side service JavaScript with direct access to browserView, webContents, debugger/CDP, browserManager, and Node/Electron runtime objects. Do not use shell commands, PowerShell, or OS-level mouse/keyboard automation to operate ordinary browser UI controls. When visual state matters or the user asks to see the current page, call action=screenshot so the runtime can attach the screenshot to the assistant response. Before typing sensitive data or submitting forms, confirm the user intends that action.",
+      "description": "Operate the shared Electron browser session for conversational web browsing and web app control. Use only when the task explicitly involves navigating a website, checking a page, or interacting with a web app in the current conversation. Do not present it as a standalone feature, and do not use it for general HTTP requests, web search, file access, or credentialless automation. Each browser_action call performs exactly one browser operation and returns the updated page state; for multi-step workflows, call one action, inspect the returned state, then decide the next action. Standard control resolution is AX tree plus stable refs with stale re-resolution. For explicit BrowserView programming, raw CDP control, canvas/runtime-debug work, or when the user explicitly asks for raw browser-runtime control, use action=script to run Electron-side service JavaScript with direct access to browserView, webContents, debugger/CDP, browserManager, and Node/Electron runtime objects. Do not use shell commands, PowerShell, or OS-level mouse/keyboard automation to operate ordinary browser UI controls. When visual state matters or the user asks to see the current page, call action=screenshot so the runtime can attach the screenshot to the assistant response. Before typing sensitive data or submitting forms, confirm the user intends that action.",
       "parameters": {
         "type": "object",
         "properties": {
           "action": {
             "type": "string",
-            "enum": ["snapshot", "resolve", "navigate", "click", "type", "scroll", "run", "script", "screenshot", "refresh", "back", "forward"]
+            "enum": ["snapshot", "resolve", "navigate", "click", "type", "scroll", "wheel", "hover", "drag", "key", "script", "screenshot", "refresh", "back", "forward"]
           },
           "url": { "type": "string" },
           "text": { "type": "string", "description": "Text to type for action=type." },
-          "goal": { "type": "string", "description": "High-level objective for action=run." },
           "script": { "type": "string", "description": "Electron-side service JavaScript body for action=script. The script runs in an async function and can directly use browserView, webContents, debugger/CDP, browserManager, require, Buffer, process, and Electron runtime objects." },
           "args": {
             "type": "array",
@@ -259,7 +258,7 @@
           },
           "target": {
             "type": "object",
-            "description": "Target descriptor for click/type/resolve, or the default target for action=run.",
+            "description": "Target descriptor for click, type, resolve, wheel, hover, or drag. Prefer an object such as {\"ref\":\"e1\"}, {\"query\":\"visible button label\"}, or {\"bounds\":{...}}. A bare stable ref string like \"e1\" is also accepted for compatibility. If a snapshot or selected element provides bounds, prefer target.bounds over hand-written target.x/target.y so the runtime clicks the element center.",
             "properties": {
               "ref": { "type": "string" },
               "query": { "type": "string" },
@@ -270,8 +269,11 @@
               "placeholder": { "type": "string" },
               "ariaLabel": { "type": "string" },
               "nearText": { "type": "string" },
+              "x": { "type": "number", "description": "Viewport x coordinate for direct coordinate targets. Use only when no element bounds are available." },
+              "y": { "type": "number", "description": "Viewport y coordinate for direct coordinate targets. Use only when no element bounds are available." },
               "bounds": {
                 "type": "object",
+                "description": "Element bounds from snapshot or selected-element output. For coordinate clicks, the runtime clicks the center or relativePosition within these bounds.",
                 "properties": {
                   "x": { "type": "number" },
                   "y": { "type": "number" },
@@ -288,121 +290,24 @@
               }
             }
           },
-          "steps": {
-            "type": "array",
-            "description": "Ordered multi-step browser operations for action=run.",
-            "items": {
-              "type": "object",
-              "properties": {
-                "op": {
-                  "type": "string",
-                  "enum": ["navigate", "resolve", "click", "type", "key", "scroll", "wheel", "hover", "drag", "wait", "screenshot", "back", "forward", "refresh"]
-                },
-                "target": {
-                  "type": "object",
-                  "properties": {
-                    "ref": { "type": "string" },
-                    "query": { "type": "string" },
-                    "role": { "type": "string" },
-                    "text": { "type": "string" },
-                    "selector": { "type": "string" },
-                    "xpath": { "type": "string" },
-                    "placeholder": { "type": "string" },
-                    "ariaLabel": { "type": "string" },
-                    "nearText": { "type": "string" },
-                    "bounds": {
-                      "type": "object",
-                      "properties": {
-                        "x": { "type": "number" },
-                        "y": { "type": "number" },
-                        "width": { "type": "number" },
-                        "height": { "type": "number" }
-                      }
-                    },
-                    "relativePosition": {
-                      "type": "object",
-                      "properties": {
-                        "xRatio": { "type": "number" },
-                        "yRatio": { "type": "number" }
-                      }
-                    }
-                  }
-                },
-                "strategy": {
-                  "type": "string",
-                  "enum": ["auto", "dom", "css", "xpath", "cdp", "coordinate", "visionFallback"]
-                },
-                "onFailure": {
-                  "type": "object",
-                  "properties": {
-                    "retry": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "enum": ["snapshot", "resolve", "scroll", "return-candidates"]
-                      }
-                    },
-                    "maxAttempts": { "type": "number" },
-                    "direction": {
-                      "type": "string",
-                      "enum": ["up", "down", "left", "right"]
-                    },
-                    "amount": { "type": "number" },
-                    "continueOnError": { "type": "boolean" }
-                  }
-                },
-                "url": { "type": "string" },
-                "text": { "type": "string" },
-                "key": { "type": "string" },
-                "submit": { "type": "boolean" },
-                "direction": {
-                  "type": "string",
-                  "enum": ["up", "down", "left", "right"]
-                },
-                "amount": { "type": "number" },
-                "deltaX": { "type": "number" },
-                "deltaY": { "type": "number" },
-                "waitMs": { "type": "number" },
-                "durationMs": { "type": "number" },
-                "minConfidence": { "type": "number" }
-              },
-              "required": ["op"]
-            }
-          },
           "strategy": {
             "type": "string",
             "enum": ["auto", "dom", "css", "xpath", "cdp", "coordinate", "visionFallback"]
           },
-          "onFailure": {
-            "type": "object",
-            "properties": {
-              "retry": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "enum": ["snapshot", "resolve", "scroll", "return-candidates"]
-                }
-              },
-              "maxAttempts": { "type": "number" },
-              "direction": {
-                "type": "string",
-                "enum": ["up", "down", "left", "right"]
-              },
-              "amount": { "type": "number" },
-              "continueOnError": { "type": "boolean" }
-            }
-          },
-          "key": { "type": "string", "description": "Keyboard key for action=run steps with op=key." },
+          "ref": { "type": "string", "description": "Compatibility shortcut for target.ref; prefer putting this under target." },
+          "query": { "type": "string", "description": "Compatibility shortcut for target.query; prefer putting this under target." },
+          "role": { "type": "string", "description": "Compatibility shortcut for target.role; prefer putting this under target." },
+          "selector": { "type": "string", "description": "Compatibility shortcut for target.selector; prefer putting this under target." },
+          "xpath": { "type": "string", "description": "Compatibility shortcut for target.xpath; prefer putting this under target." },
+          "key": { "type": "string", "description": "Keyboard key for action=key." },
           "submit": { "type": "boolean" },
           "direction": {
             "type": "string",
             "enum": ["up", "down", "left", "right"]
           },
           "amount": { "type": "number" },
-          "deltaX": { "type": "number" },
-          "deltaY": { "type": "number" },
-          "waitMs": { "type": "number" },
-          "durationMs": { "type": "number" },
+          "deltaX": { "type": "number", "description": "Horizontal pixel delta for action=drag, or wheel delta override for action=wheel." },
+          "deltaY": { "type": "number", "description": "Vertical pixel delta for action=drag, or wheel delta override for action=wheel." },
           "timeoutMs": { "type": "number", "description": "Optional timeout in milliseconds for action=script." },
           "limit": { "type": "number", "description": "Maximum resolve candidates to return." },
           "minConfidence": { "type": "number", "description": "Minimum resolver confidence for query-based click/type." }

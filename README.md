@@ -230,23 +230,18 @@ nexoAgent/
 - `src/components/BrowserWorkbench/`
   提供浏览器工作台 UI。左侧是网页视图，中间竖向控制条提供缩放与布局拖拽，右侧是会话历史和对话面板。浏览器不是独立功能入口，而是会话旁边的可视组件。
 - `browser_action`
-  Agent 通过该工具操作共享浏览器，支持 `snapshot`、`resolve`、`navigate`、`click`、`type`、`scroll`、`run`、`script`、`screenshot`、`refresh`、`back`、`forward`。简单任务仍可直接使用固定 action；复合或模糊的网页任务优先使用 `action="run"`，由浏览器运行时在一次工具调用里完成目标解析、步骤执行和重试；显式需要直接编程 `BrowserView` / `webContents` / CDP 时使用 `action="script"`。
+  Agent 通过该工具操作共享浏览器，支持 `snapshot`、`resolve`、`navigate`、`click`、`type`、`scroll`、`wheel`、`hover`、`drag`、`key`、`script`、`screenshot`、`refresh`、`back`、`forward`。每次调用只执行一个浏览器操作并返回最新页面状态；多步网页流程应当一步一观察、一动作一调用；显式需要直接编程 `BrowserView` / `webContents` / CDP 时使用 `action="script"`。
 - DOM-first 元素解析
   浏览器会优先通过 AX tree 抓取标准可交互控件，并为同一文档内的节点分配稳定 ref。ref 对应的底层节点失效时，会基于同一条 AX tree 路径按 `(role, name, nth)` 重新解析，而不是回退到向量语义匹配。每个元素仍会保留描述文本、bounds、role、name、label 和上下文信息。
-- `browser_action.run`
-  `action="run"` 允许模型一次性提供 `goal`、默认 `target`、有序 `steps`、`strategy` 和 `onFailure`。浏览器运行时会为每个 step 复用 AX tree 快照、稳定 ref、stale 重解析、DOM 规则、selector、xpath 和显式坐标回退，然后返回带每步结果的 run trace。
+- 单步浏览器操作
+  每次 `browser_action` 调用只执行一个操作。运行时会通过 AX tree 快照、稳定 ref、stale 重解析、DOM 规则、selector、xpath 和显式坐标解析本次目标，执行后返回最新页面状态，供 Agent 决定下一步。
+  显式坐标可直接写成 `target: { "x": 80, "y": 56 }` 并配合 `strategy: "coordinate"`，也可以传 `bounds` 让运行时点击中心点。
   示例：
   ```json
   {
-    "action": "run",
-    "goal": "填写并发送测试邮件",
-    "steps": [
-      { "op": "click", "target": { "query": "写信", "role": "button" } },
-      { "op": "type", "target": { "query": "收件人" }, "text": "test@example.com" },
-      { "op": "type", "target": { "query": "主题" }, "text": "冒烟测试" },
-      { "op": "click", "target": { "query": "发送", "role": "button" }, "strategy": "auto" }
-    ],
-    "onFailure": { "retry": ["snapshot", "resolve", "scroll"] }
+    "action": "click",
+    "target": { "query": "写信", "role": "button" },
+    "strategy": "auto"
   }
   ```
 - 高权限浏览器脚本
@@ -256,11 +251,11 @@ nexoAgent/
 - CDP 底层点击
   点击时先通过 DOM/ref 获取元素中心坐标，再使用 `webContents.debugger.sendCommand("Input.dispatchMouseEvent", ...)` 发送 `mouseMoved -> mousePressed -> mouseReleased` 事件序列。事件走 Chrome DevTools Protocol 输入管道，带 `buttons`、`modifiers` 和 `timestamp`，比 `HTMLElement.click()` 更接近真实鼠标操作。
 - 输入兜底
-  `type` 支持 ref/query，也支持当前焦点元素。当 SPA 重渲染导致旧 ref 失效时，运行时会先沿 AX tree 对 ref 做 stale 重解析，再继续输入；如果页面已经把目标输入框保持在焦点上，`browser_action.run` 中的 `type` step 也仍可复用当前焦点路径。
+  `type` 支持 ref/query，也支持当前焦点元素。当 SPA 重渲染导致旧 ref 失效时，运行时会先沿 AX tree 对 ref 做 stale 重解析，再继续输入。
 - 元素选择
   浏览器工具栏提供元素选择按钮。启用后页面 hover 会高亮元素，下一次点击会阻止网页默认行为，并把被选元素的名称、标签、role、文本、selector、bounds 和 URL 写入右侧聊天输入框，方便把页面元素作为对话上下文。
 - 截图回传
-  `screenshot` 会生成图片产物并附加到助手消息。它用于视觉状态确认、页面布局、图表、图片和用户明确要求“截图/展示”的场景；普通按钮和输入框定位仍以 DOM-first 为主。必要时 `browser_action.run` 也可通过 `strategy: "visionFallback"` 显式请求视觉兜底。
+  `screenshot` 会生成图片产物并附加到助手消息。它用于视觉状态确认、页面布局、图表、图片和用户明确要求“截图/展示”的场景；普通按钮和输入框定位仍以 DOM-first 为主。必要时单步 action 也可通过 `strategy: "visionFallback"` 显式请求视觉兜底。
 
 ### 3. Agent Runtime 层
 

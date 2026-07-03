@@ -185,7 +185,7 @@ Built-in tools are declared in `nexo/tools.json`, and their executors live in `e
 | `install_skill` | Install a skill from a supported marketplace |
 | `create_scheduled_task` | Create a scheduled task that appears in the Tasks panel and runs through Nexo's scheduler; accepts `prompt` plus either `cron`, `runAt`, or `delayMinutes` |
 | `shell_command` | Run a terminal command from the workspace |
-| `browser_action` | Operate the shared Electron browser session through AX/ref snapshots, `action="run"` multi-step execution, Electron-side `action="script"` runtime scripts, CDP clicks, typing, scrolling, screenshots, refresh, back, and forward |
+| `browser_action` | Operate the shared Electron browser session through AX/ref snapshots, one-operation browser actions, Electron-side `action="script"` runtime scripts, CDP clicks, typing, wheel, hover, drag, scrolling, screenshots, refresh, back, and forward |
 
 File tools are restricted to the configured workspace and extra file access roots. Add external directories in Settings before using `file_read` or `file_write` against them, or handle the path through a terminal command.
 
@@ -201,7 +201,7 @@ The desktop app includes a conversation-scoped shared browser. It is not a separ
 
 ### DOM-first Operation
 
-Browser automation is DOM-first. For ordinary controls such as buttons, links, inputs, menus, and form submission, the assistant should prefer AX tree snapshots plus stable refs with stale re-resolution instead of screenshot-based visual localization. Fixed actions like `snapshot`, `resolve`, `click`, `type`, and `scroll` remain available for simple tasks, and their locators should be expressed through `target`, while `browser_action` with `action="run"` is preferred for compound or fuzzy browser tasks.
+Browser automation is DOM-first. For ordinary controls such as buttons, links, inputs, menus, and form submission, the assistant should prefer AX tree snapshots plus stable refs with stale re-resolution instead of screenshot-based visual localization. Actions like `snapshot`, `resolve`, `click`, `type`, `scroll`, `wheel`, `hover`, `drag`, and `key` operate one browser step at a time and return the updated page state; multi-step workflows should be performed as repeated single actions.
 
 The resolver extracts visible interactive elements from the current page, including:
 
@@ -212,25 +212,22 @@ The resolver extracts visible interactive elements from the current page, includ
 
 Each candidate keeps its role, name, text, value, href, editability, bounds, nearby context, and a descriptor string used for matching. Refs are stable within the same document and are re-resolved through the accessibility tree when the underlying DOM node goes stale.
 
-### `browser_action.run`
+### Single-Step Browser Actions
 
-`action="run"` lets the model send a browser goal, a default target, an ordered `steps` array, an optional `strategy`, and `onFailure` guidance in one tool call. The browser runtime then resolves natural-language targets through AX tree snapshots, stable refs, stale re-resolution, DOM rules, selectors, xpath, or explicit coordinates before executing each step.
+Each `browser_action` call performs exactly one browser operation. The runtime resolves the requested target through AX tree snapshots, stable refs, stale re-resolution, DOM rules, selectors, xpath, or explicit coordinates, executes that operation, and returns the updated page state for the next decision.
+Explicit coordinate targets can use `target: { "x": 80, "y": 56 }` with `strategy: "coordinate"`, or `bounds` when the runtime should click the center point.
 
 Example:
 
 ```json
 {
-  "action": "run",
-  "goal": "Compose and send a test email",
-  "steps": [
-    { "op": "click", "target": { "query": "Compose", "role": "button" } },
-    { "op": "type", "target": { "query": "Recipient" }, "text": "test@example.com" },
-    { "op": "type", "target": { "query": "Subject" }, "text": "Smoke test" },
-    { "op": "click", "target": { "query": "Send", "role": "button" }, "strategy": "auto" }
-  ],
-  "onFailure": { "retry": ["snapshot", "resolve", "scroll"] }
+  "action": "click",
+  "target": { "query": "Compose", "role": "button" },
+  "strategy": "auto"
 }
 ```
+
+Then inspect the returned state and call the next action, such as `type` for the recipient field, `type` for the subject, and `click` for Send.
 
 ### High-Privilege Browser Runtime Script
 
@@ -264,7 +261,7 @@ The browser toolbar includes an element picker button. When enabled, the page hi
 
 ### Boundaries
 
-- DOM-first does not mean vision is never used. Screenshots remain the right fallback for canvas content, charts, images, layout inspection, and cases where the user explicitly wants visual evidence. `browser_action.run` may also request `strategy: "visionFallback"` when DOM evidence is weak.
+- DOM-first does not mean vision is never used. Screenshots remain the right fallback for canvas content, charts, images, layout inspection, and cases where the user explicitly wants visual evidence. Single actions may request `strategy: "visionFallback"` when DOM evidence is weak.
 - Cross-origin iframe internals, browser plugins, canvas-only UI, and sites with strong anti-automation behavior may still require screenshots, user confirmation, or site-specific adaptation.
 - `action="script"` is intentionally high privilege. It can directly program the live BrowserView and raw CDP session, so it should be used only when the user explicitly needs that level of control.
 

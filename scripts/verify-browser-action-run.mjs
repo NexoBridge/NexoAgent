@@ -7,7 +7,7 @@ const browserManagerModule = await import(pathToFileURL(path.join(repoRoot, "dis
 
 const { BrowserManager } = browserManagerModule;
 
-function okState(action = "run") {
+function okState(action = "snapshot") {
   return {
     ok: true,
     url: "https://mail.test",
@@ -121,6 +121,43 @@ function seedStaleRefManager() {
   return manager;
 }
 
+function seedGenericDivManager() {
+  const manager = new BrowserManager();
+  manager.setTestSnapshotData([
+    { ref: "e1", backendNodeId: 201, role: "generic", name: "Search Create Inbox", nth: 0 },
+    { ref: "e2", backendNodeId: 202, role: "generic", name: "Create", nth: 0 },
+  ], [
+    {
+      ref: "e1",
+      tag: "div",
+      role: "generic",
+      name: "Search Create Inbox",
+      text: "Search Create Inbox",
+      editable: false,
+      visible: true,
+      enabled: true,
+      descriptorText: "Search Create Inbox | generic | div | enabled",
+      context: "main",
+      bounds: { x: 0, y: 0, width: 900, height: 700 },
+    },
+    {
+      ref: "e2",
+      tag: "div",
+      role: "generic",
+      name: "Create",
+      text: "Create",
+      editable: false,
+      visible: true,
+      enabled: true,
+      identity: "nav-item",
+      descriptorText: "Create | nav-item | generic | div | nav | enabled",
+      context: "nav",
+      bounds: { x: 16, y: 48, width: 72, height: 32 },
+    },
+  ]);
+  return manager;
+}
+
 function createScriptManager() {
   const manager = new BrowserManager();
   const cdpCalls = [];
@@ -173,14 +210,54 @@ function createScriptManager() {
 }
 
 {
-  const manager = seedManager();
-  const steps = manager.normalizeRunSteps({
-    action: "run",
-    text: "test@example.com",
-    target: { query: "recipient" },
+  const manager = seedGenericDivManager();
+  const resolved = await manager.resolveTarget({ query: "Create", role: "button" }, "click", "auto", 0.72);
+  assert.equal(resolved.ref, "e2");
+  assert.equal(resolved.actualStrategy, "ax");
+  assert.equal(resolved.resolve?.candidates[0]?.reasons.includes("role-generic-click"), true);
+}
+
+{
+  const manager = new BrowserManager();
+  const elements = [
+    {
+      ref: "e1",
+      tag: "div",
+      role: "generic",
+      name: "Search Create Inbox",
+      text: "Search Create Inbox",
+      editable: false,
+      visible: true,
+      enabled: true,
+      descriptorText: "Search Create Inbox | generic | div | enabled",
+      context: "main",
+      bounds: { x: 0, y: 0, width: 900, height: 700 },
+    },
+  ];
+  manager.mergeDomSnapshotCandidates(elements, {
+    url: "https://mail.test",
+    title: "Mail",
+    text: "Search Create Inbox",
+    elements: [
+      {
+        ref: "e1",
+        tag: "div",
+        role: "generic",
+        name: "Create",
+        text: "Create",
+        selector: "div.sidebar > div:nth-of-type(1)",
+        editable: false,
+        visible: true,
+        enabled: true,
+        bounds: { x: 16, y: 48, width: 72, height: 32 },
+      },
+    ],
+    refs: [["e1", "div.sidebar > div:nth-of-type(1)"]],
   });
-  assert.equal(steps.length, 1);
-  assert.equal(steps[0].op, "type");
+  manager.setTestSnapshotData([], elements);
+  const resolved = await manager.resolveTarget({ query: "Create", role: "button" }, "click", "auto", 0.72);
+  assert.equal(resolved.ref, "d1");
+  assert.equal(resolved.selector, "div.sidebar > div:nth-of-type(1)");
 }
 
 {
@@ -212,12 +289,20 @@ function createScriptManager() {
   manager.click = async () => okState("click");
   manager.type = async () => okState("type");
   manager.scroll = async () => okState("scroll");
+  manager.wheel = async () => okState("wheel");
+  manager.hover = async () => okState("hover");
+  manager.drag = async () => okState("drag");
+  manager.key = async () => okState("key");
 
   assert.equal((await manager.executeAction({ action: "snapshot" })).lastAction, "snapshot");
   assert.equal((await manager.executeAction({ action: "resolve", target: { query: "send" } })).lastAction, "resolve");
   assert.equal((await manager.executeAction({ action: "click", target: { query: "send" } })).lastAction, "click");
   assert.equal((await manager.executeAction({ action: "type", target: { query: "recipient" }, text: "hello" })).lastAction, "type");
   assert.equal((await manager.executeAction({ action: "scroll", direction: "down", amount: 200 })).lastAction, "scroll");
+  assert.equal((await manager.executeAction({ action: "wheel", direction: "down", amount: 200 })).lastAction, "wheel");
+  assert.equal((await manager.executeAction({ action: "hover", target: { query: "send" } })).lastAction, "hover");
+  assert.equal((await manager.executeAction({ action: "drag", target: { bounds: { x: 10, y: 10, width: 20, height: 20 } }, deltaX: 10 })).lastAction, "drag");
+  assert.equal((await manager.executeAction({ action: "key", key: "Enter" })).lastAction, "key");
 }
 
 {
@@ -255,6 +340,83 @@ function createScriptManager() {
     x: 614,
     y: 247,
     bounds: { x: 595, y: 228, width: 37, height: 37 },
+  });
+}
+
+{
+  const manager = seedManager();
+  manager.ensure = async () => {};
+  manager.waitForActionSettled = async () => {};
+  manager.snapshot = async (action) => okState(action);
+  manager.browserView = {
+    webContents: {
+      isLoading: () => false,
+      getURL: () => "https://mail.test",
+      getTitle: () => "Mail",
+      getZoomFactor: () => 1,
+      navigationHistory: {
+        canGoBack: () => false,
+        canGoForward: () => false,
+      },
+    },
+    getBounds: () => ({ x: 0, y: 0, width: 1280, height: 800 }),
+  };
+  let clickPoint;
+  manager.sendMouseClickPoint = async (x, y, bounds) => {
+    clickPoint = { x, y, bounds };
+    return { strategy: "stub", x, y, bounds };
+  };
+
+  const response = await manager.executeAction({
+    action: "click",
+    target: { x: 80, y: 56 },
+    strategy: "coordinate",
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(clickPoint, { x: 80, y: 56, bounds: undefined });
+  assert.equal(response.interaction?.strategy, "stub");
+}
+
+{
+  const manager = seedManager();
+  manager.ensure = async () => {};
+  manager.waitForActionSettled = async () => {};
+  manager.snapshot = async (action) => okState(action);
+  manager.browserView = {
+    webContents: {
+      isLoading: () => false,
+      getURL: () => "https://mail.test",
+      getTitle: () => "Mail",
+      getZoomFactor: () => 0.8,
+      navigationHistory: {
+        canGoBack: () => false,
+        canGoForward: () => false,
+      },
+    },
+    getBounds: () => ({ x: 0, y: 0, width: 1280, height: 800 }),
+  };
+  let clickPoint;
+  manager.sendMouseClickPoint = async (x, y, bounds) => {
+    clickPoint = { x, y, bounds };
+    return { strategy: "stub", x, y, bounds };
+  };
+
+  const response = await manager.executeAction({
+    action: "click",
+    target: {
+      x: 180,
+      y: 50,
+      bounds: { x: 12, y: 60, width: 196, height: 36 },
+    },
+    strategy: "coordinate",
+  });
+
+  assert.equal(response.ok, true);
+  assert.deepEqual(clickPoint, {
+    x: 110,
+    y: 78,
+    bounds: { x: 12, y: 60, width: 196, height: 36 },
   });
 }
 
@@ -346,9 +508,66 @@ function createScriptManager() {
 
 {
   const manager = seedManager();
+  manager.ensure = async () => {};
+  manager.snapshot = async (action) => okState(action);
+  const response = await manager.executeAction({ action: "resolve", query: "send" });
+  assert.equal(response.ok, true);
+  assert.equal(response.resolve?.selectedRef, "e3");
+}
+
+{
+  const manager = seedManager();
+  manager.ensure = async () => {};
+  manager.waitForActionSettled = async () => {};
+  manager.snapshot = async (action) => okState(action);
+  manager.browserView = {
+    webContents: {
+      isLoading: () => false,
+      getURL: () => "https://mail.test",
+      getTitle: () => "Mail",
+      getZoomFactor: () => 1,
+      navigationHistory: {
+        canGoBack: () => false,
+        canGoForward: () => false,
+      },
+    },
+    getBounds: () => ({ x: 0, y: 0, width: 1280, height: 800 }),
+  };
+  manager.resolveRefEntry = async (ref) => ({ ref, backendNodeId: 101, role: "button", name: "Compose", nth: 0 });
+  manager.scrollBackendNodeIntoView = async () => {};
+  manager.refreshDescriptorFromBackendNode = async () => ({
+    ref: "e1",
+    tag: "button",
+    role: "button",
+    name: "Compose",
+    text: "Compose",
+    bounds: { x: 20, y: 20, width: 120, height: 32 },
+  });
+  let clickPoint;
+  manager.sendMouseClickPoint = async (x, y, bounds) => {
+    clickPoint = { x, y, bounds };
+    return { strategy: "stub", x, y, bounds };
+  };
+  const response = await manager.executeAction({ action: "click", target: "e1" });
+  assert.equal(response.ok, true);
+  assert.deepEqual(clickPoint, {
+    x: 80,
+    y: 36,
+    bounds: { x: 20, y: 20, width: 120, height: 32 },
+  });
+  assert.equal(response.interaction?.strategy, "stub");
+}
+
+{
+  const manager = seedManager();
   await assert.rejects(
-    manager.executeAction({ action: "click", query: "send" }),
-    /no longer accepts top-level query/i,
+    manager.executeAction({ action: "click", steps: [{ op: "click", target: { query: "send" } }] }),
+    /no longer accepts steps/i,
+  );
+  manager.ensure = async () => {};
+  await assert.rejects(
+    manager.executeAction({ action: "run" }),
+    /Unsupported browser_action\.action/i,
   );
 }
 

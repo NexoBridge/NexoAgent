@@ -16,6 +16,29 @@ function readObjectArg<T extends Record<string, unknown>>(args: Record<string, u
     : undefined;
 }
 
+function readBrowserTargetString(value: string): Record<string, unknown> | undefined {
+  const text = value.trim();
+  if (!text) return undefined;
+  if (/^e\d+$/i.test(text)) return { ref: text };
+  if (/^(\/|\.\/|\()?\//.test(text)) return { xpath: text };
+  if (/^(#|\.|\[)|[>~+]|:nth-|:has\(|:contains\(|\[[^\]]+\]/.test(text)) return { selector: text };
+  return { query: text };
+}
+
+function readBrowserTargetArg(args: Record<string, unknown>): Record<string, unknown> | undefined {
+  const rawTarget = args.target;
+  const target = typeof rawTarget === "string"
+    ? readBrowserTargetString(rawTarget)
+    : readObjectArg<Record<string, unknown>>(args, "target");
+  const legacy: Record<string, unknown> = {};
+  for (const key of ["ref", "query", "role", "text", "selector", "xpath", "placeholder", "ariaLabel", "nearText", "x", "y", "bounds", "relativePosition"]) {
+    if (hasOwnValue(args, key)) legacy[key] = args[key];
+  }
+  return Object.keys(target ?? {}).length || Object.keys(legacy).length
+    ? { ...(target ?? {}), ...legacy }
+    : undefined;
+}
+
 function readArrayArg<T>(args: Record<string, unknown>, key: string): T[] | undefined {
   const value = args[key];
   return Array.isArray(value) ? value as T[] : undefined;
@@ -64,23 +87,11 @@ function hasOwnValue(args: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(args, key) && args[key] !== undefined;
 }
 
-function rejectLegacyBrowserActionArgs(args: Record<string, unknown>) {
-  const legacyRootFields = ["ref", "query", "role", "bounds", "relativePosition"].filter((key) => hasOwnValue(args, key));
-  if (legacyRootFields.length) {
+function rejectRemovedBrowserActionArgs(args: Record<string, unknown>) {
+  const removedRunFields = ["steps", "goal", "onFailure", "waitMs", "durationMs"].filter((key) => hasOwnValue(args, key));
+  if (removedRunFields.length) {
     throw new Error(
-      `browser_action no longer accepts top-level ${legacyRootFields.join(", ")}. Put locators and coordinates under target instead.`,
-    );
-  }
-
-  const steps = Array.isArray(args.steps) ? args.steps : [];
-  const legacyStepIndex = steps.findIndex((step) => {
-    if (!step || typeof step !== "object" || Array.isArray(step)) return false;
-    const record = step as Record<string, unknown>;
-    return hasOwnValue(record, "ref") || hasOwnValue(record, "query") || hasOwnValue(record, "role");
-  });
-  if (legacyStepIndex >= 0) {
-    throw new Error(
-      `browser_action.run steps no longer accept ref/query/role at the step root. Move them under steps[${legacyStepIndex}].target instead.`,
+      `browser_action no longer accepts ${removedRunFields.join(", ")}. Call one browser_action per browser operation instead.`,
     );
   }
 }
@@ -101,28 +112,23 @@ export const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
     ].filter(Boolean).join("\n");
   },
   browser_action: async (args) => {
-    rejectLegacyBrowserActionArgs(args);
+    rejectRemovedBrowserActionArgs(args);
     const limit = args.limit === undefined ? undefined : getOptionalNumberArg(args, "limit", 5);
     const minConfidence = args.minConfidence === undefined ? undefined : getOptionalNumberArg(args, "minConfidence", 0.82);
     const result = await browserManager.executeAction({
       action: getStringArg(args, "action") as Parameters<typeof browserManager.executeAction>[0]["action"],
       url: getOptionalStringArg(args, "url"),
       text: getOptionalStringArg(args, "text"),
-      goal: getOptionalStringArg(args, "goal"),
       script: getOptionalStringArg(args, "script"),
       args: readArrayArg(args, "args"),
-      target: readObjectArg(args, "target"),
-      steps: readArrayArg(args, "steps"),
+      target: readBrowserTargetArg(args),
       strategy: getOptionalStringArg(args, "strategy") as Parameters<typeof browserManager.executeAction>[0]["strategy"],
-      onFailure: readObjectArg(args, "onFailure"),
       key: getOptionalStringArg(args, "key"),
       submit: Boolean(args.submit),
       direction: getOptionalStringArg(args, "direction", "down") as "up" | "down" | "left" | "right",
       amount: getOptionalNumberArg(args, "amount", 720),
       deltaX: args.deltaX === undefined ? undefined : getOptionalNumberArg(args, "deltaX", 0),
       deltaY: args.deltaY === undefined ? undefined : getOptionalNumberArg(args, "deltaY", 0),
-      waitMs: args.waitMs === undefined ? undefined : getOptionalNumberArg(args, "waitMs", 0),
-      durationMs: args.durationMs === undefined ? undefined : getOptionalNumberArg(args, "durationMs", 0),
       timeoutMs: args.timeoutMs === undefined ? undefined : getOptionalNumberArg(args, "timeoutMs", 15_000),
       limit,
       minConfidence,
