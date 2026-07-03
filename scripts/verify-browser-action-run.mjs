@@ -24,6 +24,29 @@ function okState(action = "snapshot") {
   };
 }
 
+function richScriptState(action = "script") {
+  return {
+    ...okState(action),
+    history: [
+      { url: "https://example.test/path", title: "Example", timestamp: "2026-07-03T00:00:00.000Z", action },
+    ],
+    elements: [
+      {
+        ref: "e1",
+        tag: "button",
+        role: "button",
+        name: "Submit",
+        editable: false,
+        visible: true,
+        enabled: true,
+        descriptorText: "Submit | button | enabled",
+        bounds: { x: 10, y: 10, width: 80, height: 32 },
+      },
+    ],
+    text: "Submit the current form and return to the dashboard.",
+  };
+}
+
 function seedManager() {
   const manager = new BrowserManager();
   manager.setTestSnapshotData([
@@ -521,6 +544,41 @@ function createScriptManager() {
     title: "Example",
     loading: false,
   });
+}
+
+{
+  const { manager } = createScriptManager();
+  manager.snapshot = async (action) => richScriptState(action);
+  const response = await manager.executeAction({
+    action: "script",
+    script: "return { created: true };",
+  });
+  assert.equal(response.ok, true);
+  assert.deepEqual(response.elements, []);
+  assert.equal(response.text, "");
+  assert.equal(response.history, undefined);
+  assert.equal(response.script?.state?.compact, true);
+  assert.equal(response.script?.state?.elementsOmitted, 1);
+  assert.equal(response.script?.state?.textOmittedChars, richScriptState().text.length);
+  assert.equal(response.script?.state?.historyOmitted, 1);
+}
+
+{
+  const { manager } = createScriptManager();
+  manager.snapshot = async (action) => richScriptState(action);
+  const response = await manager.executeAction({
+    action: "script",
+    includeState: true,
+    script: "return { created: true };",
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.elements.length, 1);
+  assert.equal(response.text, "Submit the current form and return to the dashboard.");
+  assert.equal(response.history?.length, 1);
+  assert.equal(response.script?.state?.compact, false);
+  assert.equal(response.script?.state?.elementsOmitted, 0);
+  assert.equal(response.script?.state?.textOmittedChars, 0);
+  assert.equal(response.script?.state?.historyOmitted, 0);
 }
 
 {

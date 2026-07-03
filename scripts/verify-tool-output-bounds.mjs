@@ -74,6 +74,45 @@ try {
     const rawText = await fs.readFile(rawPath, "utf8");
     assert.equal(rawText, output);
   }
+
+  {
+    const payload = {
+      ok: true,
+      url: "http://127.0.0.1/example",
+      title: "Compact script result",
+      elements: [],
+      text: "",
+      script: {
+        durationMs: 12,
+        state: {
+          compact: true,
+          elementsIncluded: 0,
+          textIncludedChars: 0,
+          historyIncluded: 0,
+          elementsOmitted: 310,
+          textOmittedChars: 260000,
+          historyOmitted: 6,
+        },
+        result: {
+          format: "json",
+          type: "object",
+          value: Array.from({ length: 200 }, (_, index) => ({ index, body: "x".repeat(120) })),
+        },
+      },
+    };
+    const output = JSON.stringify(payload, null, 2);
+    assert.ok(output.length > 8_000);
+
+    const bounded = await normalizeToolOutputForModel({
+      toolName: "browser_action",
+      args: { action: "script" },
+      output,
+    });
+
+    assert.ok(bounded.outputSummary?.includes("script state: compact"));
+    assert.ok(bounded.outputSummary?.includes("310 elements"));
+    assert.equal(bounded.outputSummary?.includes("snapshot elements: 0"), false);
+  }
 } finally {
   await cleanupTempDataDir();
 }

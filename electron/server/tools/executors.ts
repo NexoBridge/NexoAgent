@@ -87,6 +87,17 @@ function hasOwnValue(args: Record<string, unknown>, key: string) {
   return Object.prototype.hasOwnProperty.call(args, key) && args[key] !== undefined;
 }
 
+function getOptionalBooleanArg(args: Record<string, unknown>, key: string) {
+  const value = args[key];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes"].includes(normalized)) return true;
+    if (["false", "0", "no"].includes(normalized)) return false;
+  }
+  return undefined;
+}
+
 function rejectRemovedBrowserActionArgs(args: Record<string, unknown>) {
   const removedRunFields = ["steps", "goal", "onFailure", "waitMs", "durationMs"].filter((key) => hasOwnValue(args, key));
   if (removedRunFields.length) {
@@ -125,6 +136,10 @@ export const TOOL_EXECUTORS: Record<string, ToolExecutor> = {
       scriptCacheTtlMs: args.scriptCacheTtlMs === undefined && args.cacheTtlMs === undefined
         ? undefined
         : getOptionalNumberArg(args, args.scriptCacheTtlMs === undefined ? "cacheTtlMs" : "scriptCacheTtlMs", 30 * 60 * 1000),
+      includeState: getOptionalBooleanArg(args, "includeState"),
+      includeElements: getOptionalBooleanArg(args, "includeElements"),
+      includeText: getOptionalBooleanArg(args, "includeText"),
+      includeHistory: getOptionalBooleanArg(args, "includeHistory"),
       target: readBrowserTargetArg(args),
       strategy: getOptionalStringArg(args, "strategy") as Parameters<typeof browserManager.executeAction>[0]["strategy"],
       key: getOptionalStringArg(args, "key"),

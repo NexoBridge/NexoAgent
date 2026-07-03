@@ -23,6 +23,7 @@ import type {
   BrowserScriptCacheSource,
   BrowserScriptCacheSummary,
   BrowserState,
+  BrowserScriptStateReport,
 } from "../../src/shared/types";
 import {
   type BrowserAxNode,
@@ -1589,6 +1590,58 @@ export class BrowserManager {
     };
   }
 
+  private compactScriptSnapshot(
+    snapshot: BrowserActionResponse,
+    request: BrowserActionRequest,
+  ): { state: BrowserState; report: BrowserScriptStateReport } {
+    const includeFullState = request.includeState === true;
+    const includeElements = includeFullState || request.includeElements === true;
+    const includeText = includeFullState || request.includeText === true;
+    const includeHistory = includeFullState || request.includeHistory === true;
+    const elements = includeElements ? snapshot.elements : [];
+    const text = includeText ? snapshot.text : "";
+    const history = includeHistory ? snapshot.history ?? [] : undefined;
+    const fullElementCount = snapshot.elements.length;
+    const fullTextLength = snapshot.text.length;
+    const fullHistoryCount = snapshot.history?.length ?? 0;
+    const includedHistoryCount = history?.length ?? 0;
+    const omittedElements = Math.max(0, fullElementCount - elements.length);
+    const omittedTextChars = Math.max(0, fullTextLength - text.length);
+    const omittedHistory = Math.max(0, fullHistoryCount - includedHistoryCount);
+    const compact = !includeFullState || omittedElements > 0 || omittedTextChars > 0 || omittedHistory > 0;
+
+    return {
+      state: {
+        url: snapshot.url,
+        title: snapshot.title,
+        loading: snapshot.loading,
+        canGoBack: snapshot.canGoBack,
+        canGoForward: snapshot.canGoForward,
+        presentation: snapshot.presentation,
+        zoomFactor: snapshot.zoomFactor,
+        history,
+        elements,
+        resolve: includeFullState ? snapshot.resolve : undefined,
+        text,
+        lastAction: snapshot.lastAction,
+        warning: snapshot.warning,
+        error: snapshot.error,
+      },
+      report: {
+        compact,
+        elementsIncluded: elements.length,
+        textIncludedChars: text.length,
+        historyIncluded: includedHistoryCount,
+        elementsOmitted: omittedElements,
+        textOmittedChars: omittedTextChars,
+        historyOmitted: omittedHistory,
+        hint: compact
+          ? "Call browser_action snapshot, or set includeState=true on action=script, when full page elements/text/history are required."
+          : undefined,
+      },
+    };
+  }
+
   private nextScriptCacheKey(prefix = "capture") {
     this.scriptCacheSequence += 1;
     const stamp = new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
@@ -3019,12 +3072,14 @@ export class BrowserManager {
       runner = new AsyncFunction(...Object.keys(context), "args", source);
     } catch (error) {
       const snapshot = await this.snapshot("script");
+      const compact = this.compactScriptSnapshot(snapshot, request);
       return {
-        ...snapshot,
+        ...compact.state,
         ok: false,
         script: {
           durationMs: 0,
           error: browserScriptError(error),
+          state: compact.report,
         },
       };
     }
@@ -3049,8 +3104,9 @@ export class BrowserManager {
     if (outcome.kind === "timeout") {
       executionPromise.catch(() => undefined);
       const snapshot = await this.snapshot("script");
+      const compact = this.compactScriptSnapshot(snapshot, request);
       return {
-        ...snapshot,
+        ...compact.state,
         ok: false,
         script: {
           durationMs: timeoutMs,
@@ -3060,6 +3116,7 @@ export class BrowserManager {
             message: `Browser runtime script timed out after ${timeoutMs}ms.`,
           },
           cache: buildScriptCacheReport(cacheActivity),
+          state: compact.report,
         },
       };
     }
@@ -3067,26 +3124,29 @@ export class BrowserManager {
     // 等待导航/加载稳定后再 snapshot，保证返回的页面状态与脚本副作用一致
     await this.waitForActionSettled(previousUrl);
     const snapshot = await this.snapshot("script");
+    const compact = this.compactScriptSnapshot(snapshot, request);
     if (outcome.kind === "error") {
       return {
-        ...snapshot,
+        ...compact.state,
         ok: false,
         script: {
           durationMs: Date.now() - startedAt,
           error: browserScriptError(outcome.error),
           cache: buildScriptCacheReport(cacheActivity),
+          state: compact.report,
         },
       };
     }
 
     const automaticCache = this.autoCacheScriptResult(outcome.value, request, cacheActivity);
     return {
-      ...snapshot,
+      ...compact.state,
       ok: true,
       script: {
         durationMs: Date.now() - startedAt,
         result: browserScriptResultValue(outcome.value),
         cache: buildScriptCacheReport(cacheActivity, automaticCache),
+        state: compact.report,
       },
     };
   }
