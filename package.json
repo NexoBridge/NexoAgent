@@ -1,7 +1,8 @@
 {
   "name": "nexo-agent",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "private": true,
+  "author": "NexoBridge",
   "description": "Nexo Agent desktop and web console built with Electron, React, TypeScript, and Ant Design.",
   "main": "dist-electron/electron/bootstrap.js",
   "scripts": {
@@ -13,7 +14,7 @@
     "build:web": "tsc -p tsconfig.json --noEmit && vite build",
     "build:electron": "node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json",
     "build": "npm run build:web && npm run build:electron",
-    "dist:win": "electron-builder --publish never --win nsis zip",
+    "dist:win": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --publish never --win nsis zip",
     "dist:mac": "electron-builder --publish never --mac dmg zip",
     "dist:linux": "electron-builder --publish never --linux AppImage tar.gz",
     "package:win": "npm run icons:build && npm run build && npm run dist:win",
@@ -96,6 +97,7 @@
     ],
     "win": {
       "icon": "assets/nexoagent-icon.ico",
+      "signAndEditExecutable": false,
       "target": [
         "nsis",
         "zip"

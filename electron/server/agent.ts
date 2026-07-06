@@ -27,7 +27,7 @@ import { normalizeToolOutputForModel, type BoundedToolOutput } from "./tool-outp
 import { getAllEnabledToolDefs, toLcTool } from "./tools/registry";
 import { extractArtifactsFromToolOutput } from "./tools/multimodal";
 import type { ChatAttachment, Session, StreamEvent, ToolDef, ToolExecutionContext } from "./types";
-import { decodeHtml, parseToolArgs, toErrorMessage } from "./utils";
+import { decodeHtml, safeParseToolArgs, toErrorMessage } from "./utils";
 import { getWorkspaceRoot } from "./workspace";
 import { createSnapshot } from "./snapshot";
 import { attachmentToDataUrl } from "./media";
@@ -132,6 +132,8 @@ function buildBrowserSurfacePrompt(surface: ConversationSurface) {
     "- Do not use browser_action as a generic HTTP client, crawler, search API, or file access tool.",
     "- browser_action performs exactly one browser operation per call: use snapshot, resolve, navigate, click, type, scroll, wheel, hover, drag, key, screenshot, refresh, back, or forward. For multi-step workflows, call one action, inspect the returned page state, then choose the next action.",
     "- Use action=\"script\" when the user explicitly asks for raw browser-runtime, raw CDP, BrowserView programming, request capture, runtime debugging, or reusable page instrumentation. It is not the normal path for ordinary clicking, typing, or scrolling.",
+    "- action=\"script\" runs in the Electron service/Node host, not inside the webpage DOM. The script receives browserView, webContents, CDP/debugger helpers, browserManager, scriptCache, require, Buffer, process, and args; it cannot use webpage document/window globals directly. To inspect or modify the page DOM, call webContents.executeJavaScript(...) or use CDP through webContents.debugger/cdp.",
+    "- The action=\"script\" source is already compiled as the body of an async Electron/Node function. Write top-level await statements and return the final value directly. Do not write an unreturned `(async () => { ... })();`; if you use an async IIFE, write `return await (async () => { ... })();` so the tool waits for it and receives its return value.",
     "- action=\"script\" returns only ok plus the script execution payload. It does not return browser history, elements, page text, or resolver state. Call action=\"snapshot\" next when full page state is needed.",
     "- For request capture tasks such as listening to the user's form submission and replaying it later, action=\"script\" may write its own host/runtime script, including page instrumentation through webContents/CDP when needed. Return compact structured logs with method, URL, headers, body, status, and response snippets.",
     "- action=\"script\" injects scriptCache for short-lived capture samples. Scripts can call scriptCache.set/get/getEntry/list/delete/clear/capture/consume/consumeEntry/replay, and capture-like return values are automatically stored with a TTL.",
@@ -212,6 +214,8 @@ function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): T
           "When a snapshot or selected-element block provides bounds, pass target.bounds with strategy=coordinate so the runtime clicks the element center; do not invent target.x/y from a nearby toolbar area.",
           "When only an explicit viewport point is available or a semantic click did not affect the page, use target.x and target.y with strategy=coordinate.",
           "Use action=\"script\" when the user explicitly asks for Electron-side service JavaScript, raw CDP, BrowserView programming, request capture, runtime debugging, or reusable page instrumentation. Ordinary controls should still use click/type/drag/wheel.",
+          "action=\"script\" runs in the Electron service/Node host, not inside the webpage DOM. The script receives browserView, webContents, cdp/rawDebugger, browserManager, scriptCache, require, Buffer, process, and args; it cannot directly use page globals such as document or window. To inspect or manipulate the page DOM, call webContents.executeJavaScript(...) or use CDP through webContents.debugger/cdp.",
+          "The action=\"script\" source is already compiled as the body of an async Electron/Node function. Write top-level await statements and return the final value directly. Do not write an unreturned `(async () => { ... })();`; if you use an async IIFE, write `return await (async () => { ... })();` so the tool waits for it and receives its return value.",
           "action=script returns only ok plus the script execution payload. It does not return browser history, elements, page text, or resolver state. Call action=snapshot next when full page state is needed.",
           "For request capture tasks such as listening to the user's form submission and replaying it later, action=\"script\" may write its own host/runtime script, including page instrumentation through webContents/CDP when needed. Return compact structured logs with method, URL, headers, body, status, and response snippets.",
           "action=\"script\" injects scriptCache for short-lived capture samples. Scripts can call scriptCache.set/get/getEntry/list/delete/clear/capture/consume/consumeEntry/replay, and capture-like return values are automatically stored with a TTL.",
@@ -236,12 +240,27 @@ function summarizeTerminalToolOutput(name: string, output: string) {
   return "";
 }
 
+function toolArgsParseErrorOutput(toolName: string, error: NonNullable<ReturnType<typeof safeParseToolArgs>["error"]>) {
+  return [
+    `Error: Invalid JSON arguments for tool '${toolName}'.`,
+    error.message,
+    `Raw arguments preview: ${error.preview || "(empty)"}`,
+    "Retry the same tool call with a valid JSON object. Use quoted property names and ':' between every property name and value.",
+  ].join("\n");
+}
+
 type BufferedToolCall = {
   key: string;
   id: string;
   name: string;
   args: string;
   index?: number;
+};
+
+type ParsedBufferedToolCall = {
+  toolCall: BufferedToolCall;
+  args: Record<string, unknown>;
+  parseError?: ReturnType<typeof safeParseToolArgs>["error"];
 };
 
 const DSML_TAG = String.raw`(?:\|\|DSML\|\||\uFF5C\uFF5CDSML\uFF5C\uFF5C|\uFFE5\u7CEFDSML\uFFE5\u7CEF|\u95FF\u6FE1\u7CA3\u7F0D\u64E0SML\u95FF\u6FE1\u7CA3\u7F0D?)`;
@@ -905,22 +924,29 @@ export async function streamFromLLM(
       }
       toolCallBuffer.push(...finalDsmlChunk.calls);
       turnContent = stripDsmlArtifacts(turnContent);
+      const parsedToolCalls: ParsedBufferedToolCall[] = toolCallBuffer.map((toolCall) => {
+        const parsed = safeParseToolArgs(toolCall.args);
+        return { toolCall, args: parsed.args, parseError: parsed.error };
+      });
 
       circuitBreaker?.recordModelTurn({
         step: step + 1,
         visibleText: turnContent,
-        toolCalls: toolCallBuffer.map((tc) => ({ name: tc.name, args: parseToolArgs(tc.args) })),
+        toolCalls: parsedToolCalls.map(({ toolCall, args, parseError }) => ({
+          name: toolCall.name,
+          args: parseError ? { parseError: parseError.message, rawArgsPreview: parseError.preview } : args,
+        })),
         usage: { promptTokens, completionTokens },
       });
 
-      if (toolCallBuffer.length === 0) break;
+      if (parsedToolCalls.length === 0) break;
 
       const aiMsg = new AIMessage({
         content: turnContent,
-        tool_calls: toolCallBuffer.map((tc) => ({
-          id: tc.id,
-          name: tc.name,
-          args: parseToolArgs(tc.args),
+        tool_calls: parsedToolCalls.map(({ toolCall, args, parseError }) => ({
+          id: toolCall.id,
+          name: toolCall.name,
+          args: parseError ? {} : args,
           type: "tool_call" as const,
         })),
       });
@@ -929,25 +955,29 @@ export async function streamFromLLM(
       // Create snapshot before first tool execution in this turn
       if (!turnSnapshotCreated && turnId) {
         const workspaceRoot = getWorkspaceRoot(settings);
-        const hasShellCmd = toolCallBuffer.some((tc) => tc.name === "shell_command");
+        const hasShellCmd = parsedToolCalls.some(({ toolCall }) => toolCall.name === "shell_command");
         if (hasShellCmd && workspaceRoot) {
           const snapshot = await createSnapshot(session.id, turnId, workspaceRoot).catch(() => null);
           turnSnapshotCreated = Boolean(snapshot);
         }
       }
-      for (const tc of toolCallBuffer) {
+      for (const { toolCall: tc, args: parsedArgs, parseError } of parsedToolCalls) {
         if (isRunInterrupted(requestId)) {
           interruptedByUser = true;
           break;
         }
-        const parsedArgs = parseToolArgs(tc.args);
-        recordPersistentToolCall(tc.id, tc.name, parsedArgs);
-        pushEvent(requestId, { type: "tool_call", id: tc.id, name: tc.name, input: parsedArgs });
+        const displayedArgs = parseError
+          ? { parseError: parseError.message, rawArgsPreview: parseError.preview }
+          : parsedArgs;
+        recordPersistentToolCall(tc.id, tc.name, displayedArgs);
+        pushEvent(requestId, { type: "tool_call", id: tc.id, name: tc.name, input: displayedArgs });
 
         const toolFn = enabledToolMap.get(tc.name);
         const t0 = Date.now();
         let output: string;
-        try {
+        if (parseError) {
+          output = toolArgsParseErrorOutput(tc.name, parseError);
+        } else try {
           const domFirstRedirect = browserDomFirstRedirect(
             tc.name,
             parsedArgs,
@@ -979,7 +1009,7 @@ export async function streamFromLLM(
 
         const boundedOutput = await normalizeToolOutputForModel({
           toolName: tc.name,
-          args: parsedArgs,
+          args: displayedArgs,
           output: rawOutputText,
         });
         const isError = rawOutputText.trim().startsWith("Error:");
@@ -997,7 +1027,7 @@ export async function streamFromLLM(
         });
         circuitBreaker?.recordToolResult({
           name: tc.name,
-          args: parsedArgs,
+          args: displayedArgs,
           output: boundedOutput.modelOutput,
           elapsedSeconds: elapsed,
         });

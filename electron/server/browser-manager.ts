@@ -1248,6 +1248,17 @@ function browserScriptError(error: unknown): BrowserScriptError {
   };
 }
 
+function browserScriptReturnWarning(source: string, value: unknown) {
+  if (value !== undefined) return undefined;
+  if (!/\(\s*async\b/.test(source)) return undefined;
+  return [
+    "browser_action.script already runs inside an async Electron/Node host function.",
+    "This script returned undefined, likely because an async IIFE was invoked without returning or awaiting it.",
+    "Use `return await (async () => { ... })();` or write top-level `await` statements and `return` the final value.",
+    "For page DOM work, use `webContents.executeJavaScript(...)`; for later retrieval, write capture data to scriptCache before returning or update scriptCache inside event handlers.",
+  ].join(" ");
+}
+
 function browserScriptResultValue(value: unknown): BrowserScriptExecutionResult["result"] {
   const type = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
   try {
@@ -3100,11 +3111,13 @@ export class BrowserManager {
     }
 
     const automaticCache = this.autoCacheScriptResult(outcome.value, request, cacheActivity);
+    const warning = browserScriptReturnWarning(source, outcome.value);
     return {
       ...state,
       ok: true,
       script: {
         durationMs: Date.now() - startedAt,
+        warning,
         result: browserScriptResultValue(outcome.value),
         cache: buildScriptCacheReport(cacheActivity, automaticCache),
       },

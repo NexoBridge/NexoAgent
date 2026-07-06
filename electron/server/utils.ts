@@ -27,11 +27,131 @@ export function toErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+const TOOL_ARGS_PREVIEW_LIMIT = 240;
+
+export class ToolArgsParseError extends Error {
+  rawArgs: string;
+  preview: string;
+
+  constructor(message: string, rawArgs: string) {
+    super(message);
+    this.name = "ToolArgsParseError";
+    this.rawArgs = rawArgs;
+    this.preview = previewToolArgs(rawArgs);
+  }
+}
+
+function previewToolArgs(value: string) {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > TOOL_ARGS_PREVIEW_LIMIT
+    ? `${compact.slice(0, TOOL_ARGS_PREVIEW_LIMIT)}...`
+    : compact;
+}
+
+function normalizeJsonCandidate(value: string) {
+  let text = value.trim();
+  const fenced = text.match(/^```(?:json|javascript|js)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced) text = fenced[1]?.trim() ?? text;
+  return text;
+}
+
+function extractFirstObjectLiteral(value: string) {
+  const start = value.indexOf("{");
+  if (start < 0) return "";
+
+  let depth = 0;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+
+  for (let index = start; index < value.length; index++) {
+    const char = value[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"" || char === "'") {
+      inString = true;
+      quote = char;
+      continue;
+    }
+
+    if (char === "{") depth++;
+    if (char === "}") {
+      depth--;
+      if (depth === 0) return value.slice(start, index + 1);
+    }
+  }
+
+  return "";
+}
+
+function repairCommonJsonArgMistakes(value: string) {
+  return value
+    .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_match, content: string) =>
+      JSON.stringify(content.replace(/\\'/g, "'")),
+    )
+    .replace(/([{,]\s*)([A-Za-z_$][\w$-]*)\s*:/g, "$1\"$2\":")
+    .replace(/([{,]\s*"[^"]+")\s*(?=(?:"|[{\[]|-?\d|true\b|false\b|null\b))/g, "$1:")
+    .replace(/,\s*([}\]])/g, "$1");
+}
+
+function parseJsonObjectCandidate(candidate: string) {
+  const parsed = JSON.parse(candidate) as unknown;
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>;
+  }
+  throw new Error("Tool arguments must be a JSON object.");
+}
+
 export function parseToolArgs(args: unknown): Record<string, unknown> {
   if (!args) return {};
-  if (typeof args === "string") return JSON.parse(args || "{}") as Record<string, unknown>;
-  if (typeof args === "object") return args as Record<string, unknown>;
+  if (typeof args === "object" && !Array.isArray(args)) return args as Record<string, unknown>;
+  if (typeof args === "string") {
+    const normalized = normalizeJsonCandidate(args);
+    if (!normalized) return {};
+
+    const extracted = extractFirstObjectLiteral(normalized);
+    const maybeWrapped = !normalized.startsWith("{") && normalized.includes(":")
+      ? `{${normalized}}`
+      : "";
+    const candidates = [
+      normalized,
+      extracted,
+      maybeWrapped,
+      repairCommonJsonArgMistakes(normalized),
+      extracted ? repairCommonJsonArgMistakes(extracted) : "",
+      maybeWrapped ? repairCommonJsonArgMistakes(maybeWrapped) : "",
+    ].filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+
+    let lastError = "";
+    for (const candidate of candidates) {
+      try {
+        return parseJsonObjectCandidate(candidate);
+      } catch (error) {
+        lastError = toErrorMessage(error);
+      }
+    }
+
+    throw new ToolArgsParseError(`Invalid tool arguments JSON: ${lastError || "Unable to parse arguments."}`, args);
+  }
   return {};
+}
+
+export function safeParseToolArgs(args: unknown): { args: Record<string, unknown>; error?: ToolArgsParseError } {
+  try {
+    return { args: parseToolArgs(args) };
+  } catch (error) {
+    if (error instanceof ToolArgsParseError) return { args: {}, error };
+    return { args: {}, error: new ToolArgsParseError(toErrorMessage(error), String(args ?? "")) };
+  }
 }
 
 export function parseMemoryKind(value: unknown): MemoryKind | undefined {

@@ -257,6 +257,7 @@ export interface BrowserScriptCacheReport {
 export interface BrowserScriptExecutionResult {
   durationMs: number;
   timedOut?: boolean;
+  warning?: string;
   result?: BrowserScriptResultValue;
   error?: BrowserScriptError;
   cache?: BrowserScriptCacheReport;
