@@ -48,6 +48,12 @@ const DIRECT_ACTION_MIN_CONFIDENCE = 0.82;
 const AMBIGUITY_MARGIN = 0.08;
 const DEFAULT_WHEEL_DELTA = 720;
 const DEFAULT_SCRIPT_TIMEOUT_MS = 15_000;
+const DEFAULT_CDP_TIMEOUT_MS = 2_000;
+const DEFAULT_AX_TREE_TIMEOUT_MS = 3_000;
+const DEFAULT_DOM_PROBE_TIMEOUT_MS = 900;
+const DEFAULT_DOM_SNAPSHOT_TIMEOUT_MS = 2_500;
+const DEFAULT_DOM_METADATA_TIMEOUT_MS = 650;
+const DEFAULT_SNAPSHOT_TIMEOUT_MS = 8_000;
 const MAX_SCRIPT_RESULT_CHARS = 12_000;
 const DEFAULT_SCRIPT_CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_SCRIPT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -529,6 +535,36 @@ const PICK_ELEMENT_SCRIPT = String.raw`
 
 function delay(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+  onTimeout?: () => void,
+) {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => {
+      try {
+        onTimeout?.();
+      } catch {
+        // Ignore cleanup failures while surfacing the timeout.
+      }
+      reject(new Error(message));
+    }, Math.max(1, timeoutMs));
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function normalizeOptionalBrowserTimeoutMs(value: unknown) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const raw = Number(value);
+  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  return Math.max(1, Math.floor(raw));
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -1923,7 +1959,7 @@ export class BrowserManager {
         case "resolve":
           return this.resolve(normalizedRequest);
         case "navigate":
-          return this.navigate(normalizedRequest.url);
+          return this.navigate(normalizedRequest.url, normalizedRequest.timeoutMs);
         case "click":
           return this.click(normalizedRequest.target, normalizedRequest.strategy ?? "auto", normalizedRequest.minConfidence);
         case "type":
@@ -2214,14 +2250,18 @@ export class BrowserManager {
         continue;
       }
 
-      const signature = await webContents.executeJavaScript(
-        String.raw`(() => {
+      const signature = await withTimeout(
+        webContents.executeJavaScript(
+          String.raw`(() => {
           const text = String(document.body?.innerText || document.documentElement?.innerText || "")
             .replace(/\s+/g, " ")
             .trim();
           return [location.href, document.title, document.readyState, text.length, text.slice(0, 300)].join("\n");
         })()`,
-        true,
+          true,
+        ),
+        DEFAULT_DOM_PROBE_TIMEOUT_MS,
+        "Browser DOM settlement probe timed out.",
       ).catch(() => "");
 
       if (signature && signature === lastSignature) {
@@ -2266,7 +2306,11 @@ export class BrowserManager {
     run: (cdp: Electron.Debugger, objectId: string) => Promise<T>,
   ): Promise<T> {
     return this.withCdp(async (cdp) => {
-      const resolved = await cdp.sendCommand("DOM.resolveNode", { backendNodeId }) as { object?: { objectId?: string } };
+      const resolved = await withTimeout(
+        cdp.sendCommand("DOM.resolveNode", { backendNodeId }),
+        DEFAULT_CDP_TIMEOUT_MS,
+        `Resolving backend DOM node ${backendNodeId} timed out.`,
+      ) as { object?: { objectId?: string } };
       const objectId = resolved.object?.objectId;
       if (!objectId) {
         throw new Error(`Backend DOM node ${backendNodeId} is not resolvable.`);
@@ -2274,16 +2318,24 @@ export class BrowserManager {
       try {
         return await run(cdp, objectId);
       } finally {
-        await cdp.sendCommand("Runtime.releaseObject", { objectId }).catch(() => undefined);
+        await withTimeout(
+          cdp.sendCommand("Runtime.releaseObject", { objectId }),
+          DEFAULT_CDP_TIMEOUT_MS,
+          `Releasing backend DOM node ${backendNodeId} timed out.`,
+        ).catch(() => undefined);
       }
     });
   }
 
   private async readRootDocumentState(): Promise<BrowserDocumentState> {
     if (!this.browserView) throw new Error("Browser runtime is not available.");
-    return this.withCdp(async (cdp) => {
+    return withTimeout(this.withCdp(async (cdp) => {
       try {
-        const result = await cdp.sendCommand("Page.getFrameTree") as { frameTree?: BrowserFrameTreeNode };
+        const result = await withTimeout(
+          cdp.sendCommand("Page.getFrameTree"),
+          DEFAULT_CDP_TIMEOUT_MS,
+          "Reading browser frame tree timed out.",
+        ) as { frameTree?: BrowserFrameTreeNode };
         const frame = result.frameTree?.frame;
         if (!frame) {
           return {
@@ -2296,18 +2348,24 @@ export class BrowserManager {
           url: frameUrl(frame),
         };
       } catch {
-        return {
-          url: this.browserView?.webContents.getURL() || this.state.url,
-        };
-      }
-    });
+      return {
+        url: this.browserView?.webContents.getURL() || this.state.url,
+      };
+    }
+    }), DEFAULT_CDP_TIMEOUT_MS + 500, "Reading root document state timed out.").catch(() => ({
+      url: this.browserView?.webContents.getURL() || this.state.url,
+    }));
   }
 
   private async fetchAxTree(frameId?: string): Promise<BrowserAxNode[]> {
-    return this.withCdp(async (cdp) => {
-      const result = await cdp.sendCommand("Accessibility.getFullAXTree", frameId ? { frameId } : {}) as { nodes?: BrowserAxNode[] };
+    return withTimeout(this.withCdp(async (cdp) => {
+      const result = await withTimeout(
+        cdp.sendCommand("Accessibility.getFullAXTree", frameId ? { frameId } : {}),
+        DEFAULT_AX_TREE_TIMEOUT_MS,
+        "Reading browser accessibility tree timed out.",
+      ) as { nodes?: BrowserAxNode[] };
       return result.nodes ?? [];
-    });
+    }), DEFAULT_AX_TREE_TIMEOUT_MS + 500, "Reading browser accessibility tree timed out.").catch(() => []);
   }
 
   private async isBackendNodeLive(backendNodeId: number): Promise<boolean> {
@@ -2321,16 +2379,24 @@ export class BrowserManager {
 
   private async captureReadablePageText(): Promise<string> {
     if (!this.browserView) return "";
-    return await this.browserView.webContents.executeJavaScript(
-      String.raw`(() => String(document.body?.innerText || document.documentElement?.innerText || "").replace(/\s+/g, " ").trim())()`,
-      true,
-    ).catch(() => "") as string;
+    const text = await withTimeout(
+      this.browserView.webContents.executeJavaScript(
+        String.raw`(() => String(document.body?.innerText || document.documentElement?.innerText || "").replace(/\s+/g, " ").trim())()`,
+        true,
+      ),
+      DEFAULT_DOM_PROBE_TIMEOUT_MS,
+      "Capturing readable page text timed out.",
+    ).catch(() => "");
+    return typeof text === "string" ? text : "";
   }
 
   private async captureDomSnapshotCandidates(): Promise<BrowserDomSnapshot | undefined> {
     if (!this.browserView) return undefined;
-    return await this.browserView.webContents.executeJavaScript(SNAPSHOT_HELPER, true)
-      .catch(() => undefined) as BrowserDomSnapshot | undefined;
+    return await withTimeout(
+      this.browserView.webContents.executeJavaScript(SNAPSHOT_HELPER, true),
+      DEFAULT_DOM_SNAPSHOT_TIMEOUT_MS,
+      "Capturing browser DOM snapshot timed out.",
+    ).catch(() => undefined) as BrowserDomSnapshot | undefined;
   }
 
   private mergeDomSnapshotCandidates(elements: BrowserElementDescriptor[], domSnapshot?: BrowserDomSnapshot) {
@@ -2369,11 +2435,12 @@ export class BrowserManager {
 
   private async readDomNodeMetadata(backendNodeId: number): Promise<BrowserDomNodeMetadata | undefined> {
     return this.withResolvedBackendNode(backendNodeId, async (cdp, objectId) => {
-      const result = await cdp.sendCommand("Runtime.callFunctionOn", {
-        objectId,
-        returnByValue: true,
-        awaitPromise: true,
-        functionDeclaration: String.raw`function() {
+      const result = await withTimeout(
+        cdp.sendCommand("Runtime.callFunctionOn", {
+          objectId,
+          returnByValue: true,
+          awaitPromise: true,
+          functionDeclaration: String.raw`function() {
           const el = this;
           if (!(el instanceof Element)) return { visible: false, enabled: false };
           const clean = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
@@ -2473,13 +2540,23 @@ export class BrowserManager {
             enabled,
           };
         }`,
-      }) as { result?: { value?: BrowserDomNodeMetadata } };
+        }),
+        DEFAULT_DOM_METADATA_TIMEOUT_MS,
+        `Reading DOM metadata for backend node ${backendNodeId} timed out.`,
+      ) as { result?: { value?: BrowserDomNodeMetadata } };
       return result.result?.value;
     }).catch(() => undefined);
   }
 
   private async snapshot(action: BrowserAction): Promise<BrowserActionResponse> {
     if (!this.browserView) throw new Error("Browser runtime is not available.");
+    const snapshotDeadline = Date.now() + DEFAULT_SNAPSHOT_TIMEOUT_MS;
+    let warning: string | undefined;
+    const remainingSnapshotMs = () => Math.max(1, snapshotDeadline - Date.now());
+    const addSnapshotWarning = (message: string) => {
+      warning = warning ? `${warning} ${message}` : message;
+    };
+
     await this.waitForIdle();
     await this.waitForDomSettled(700, 160);
     const documentState = await this.readRootDocumentState();
@@ -2495,6 +2572,10 @@ export class BrowserManager {
     const actionable = iterActionableAxNodes(nodes);
     const elements: BrowserElementDescriptor[] = [];
     for (const node of actionable) {
+      if (Date.now() >= snapshotDeadline) {
+        addSnapshotWarning("Browser snapshot returned partial element state after timing out.");
+        break;
+      }
       const ref = refs.mint({
         backendNodeId: node.backendNodeId,
         role: node.role,
@@ -2533,15 +2614,41 @@ export class BrowserManager {
       descriptor.descriptorText = descriptorSearchText(descriptor);
       elements.push(descriptor);
     }
-    this.mergeDomSnapshotCandidates(elements, await this.captureDomSnapshotCandidates());
+    if (Date.now() < snapshotDeadline) {
+      const domSnapshot = await withTimeout(
+        this.captureDomSnapshotCandidates(),
+        Math.min(DEFAULT_DOM_SNAPSHOT_TIMEOUT_MS, remainingSnapshotMs()),
+        "Browser DOM snapshot timed out.",
+      ).catch(() => {
+        addSnapshotWarning("DOM snapshot capture timed out.");
+        return undefined;
+      });
+      this.mergeDomSnapshotCandidates(elements, domSnapshot);
+    } else {
+      addSnapshotWarning("DOM snapshot capture skipped because the snapshot budget was exhausted.");
+    }
+    const text = Date.now() < snapshotDeadline
+      ? await withTimeout(
+        this.captureReadablePageText(),
+        Math.min(DEFAULT_DOM_PROBE_TIMEOUT_MS, remainingSnapshotMs()),
+        "Readable page text capture timed out.",
+      ).catch(() => {
+        addSnapshotWarning("Readable page text capture timed out.");
+        return "";
+      })
+      : "";
+    if (!text && Date.now() >= snapshotDeadline) {
+      addSnapshotWarning("Readable page text capture skipped because the snapshot budget was exhausted.");
+    }
     const payload: BrowserSnapshot = {
       url: this.browserView.webContents.getURL() || documentState.url || this.state.url,
       title: this.browserView.webContents.getTitle() || this.state.title,
-      text: await this.captureReadablePageText(),
+      text,
       elements,
       refs,
       documentId: documentState.documentId,
       frameId: documentState.frameId,
+      warning,
     };
     this.elementRefs = payload.refs;
     this.elementDescriptors = new Map(payload.elements.map((element) => [element.ref, element]));
@@ -2670,17 +2777,25 @@ export class BrowserManager {
 
   private async locateTargetBySelector(selector: string) {
     if (!this.browserView) throw new Error("Browser runtime is not available.");
-    return await this.browserView.webContents.executeJavaScript(
-      browserLocateScript("selector", selector),
-      true,
+    return await withTimeout(
+      this.browserView.webContents.executeJavaScript(
+        browserLocateScript("selector", selector),
+        true,
+      ),
+      DEFAULT_DOM_PROBE_TIMEOUT_MS,
+      "Locating target by selector timed out.",
     ) as BrowserLocateScriptResult;
   }
 
   private async locateTargetByXPath(xpath: string) {
     if (!this.browserView) throw new Error("Browser runtime is not available.");
-    return await this.browserView.webContents.executeJavaScript(
-      browserLocateScript("xpath", xpath),
-      true,
+    return await withTimeout(
+      this.browserView.webContents.executeJavaScript(
+        browserLocateScript("xpath", xpath),
+        true,
+      ),
+      DEFAULT_DOM_PROBE_TIMEOUT_MS,
+      "Locating target by XPath timed out.",
     ) as BrowserLocateScriptResult;
   }
 
@@ -2690,13 +2805,17 @@ export class BrowserManager {
     args: unknown[] = [],
   ): Promise<T> {
     return this.withResolvedBackendNode(backendNodeId, async (cdp, objectId) => {
-      const result = await cdp.sendCommand("Runtime.callFunctionOn", {
-        objectId,
-        awaitPromise: true,
-        returnByValue: true,
-        functionDeclaration,
-        arguments: args.map((value) => ({ value })),
-      }) as { result?: { value?: T }; exceptionDetails?: { text?: string } };
+      const result = await withTimeout(
+        cdp.sendCommand("Runtime.callFunctionOn", {
+          objectId,
+          awaitPromise: true,
+          returnByValue: true,
+          functionDeclaration,
+          arguments: args.map((value) => ({ value })),
+        }),
+        DEFAULT_CDP_TIMEOUT_MS,
+        `Calling backend DOM node ${backendNodeId} timed out.`,
+      ) as { result?: { value?: T }; exceptionDetails?: { text?: string } };
       if (result.exceptionDetails) {
         throw new Error(result.exceptionDetails.text || "Backend node function failed.");
       }
@@ -3314,10 +3433,26 @@ export class BrowserManager {
     return { ok: true, ...this.getState(), resolve: result };
   }
 
-  private async navigate(url?: string): Promise<BrowserActionResponse> {
+  private async navigate(url?: string, timeoutMs?: number): Promise<BrowserActionResponse> {
     if (!this.browserView) throw new Error("Browser runtime is not available.");
     const target = normalizeUrl(String(url ?? ""));
-    await this.browserView.webContents.loadURL(target);
+    const navigationTimeoutMs = normalizeOptionalBrowserTimeoutMs(timeoutMs);
+    if (navigationTimeoutMs) {
+      await withTimeout(
+        this.browserView.webContents.loadURL(target),
+        navigationTimeoutMs,
+        `Browser navigation to ${target} timed out after ${navigationTimeoutMs}ms.`,
+        () => {
+          try {
+            this.browserView?.webContents.stop();
+          } catch {
+            // no-op
+          }
+        },
+      );
+    } else {
+      await this.browserView.webContents.loadURL(target);
+    }
     await this.waitForActionSettled();
     return this.snapshot("navigate");
   }
