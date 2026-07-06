@@ -72,10 +72,7 @@ function summarizeBrowserAction(parsed: unknown) {
   const cache = script?.cache && typeof script.cache === "object" && !Array.isArray(script.cache)
     ? script.cache as Record<string, unknown>
     : null;
-  const scriptState = script?.state && typeof script.state === "object" && !Array.isArray(script.state)
-    ? script.state as Record<string, unknown>
-    : null;
-  const compactScriptState = scriptState?.compact === true;
+  const isScriptResponse = Boolean(script);
 
   if (typeof value.ok === "boolean") lines.push(`ok: ${value.ok}`);
   if (typeof value.action === "string") lines.push(`action: ${value.action}`);
@@ -85,21 +82,11 @@ function summarizeBrowserAction(parsed: unknown) {
   if (typeof value.warning === "string") lines.push(`warning: ${value.warning}`);
   const historyCount = countArray(value.history);
   const elementCount = countArray(value.elements);
-  if (historyCount !== undefined && (!compactScriptState || historyCount > 0)) lines.push(`history entries: ${historyCount}`);
-  if (elementCount !== undefined && (!compactScriptState || elementCount > 0)) lines.push(`snapshot elements: ${elementCount}`);
+  if (historyCount !== undefined && (!isScriptResponse || historyCount > 0)) lines.push(`history entries: ${historyCount}`);
+  if (elementCount !== undefined && (!isScriptResponse || elementCount > 0)) lines.push(`snapshot elements: ${elementCount}`);
   if (script) {
     if (typeof script.durationMs === "number") lines.push(`script duration: ${script.durationMs}ms`);
     if (script.timedOut === true) lines.push("script timed out: true");
-    if (scriptState) {
-      const omitted = [
-        typeof scriptState.elementsOmitted === "number" && scriptState.elementsOmitted > 0 ? `${scriptState.elementsOmitted} elements` : "",
-        typeof scriptState.textOmittedChars === "number" && scriptState.textOmittedChars > 0 ? `${scriptState.textOmittedChars} text chars` : "",
-        typeof scriptState.historyOmitted === "number" && scriptState.historyOmitted > 0 ? `${scriptState.historyOmitted} history entries` : "",
-      ].filter(Boolean).join(", ");
-      lines.push(compactScriptState
-        ? `script state: compact${omitted ? ` (omitted ${omitted})` : ""}`
-        : "script state: full");
-    }
     const result = script.result && typeof script.result === "object" && !Array.isArray(script.result)
       ? script.result as Record<string, unknown>
       : null;

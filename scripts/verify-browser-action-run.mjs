@@ -4,8 +4,10 @@ import { pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const browserManagerModule = await import(pathToFileURL(path.join(repoRoot, "dist-electron", "electron", "server", "browser-manager.js")));
+const executorsModule = await import(pathToFileURL(path.join(repoRoot, "dist-electron", "electron", "server", "tools", "executors.js")));
 
-const { BrowserManager } = browserManagerModule;
+const { BrowserManager, browserManager } = browserManagerModule;
+const { TOOL_EXECUTORS } = executorsModule;
 
 function okState(action = "snapshot") {
   return {
@@ -557,28 +559,27 @@ function createScriptManager() {
   assert.deepEqual(response.elements, []);
   assert.equal(response.text, "");
   assert.equal(response.history, undefined);
-  assert.equal(response.script?.state?.compact, true);
-  assert.equal(response.script?.state?.elementsOmitted, 1);
-  assert.equal(response.script?.state?.textOmittedChars, richScriptState().text.length);
-  assert.equal(response.script?.state?.historyOmitted, 1);
+  assert.equal(response.script?.state, undefined);
 }
 
 {
   const { manager } = createScriptManager();
-  manager.snapshot = async (action) => richScriptState(action);
-  const response = await manager.executeAction({
+  browserManager.ensure = async () => {};
+  browserManager.waitForActionSettled = async () => {};
+  browserManager.snapshot = async (action) => richScriptState(action);
+  browserManager.browserView = manager.browserView;
+  const output = await TOOL_EXECUTORS.browser_action({
     action: "script",
-    includeState: true,
     script: "return { created: true };",
-  });
-  assert.equal(response.ok, true);
-  assert.equal(response.elements.length, 1);
-  assert.equal(response.text, "Submit the current form and return to the dashboard.");
-  assert.equal(response.history?.length, 1);
-  assert.equal(response.script?.state?.compact, false);
-  assert.equal(response.script?.state?.elementsOmitted, 0);
-  assert.equal(response.script?.state?.textOmittedChars, 0);
-  assert.equal(response.script?.state?.historyOmitted, 0);
+  }, {});
+  const parsed = JSON.parse(output);
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.script.result.value, { created: true });
+  assert.equal(parsed.url, undefined);
+  assert.equal(parsed.title, undefined);
+  assert.equal(parsed.elements, undefined);
+  assert.equal(parsed.text, undefined);
+  assert.equal(parsed.history, undefined);
 }
 
 {

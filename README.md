@@ -1,377 +1,341 @@
 # Nexo Agent
 
-[English](./README.en.md)
+[简体中文](./README.zh-CN.md)
 
-Nexo Agent 是一个本地优先的 AI Agent 桌面应用与 Web 控制台。它把对话、多模型编排、工具调用、持久记忆、本地知识库、技能系统、定时任务和渠道接入放在同一个工作台里，适合个人助理、研发协作和团队内部 Agent 场景。
+Nexo Agent is a local-first AI agent desktop app and web console. It brings chat, model orchestration, built-in tools, persistent memory, local knowledge, scheduled tasks, and a shared browser session into one workspace.
 
-项目基于 Electron、React、TypeScript、Express 与 LangChain 构建。桌面端启动时会同时拉起本地后端和本地 Web 控制台，Web 端与 Electron 共用同一套会话、配置和 Agent 运行时。
+The project is built with Electron, React, TypeScript, Ant Design, Express, LangChain, SQLite/sql.js, and Vite. The Electron app starts the same local backend used by the web console, so desktop and browser surfaces share sessions, settings, memory, tools, uploads, and runtime state.
 
-## 核心能力
+## Status
 
-- 多会话聊天：支持创建、切换、重命名、删除和持久化历史会话
-- 多模型配置：支持 OpenAI Compatible / Anthropic Compatible 等模型配置与主模型切换
-- Agent 工具调用：支持 `web_search`、`http_request`、`shell_command`、`file_read`、`file_write`、多模态工具等
-- 共享浏览器：桌面端内置与对话绑定的浏览器工作台，支持可视浏览、隐藏后台浏览、AX tree + 稳定 ref + stale 重解析、截图回传、元素选择、历史记录、缩放和网页自动化操作，以及 Electron 侧高权限浏览器脚本
-- 记忆系统：支持 `daily`、`dream`、`script` 三类跨会话持久记忆，使用 SQLite + embedding 检索
-- 知识库：支持本地 Markdown 文件管理、embedding 向量检索、关键词兜底与聊天上下文注入
-- 技能系统：支持内置技能、工作区技能、托管技能、市场技能
-- 定时任务：支持 Cron 任务、手动触发和任务会话沉淀
-- 渠道接入：支持 Web、飞书、钉钉、企业微信、微信公众号等渠道配置
-- 双端运行：Electron 桌面端与本地 Web 控制台共用后端
+This repository is an active product and agent-runtime workspace. Some surfaces are production-shaped but still evolving. The README describes the current runtime direction and the built-in toolset in `nexo/tools.json`; OpenSpec changes under `openspec/` are the source of truth for in-progress capability contracts.
 
-## 快速开始
+## Highlights
 
-### 环境要求
+- Multi-session chat with streaming responses, persisted conversation history, interruption support, and tool-call traces.
+- OpenAI-compatible and Anthropic-compatible model orchestration through LangChain.
+- Built-in tools for shell commands, model sub-calls, scheduled tasks, persistent memory recall, script memory storage, and shared browser operation.
+- AI Browser: a shared Electron browser session for interactive web work, screenshots, DOM-first target resolution, CDP input events, and high-privilege runtime scripts.
+- Short-lived browser script cache for temporary capture/replay samples, separate from durable script memory.
+- Persistent `daily`, `dream`, and `script` memory in SQLite, with embedding-backed recall when available.
+- Local Markdown knowledge base with semantic retrieval when embeddings are configured.
+- Token-aware context management, rolling thread compaction, and bounded tool-output handling for large payloads.
+- Desktop packaging with electron-builder for Windows, macOS, and Linux.
 
-- Node.js 22 或兼容版本
+## Quick Start
+
+### Requirements
+
+- Node.js 22 or a compatible version
 - npm
-- 可用的模型服务 API Key
+- A model provider endpoint and API key for full agent behavior
 
-### 安装依赖
+### Install
 
 ```bash
 npm install
 ```
 
-### 启动桌面开发环境
+### Start the Electron App
 
 ```bash
 npm run dev:electron
 ```
 
-会同时启动：
+This starts:
 
-- Vite 前端开发服务：`http://localhost:8106`
-- Electron 主进程编译监听
-- Electron 桌面窗口
-- 本地 Express Web 控制台：`http://localhost:9898`
+- Vite web dev server at `http://localhost:8106`
+- Electron main-process TypeScript watch
+- Electron desktop window
+- Local Express backend and web console at `http://localhost:9898`
 
-### 只启动 Web 前端
+### Start Only the Web Dev Server
 
 ```bash
 npm run dev:web
 ```
 
-说明：
+The Vite server listens on `http://localhost:8106` and proxies `/api` and `/uploads` to `http://localhost:9898`. If you run only `dev:web`, make sure the backend is already running.
 
-- Vite 会监听 `http://localhost:8106`
-- `/api` 与 `/uploads` 会代理到 `http://localhost:9898`
-- 如果只跑 `dev:web`，需要确保本地后端已经可用
-
-### 构建并运行本地 Web 控制台
+### Serve the Built Web Console
 
 ```bash
 npm run build
 npm run serve:web-console
 ```
 
-默认地址：
+Default URL:
 
 ```text
 http://localhost:9898
 ```
 
-## 项目架构图
+## Configuration
 
-### 运行时架构
+Open Settings after first launch and configure a model profile.
 
-```mermaid
-flowchart LR
-  U[用户]
+Common settings:
 
-  subgraph Desktop["Electron 桌面端"]
-    UI1[React UI]
-    PRELOAD[preload IPC Bridge]
-    MAIN[Electron Main]
-  end
+| Setting | Purpose |
+| --- | --- |
+| Provider | OpenAI-compatible, Anthropic-compatible, or a configured custom provider |
+| API Base URL | Provider endpoint, such as `https://api.openai.com/v1` |
+| API Key | Secret used for model calls |
+| Model | Chat model name |
+| Temperature | Default response randomness |
+| Workspace Path | Default root for command and workspace-aware tasks |
+| Context Window | Optional override for model context budgeting |
+| Reserved Output Tokens | Tokens reserved for the model response |
+| Context Compaction Threshold | Message-count threshold for rolling conversation summary |
+| Max Tool Steps | Maximum tool-call loop depth per assistant turn |
+| Shell Command Timeout | Default timeout for `shell_command` |
+| Memory / Knowledge Toggles | Enable or disable recall and local knowledge injection |
 
-  subgraph Web["本地 Web 控制台"]
-    UI2[React UI]
-  end
+Without a configured model API key, the app can still open, but full agent behavior requires a working provider profile.
 
-  subgraph Backend["本地 Agent 服务"]
-    API[Express API / SSE]
-    AGENT[Agent Runtime]
-    TOOLS[Tool Executors]
-    TASKS[Task Scheduler]
-    CHANNELS[Channel Runtime]
-  end
+## Built-In Tools
 
-  subgraph Data["本地数据层"]
-    SETTINGS[settings / model profiles]
-    SESSIONS[sessions.json]
-    MEMORY[memory.sqlite / dream memory]
-    KNOWLEDGE[knowledge/]
-    SKILLS[skills/]
-    LOGS[logs/app.log]
-    TASKDATA[tasks.json]
-    UPLOADS[uploads/]
-  end
+Built-in tool metadata lives in `nexo/tools.json`; executors live under `electron/server/tools/`.
 
-  subgraph Model["模型与外部能力"]
-    LLM[LLM Providers]
-    SEARCH[Web Search / HTTP]
-    MEDIA[Image / Audio Models]
-  end
+Default enabled tools:
 
-  U --> UI1
-  U --> UI2
+| Tool | Purpose |
+| --- | --- |
+| `shell_command` | Run a command in the configured workspace. It is intended for development, inspection, and scripted local workflows. |
+| `invoke_model` | Call the default model or a specialist model profile for sub-tasks such as vision, image generation, image editing, speech-to-text, text-to-speech, or embeddings when configured. |
+| `create_scheduled_task` | Create a future or recurring prompt task shown in the Tasks panel. |
+| `recall_memory` | Search persistent `daily`, `dream`, or `script` memories stored in SQLite. |
+| `store_script_memory` | Persist durable script memories, runbooks, replay templates, or repeatable workflow notes. |
+| `browser_action` | Operate the shared Electron browser session through one-step browser actions, screenshots, DOM/AX resolution, CDP input, and high-privilege scripts. |
 
-  UI1 --> PRELOAD
-  PRELOAD --> MAIN
-  MAIN --> API
+The toolset is intentionally small. Short-lived browser capture data should use `scriptCache`; only stable, reusable workflows should be promoted to `store_script_memory`.
 
-  UI2 --> API
+## AI Browser / Shared Browser Runtime
 
-  API --> AGENT
-  API --> TASKS
-  API --> CHANNELS
+The AI Browser is a conversation-scoped shared Electron browser. It is used by the agent to inspect pages, operate web apps, capture screenshots, and perform browser automation while keeping the user in the same conversation.
 
-  AGENT --> TOOLS
-  AGENT --> LLM
-  AGENT --> SEARCH
-  AGENT --> MEDIA
-
-  API <--> SETTINGS
-  API <--> SESSIONS
-  AGENT <--> MEMORY
-  AGENT <--> KNOWLEDGE
-  AGENT <--> SKILLS
-  TASKS <--> TASKDATA
-  API <--> UPLOADS
-  API <--> LOGS
-```
-
-### 分层说明
-
-1. UI 层
-   React + Ant Design，负责聊天、设置、记忆、知识库、工具、技能、任务等界面。
-2. Desktop Bridge 层
-   Electron `preload` 暴露桌面能力，`main` 负责窗口、快捷键、IPC、打开浏览器、启动本地服务。
-3. Backend 层
-   Express 提供 REST API 和 SSE；Agent Runtime 负责模型调用、上下文拼装、工具编排、循环终止。
-4. Data 层
-   使用 JSON、SQLite 和本地目录保存会话、配置、记忆、知识库、技能、任务与日志。
-5. External 层
-   对接模型供应商、网络搜索、HTTP 接口、多模态模型等外部能力。
-
-## 项目目录结构图
+Supported `browser_action` operations:
 
 ```text
-nexoAgent/
-├─ electron/
-│  ├─ bootstrap.ts                # Electron 启动入口
-│  ├─ main.ts                     # 窗口、IPC、快捷键、本地服务启动
-│  ├─ preload.ts                  # 向前端暴露桌面能力
-│  ├─ memory.ts                   # 记忆系统、SQLite、dream memory
-│  └─ server/
-│     ├─ index.ts                 # Express App 入口
-│     ├─ agent.ts                 # Agent 主循环、工具调用、上下文管理
-│     ├─ browser-manager.ts       # 共享浏览器、DOM 快照、CDP 点击、元素选择
-│     ├─ settings.ts              # 运行时设置默认值与合并逻辑
-│     ├─ sessions.ts              # 会话持久化
-│     ├─ knowledge.ts             # 知识库加载与检索
-│     ├─ skills.ts                # 技能发现、加载、安装、启停
-│     ├─ tasks.ts                 # 定时任务调度
-│     ├─ channel-runtime.ts       # 渠道消息接入运行时
-│     ├─ model-runtime.ts         # 模型调用封装
-│     ├─ model-profiles.ts        # 模型配置管理
-│     ├─ token-budget.ts          # 上下文预算与压缩
-│     ├─ run-control.ts           # 中断与运行控制
-│     ├─ sse.ts                   # 流式事件推送
-│     ├─ routes/                  # 各类 API 路由
-│     └─ tools/                   # 工具注册与执行器
-├─ src/
-│  ├─ components/
-│  │  ├─ Layout/                  # 主布局与导航
-│  │  ├─ BrowserWorkbench/        # 浏览器工作台、地址栏、元素选择、会话并排布局
-│  │  ├─ SessionList/             # 会话侧栏
-│  │  ├─ ChatPanel/               # 聊天面板与消息渲染
-│  │  ├─ Memory/                  # 记忆面板
-│  │  ├─ Knowledge/               # 知识库面板
-│  │  ├─ Tools/                   # 工具管理面板
-│  │  ├─ Skills/                  # 技能管理面板
-│  │  ├─ Tasks/                   # 定时任务面板
-│  │  ├─ Channels/                # 渠道配置面板
-│  │  ├─ Logs/                    # 日志面板
-│  │  ├─ Settings/                # 设置与模型配置
-│  │  └─ Common/                  # 通用组件
-│  ├─ services/api.ts             # 前端 API 访问层
-│  ├─ store/chat.ts               # 聊天状态、会话、流式事件
-│  ├─ shared/                     # 前后端共享类型与常量
-│  ├─ i18n/                       # 国际化
-│  └─ theme/                      # 主题系统
-├─ nexo/
-│  ├─ tools.json                  # 内置工具元数据
-│  └─ skills/                     # 内置技能
-├─ docs/                          # 项目文档
-├─ openspec/                      # OpenSpec 变更与规范
-├─ assets/                        # 图标与静态资源
-├─ scripts/                       # 构建与验证脚本
-├─ README.md
-└─ README.en.md
+snapshot, resolve, navigate, click, type, scroll, wheel, hover, drag,
+key, script, screenshot, refresh, back, forward
 ```
 
-## 关键模块说明
+### One Action Per Call
 
-### 1. Electron 层
+Each non-script browser action performs one operation and returns updated page state. Multi-step web workflows should be performed as repeated tool calls:
 
-- `electron/main.ts`
-  负责创建窗口、注册快捷键、处理 IPC、打开外部浏览器、启动本地 Express 服务
-- `electron/preload.ts`
-  通过 `contextBridge` 给前端暴露 `runtimeInfo`、设置读写、打开浏览器等桌面能力
-- `electron/bootstrap.ts`
-  处理 Electron 启动入口和重新拉起主进程
+1. `snapshot` or `resolve`
+2. `click`
+3. inspect returned state
+4. `type`, `scroll`, `screenshot`, or the next needed action
 
-### 2. 浏览器与网页操作层
+This keeps refs fresh and avoids long opaque browser macros.
 
-- `electron/server/browser-manager.ts`
-  管理对话共享浏览器。它负责创建 Electron `BrowserView`、同步浏览器区域尺寸、维护地址/标题/前进后退状态、历史记录、缩放比例、截图产物和页面元素快照。
-- `src/components/BrowserWorkbench/`
-  提供浏览器工作台 UI。左侧是网页视图，中间竖向控制条提供缩放与布局拖拽，右侧是会话历史和对话面板。浏览器不是独立功能入口，而是会话旁边的可视组件。
-- `browser_action`
-  Agent 通过该工具操作共享浏览器，支持 `snapshot`、`resolve`、`navigate`、`click`、`type`、`scroll`、`wheel`、`hover`、`drag`、`key`、`script`、`screenshot`、`refresh`、`back`、`forward`。每次调用只执行一个浏览器操作并返回最新页面状态；多步网页流程应当一步一观察、一动作一调用；显式需要直接编程 `BrowserView` / `webContents` / CDP 时使用 `action="script"`。
-- DOM-first 元素解析
-  浏览器会优先通过 AX tree 抓取标准可交互控件，并为同一文档内的节点分配稳定 ref。ref 对应的底层节点失效时，会基于同一条 AX tree 路径按 `(role, name, nth)` 重新解析，而不是回退到向量语义匹配。每个元素仍会保留描述文本、bounds、role、name、label 和上下文信息。
-- 单步浏览器操作
-  每次 `browser_action` 调用只执行一个操作。运行时会通过 AX tree 快照、稳定 ref、stale 重解析、DOM 规则、selector、xpath 和显式坐标解析本次目标，执行后返回最新页面状态，供 Agent 决定下一步。
-  显式坐标可直接写成 `target: { "x": 80, "y": 56 }` 并配合 `strategy: "coordinate"`，也可以传 `bounds` 让运行时点击中心点。
-  示例：
-  ```json
-  {
-    "action": "click",
-    "target": { "query": "写信", "role": "button" },
-    "strategy": "auto"
-  }
-  ```
-- 高权限浏览器脚本
-  `browser_action.action="script"` 会执行 Electron 侧服务端 JavaScript，而不是页面内 JavaScript。脚本运行在 async 函数里，直接拿到 `browserView`、`webContents`、原始 debugger/CDP 句柄、`sendCommand(...)`、`browserManager` 以及 `require`、`Buffer`、`process`、`console`、计时器等 Node/Electron 运行时对象。
-- 严格动作保护
-  对 `发送`、`删除`、`保存`、`登录`、`取消` 等明确动作，resolver 不允许只靠 embedding 语义相似命中。候选元素必须包含对应动作锚点，避免把“发送”误点成“写信”这类相关但错误的控件。
-- CDP 底层点击
-  点击时先通过 DOM/ref 获取元素中心坐标，再使用 `webContents.debugger.sendCommand("Input.dispatchMouseEvent", ...)` 发送 `mouseMoved -> mousePressed -> mouseReleased` 事件序列。事件走 Chrome DevTools Protocol 输入管道，带 `buttons`、`modifiers` 和 `timestamp`，比 `HTMLElement.click()` 更接近真实鼠标操作。
-- 输入兜底
-  `type` 支持 ref/query，也支持当前焦点元素。当 SPA 重渲染导致旧 ref 失效时，运行时会先沿 AX tree 对 ref 做 stale 重解析，再继续输入。
-- 元素选择
-  浏览器工具栏提供元素选择按钮。启用后页面 hover 会高亮元素，下一次点击会阻止网页默认行为，并把被选元素的名称、标签、role、文本、selector、bounds 和 URL 写入右侧聊天输入框，方便把页面元素作为对话上下文。
-- 截图回传
-  `screenshot` 会生成图片产物并附加到助手消息。它用于视觉状态确认、页面布局、图表、图片和用户明确要求“截图/展示”的场景；普通按钮和输入框定位仍以 DOM-first 为主。必要时单步 action 也可通过 `strategy: "visionFallback"` 显式请求视觉兜底。
+### DOM-First Target Resolution
 
-### 3. Agent Runtime 层
+For ordinary web controls, Nexo prefers DOM and accessibility evidence over vision. The resolver uses:
 
-- `electron/server/agent.ts`
-  项目的核心运行时，负责：
-  - 构造系统提示词
-  - 组装会话上下文
-  - 调用主模型
-  - 接收工具调用
-  - 执行工具并继续下一轮
-  - 处理循环终止、人工中断、上下文压缩
-- `electron/server/model-runtime.ts`
-  负责不同模型供应商的统一调用封装
-- `electron/server/token-budget.ts`
-  负责上下文预算、压缩阈值和 prompt token 估算
+- AX tree snapshots
+- stable element refs
+- stale ref re-resolution
+- DOM metadata
+- selectors and XPath when explicitly supplied
+- coordinate fallback when needed
+- CDP-backed input events
 
-### 4. API / 流式通信层
+Example:
 
-- `electron/server/routes/`
-  提供聊天、会话、记忆、知识库、工具、技能、任务、渠道、设置等 API
-- `electron/server/sse.ts`
-  提供流式输出队列，前端通过 SSE 订阅 Agent 过程事件
+```json
+{
+  "action": "click",
+  "target": { "query": "Submit", "role": "button" },
+  "strategy": "auto"
+}
+```
 
-### 5. 数据与本地存储层
+### High-Privilege Scripts
 
-默认数据目录：
+`browser_action` with `action="script"` runs Electron-side service JavaScript. It has direct access to objects such as:
+
+- `browserView`
+- `webContents`
+- `cdp`, `rawDebugger`, `sendCommand(...)`, and `cdpSend(...)`
+- `scriptCache`
+- `browserManager`
+- Node/Electron runtime objects such as `require`, `Buffer`, `process`, `console`, and timers
+
+Use this path for explicit BrowserView programming, raw CDP work, request capture, runtime debugging, or reusable page instrumentation. Ordinary clicking and typing should still use normal browser actions.
+
+Script tool output is intentionally narrow: the model-facing tool result contains only `ok` plus the script execution payload. It does not return browser history, element snapshots, page text, URL/title metadata, or resolver state unless the script itself returns those values. If full page state is needed after a script, call `browser_action` with `action="snapshot"`.
+
+### Script Cache
+
+`scriptCache` is a short-lived cache available inside `action="script"`. It is designed for temporary capture and replay samples such as network requests, headers, bodies, response snippets, or debugging records.
+
+Available operations include:
+
+```text
+set, get, getEntry, list, delete, clear,
+capture, consume, consumeEntry, replay
+```
+
+Cache entries have TTL-based expiry. Scripts should actively remove one-time samples with `consume`, `delete`, `clear`, or `replay(..., { deleteAfter: true })` / `replay(..., { deleteOnSuccess: true })`.
+
+## Memory
+
+Nexo stores persistent memories in SQLite under the local data directory.
+
+| Kind | Description |
+| --- | --- |
+| `daily` | Conversation facts grouped by calendar day |
+| `dream` | Consolidated daily memory summaries for longer-term recall |
+| `script` | Durable workflow notes, runbooks, scripts, captured replay templates, and reusable process state |
+
+Memory recall can use embeddings when a compatible embedding profile is available. If vector search is unavailable, Nexo falls back to SQLite-backed keyword matching.
+
+Thread compaction is separate from durable memory. Long chats are summarized into a rolling session summary for current-context continuity, while `daily`, `dream`, and `script` memories are cross-session data.
+
+## Knowledge Base
+
+The local knowledge base manages Markdown files and can inject relevant notes into chat context.
+
+It supports:
+
+- browse, create, edit, and delete Markdown notes
+- preview rendered Markdown
+- semantic retrieval when embeddings are configured
+- keyword fallback when embeddings are unavailable
+
+Use it for project rules, runbooks, operating procedures, team context, and other reusable reference material.
+
+## Scheduled Tasks
+
+Scheduled tasks create prompts that run later through Nexo's built-in scheduler. A task can use:
+
+- `cron` for a recurring 5-field cron schedule
+- `runAt` for a one-time date/time
+- `delayMinutes` for a one-time delayed run
+
+Completed task runs are saved as task sessions for review.
+
+## Local Data
+
+Runtime data is stored outside the repository by default:
 
 ```text
 %USERPROFILE%/.NexoAgent
 ```
 
-主要内容包括：
+Common contents:
 
-- `sessions.json`：聊天会话
-- `memory.sqlite`：记忆数据库
-- `knowledge/`：本地知识库文件
-- `skills/`：托管技能与市场技能
-- `tasks.json`：定时任务配置
-- `uploads/`：上传附件
-- `logs/`：运行日志
-- `model-profiles.json`：模型配置
+- settings and model profiles
+- sessions
+- memory SQLite database
+- Chroma or embedding-related local data when enabled
+- knowledge files
+- managed skills
+- scheduled tasks
+- uploaded files and generated artifacts
+- runtime logs
 
-### 6. 前端 UI 层
+Do not commit local runtime data.
 
-主要由以下面板构成：
+## Project Layout
 
-- Chat：聊天与工具过程展示
-- Browser Workbench：对话旁的共享浏览器、地址栏、历史记录、元素选择、截图与网页操作
-- Memory：记忆查看、搜索、清理
-- Knowledge：知识库文件管理
-- Tools：工具启停与 MCP 配置
-- Skills：技能启停与删除
-- Tasks：定时任务管理
-- Channels：渠道配置
-- Logs：运行日志
-- Settings：模型、目录、运行参数配置
+```text
+nexoAgent/
+|-- electron/
+|   |-- bootstrap.ts              # Electron bootstrap entry
+|   |-- main.ts                   # Desktop window, IPC, local backend startup
+|   |-- preload.ts                # Secure renderer bridge
+|   |-- memory.ts                 # SQLite memory and recall helpers
+|   `-- server/
+|       |-- agent.ts              # Agent loop, prompts, tools, context assembly
+|       |-- browser-manager.ts    # Shared browser runtime and browser_action backend
+|       |-- conversation-context.ts
+|       |-- tool-output.ts        # Large tool-output bounding
+|       |-- routes/               # HTTP API routes
+|       `-- tools/                # Built-in tool executors and registry
+|-- src/
+|   |-- components/               # React UI panels and layout
+|   |-- services/                 # API client layer
+|   |-- shared/                   # Shared types, ports, settings
+|   |-- store/                    # Client state
+|   |-- theme/                    # Theme configuration
+|   `-- i18n/                     # UI strings
+|-- nexo/
+|   |-- tools.json                # Built-in tool metadata
+|   |-- skills/                   # Built-in skills
+|   `-- models/                   # Local browser resolver model assets
+|-- docs/                         # Project documentation
+|-- openspec/                     # Capability specs and proposed changes
+|-- scripts/                      # Verification and maintenance scripts
+|-- assets/                       # Icons and static assets
+|-- release/                      # Packaged build output
+|-- README.md                     # English-first documentation
+`-- README.zh-CN.md               # Simplified Chinese documentation
+```
 
-## 默认端口
+## Scripts
 
-| 服务 | 端口 | 说明 |
-| --- | --- | --- |
-| Vite Dev Server | `8106` | 前端开发服务 |
-| Express API / Web Console | `9898` | 本地后端与 Web 控制台 |
-
-定义位置：
-
-- [src/shared/ports.ts](./src/shared/ports.ts)
-
-## 常用脚本
-
-| 命令 | 说明 |
+| Command | Description |
 | --- | --- |
-| `npm run dev:web` | 启动 Vite 前端开发服务 |
-| `npm run dev:electron` | 启动 Electron 开发环境 |
-| `npm run build:web` | 构建 Web 前端 |
-| `npm run build:electron` | 编译 Electron 主进程与服务端 |
-| `npm run build` | 完整构建 |
-| `npm run serve:web-console` | 启动构建后的本地 Web 控制台 |
-| `npm run typecheck` | TypeScript 类型检查 |
-| `npm run preview` | 预览 Vite 构建产物 |
-| `npm run package` | 打包桌面应用 |
+| `npm run dev:web` | Start the Vite web dev server |
+| `npm run dev:electron` | Start the full Electron development environment |
+| `npm run build:web` | Type-check and build the React frontend |
+| `npm run build:electron` | Compile Electron main/preload/server code |
+| `npm run build` | Build frontend and Electron code |
+| `npm run serve:web-console` | Serve the built local web console |
+| `npm run preview` | Preview the Vite build output |
+| `npm run typecheck` | Run TypeScript checks for frontend and Electron projects |
+| `npm run verify:context-management` | Verify rolling context compaction behavior |
+| `npm run verify:tool-output-bounds` | Verify large tool-output summarization and raw-output references |
+| `npm run verify:browser-action-run` | Verify browser action runtime behavior |
+| `npm run verify:provider-embeddings` | Verify provider embedding configuration |
+| `npm run verify:memory-recall` | Verify memory recall behavior |
+| `npm run verify:multimodal-models` | Verify multimodal model routing |
+| `npm run package` | Build icons, build the app, and package with electron-builder |
+| `npm run package:win` | Package Windows artifacts |
+| `npm run package:mac` | Package macOS artifacts |
+| `npm run package:linux` | Package Linux artifacts |
 
-构建产物默认输出到：
+Packaged artifacts are written to:
 
 ```text
 release/
 ```
 
-## 开发建议
+## Ports
 
-- 修改 Agent 行为优先看 `electron/server/agent.ts`
-- 修改共享浏览器行为优先看：
-  - `electron/server/browser-manager.ts`
-  - `src/components/BrowserWorkbench/`
-  - `nexo/tools.json` 中的 `browser_action`
-- 新增工具时同步更新：
-  - `nexo/tools.json`
-  - `electron/server/tools/executors.ts`
-- 修改共享类型优先看 `src/shared/types.ts`
-- 涉及模型配置时关注：
-  - `electron/server/model-profiles.ts`
-  - `electron/server/model-runtime.ts`
-  - `src/components/Settings/index.tsx`
-- 涉及聊天渲染时关注：
-  - `src/store/chat.ts`
-  - `src/components/ChatPanel/`
+Defined in `src/shared/ports.ts`.
 
-## 当前边界
+| Service | Port | URL |
+| --- | --- | --- |
+| Vite dev server | `8106` | `http://localhost:8106` |
+| Express API / web console | `9898` | `http://localhost:9898` |
+| Vite preview | `4173` | `http://localhost:4173` |
 
-- 渠道页目前以配置管理为主，不是完整的 IM 生产级接入平台
-- MCP 服务当前主要是配置入口，完整发现与调用链路仍可继续增强
-- 知识库检索是本地 Markdown 的向量/关键词混合召回，不等同企业级 RAG，引用、权限和高级排序仍需进一步完善
-- 多模态能力依赖模型配置是否具备图像/音频能力
-- 浏览器自动化优先依赖页面 DOM、ARIA 和 CDP 输入事件。Canvas、插件控件、跨域 iframe 内部元素、强反自动化页面和依赖站点私有协议的操作仍可能需要截图、人工确认或站点级适配。
-- 普通控件优先走 AX tree + 稳定 ref + stale 重解析；`action="script"` 仅在显式需要高权限浏览器运行时控制时使用。
+## Development Notes
+
+- Agent behavior usually starts in `electron/server/agent.ts`.
+- Browser runtime behavior lives mainly in `electron/server/browser-manager.ts`.
+- Built-in tools require both metadata in `nexo/tools.json` and an executor in `electron/server/tools/executors.ts`.
+- Shared types live in `src/shared/types.ts`.
+- Large tool-output behavior lives in `electron/server/tool-output.ts`.
+- Context compaction behavior lives in `electron/server/conversation-context.ts`.
+- UI chat behavior is mainly in `src/store/chat.ts` and `src/components/ChatPanel/`.
+- Capability proposals and requirements should be tracked under `openspec/`.
+
+## Current Boundaries
+
+- Channel configuration screens are not a complete production messaging gateway.
+- MCP support is still configuration-oriented; runtime discovery and invocation are not the primary built-in path.
+- Knowledge retrieval is local Markdown retrieval, not enterprise RAG with permissions, citations, and advanced ranking.
+- Vision, image generation, audio, and embeddings depend on configured model profiles and provider support.
+- Browser automation is strongest on DOM-accessible web apps. Canvas-only UIs, cross-origin iframe internals, plugin content, and aggressive anti-automation pages may require screenshots, user confirmation, or site-specific scripts.
+- `action="script"` is high privilege and should be reserved for explicit browser-runtime, CDP, capture, replay, or debugging work.
 
 ## License
 
-本项目使用 Apache License 2.0，详见 [LICENSE](./LICENSE)。
+This project is licensed under the Apache License 2.0. See [LICENSE](./LICENSE).

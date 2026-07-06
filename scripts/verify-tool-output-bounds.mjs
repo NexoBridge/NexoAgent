@@ -84,15 +84,6 @@ try {
       text: "",
       script: {
         durationMs: 12,
-        state: {
-          compact: true,
-          elementsIncluded: 0,
-          textIncludedChars: 0,
-          historyIncluded: 0,
-          elementsOmitted: 310,
-          textOmittedChars: 260000,
-          historyOmitted: 6,
-        },
         result: {
           format: "json",
           type: "object",
@@ -109,8 +100,8 @@ try {
       output,
     });
 
-    assert.ok(bounded.outputSummary?.includes("script state: compact"));
-    assert.ok(bounded.outputSummary?.includes("310 elements"));
+    assert.ok(bounded.outputSummary?.includes("script duration: 12ms"));
+    assert.ok(bounded.outputSummary?.includes("script result type: object"));
     assert.equal(bounded.outputSummary?.includes("snapshot elements: 0"), false);
   }
 } finally {

@@ -260,18 +260,6 @@ export interface BrowserScriptExecutionResult {
   result?: BrowserScriptResultValue;
   error?: BrowserScriptError;
   cache?: BrowserScriptCacheReport;
-  state?: BrowserScriptStateReport;
-}
-
-export interface BrowserScriptStateReport {
-  compact: boolean;
-  elementsIncluded: number;
-  textIncludedChars: number;
-  historyIncluded: number;
-  elementsOmitted: number;
-  textOmittedChars: number;
-  historyOmitted: number;
-  hint?: string;
 }
 
 export interface BrowserState {
@@ -348,10 +336,6 @@ export interface BrowserActionRequest {
   args?: unknown[];
   scriptCacheKey?: string;
   scriptCacheTtlMs?: number;
-  includeState?: boolean;
-  includeElements?: boolean;
-  includeText?: boolean;
-  includeHistory?: boolean;
   target?: BrowserTargetDescriptor;
   strategy?: BrowserActionStrategy;
   key?: string;
