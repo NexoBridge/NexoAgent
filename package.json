@@ -1,6 +1,6 @@
 {
   "name": "nexo-agent",
-  "version": "0.0.11",
+  "version": "0.0.12",
   "private": true,
   "author": "NexoBridge",
   "description": "Nexo Agent desktop and web console built with Electron, React, TypeScript, and Ant Design.",

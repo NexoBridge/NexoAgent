@@ -111,7 +111,10 @@ function buildUi(lang: "zh" | "en") {
     enableKnowledge: lang === "zh" ? "\u542f\u7528\u77e5\u8bc6\u5e93" : "Enable Knowledge Base",
     temperature: "Temperature",
     enableContextCompaction: lang === "zh" ? "\u542f\u7528\u4e0a\u4e0b\u6587\u81ea\u52a8\u538b\u7f29" : "Enable Context Auto-compaction",
-    shellTimeout: lang === "zh" ? "\u9ed8\u8ba4\u811a\u672c\u8d85\u65f6\uff08\u79d2\uff09" : "Default Shell Timeout (s)",
+    aiRequestTimeout: lang === "zh" ? "AI \u8bf7\u6c42\u8d85\u65f6\uff08\u79d2\uff09" : "AI Request Timeout (s)",
+    aiRequestTimeoutTip: lang === "zh"
+      ? "\u586b 0 \u8868\u793a\u4e0d\u7531\u7cfb\u7edf\u81ea\u52a8\u8d85\u65f6\uff0c\u53ea\u80fd\u624b\u52a8\u505c\u6b62\uff1b\u586b\u6b63\u6570\u5219\u6309\u8be5\u65f6\u95f4\u4e2d\u65ad AI \u8bf7\u6c42\u3002"
+      : "Use 0 to disable automatic app timeouts; positive values abort AI requests after this many seconds.",
     planningMode: lang === "zh" ? "\u89c4\u5212\u6a21\u5f0f" : "Planning Mode",
     planningFast: lang === "zh" ? "\u5feb\u901f" : "Fast",
     planningBalanced: lang === "zh" ? "\u5e73\u8861" : "Balanced",
@@ -508,6 +511,25 @@ export const Settings: React.FC = () => {
     label: model.ownedBy ? `${model.label} | ${model.ownedBy}` : model.label,
   }));
 
+  const profileModalGridStyle: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    columnGap: 16,
+    alignItems: "start",
+  };
+  const profileModalStackStyle: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+    columnGap: 16,
+    alignItems: "start",
+  };
+  const profileModalItemStyle: React.CSSProperties = {
+    marginBottom: 14,
+  };
+  const profileModalFullRowStyle: React.CSSProperties = {
+    gridColumn: "1 / -1",
+  };
+
   const applyDiscoveredModel = (modelId: string) => {
     const model = discoveredModels.find((item) => item.id === modelId);
     if (!model) return;
@@ -589,12 +611,16 @@ export const Settings: React.FC = () => {
               <Switch />
             </Form.Item>
             <Form.Item
-              label={label(ui.shellTimeout)}
-              name="shellCommandTimeoutMs"
-              getValueProps={(value) => ({ value: Math.round((value ?? 300_000) / 1000) })}
-              normalize={(seconds) => Math.max(5, Math.min(600, Number(seconds) || 300)) * 1000}
+              label={label(ui.aiRequestTimeout)}
+              name="aiRequestTimeoutMs"
+              tooltip={ui.aiRequestTimeoutTip}
+              getValueProps={(value) => ({ value: Math.round((value ?? 0) / 1000) })}
+              normalize={(seconds) => {
+                const num = Number(seconds);
+                return Number.isFinite(num) && num > 0 ? Math.floor(num * 1000) : 0;
+              }}
             >
-              <InputNumber min={5} max={600} style={{ width: "100%" }} />
+              <InputNumber min={0} step={60} style={{ width: "100%" }} />
             </Form.Item>
             <Form.Item label={label(ui.planningMode)} name="planningMode">
               <Select
@@ -739,157 +765,166 @@ export const Settings: React.FC = () => {
         }}
         okText={t("save")}
         cancelText={t("cancel")}
-        width={760}
+        width={900}
       >
         <Form form={profileForm} layout="vertical">
-          <Form.Item name="name" label={ui.name} rules={[{ required: true, message: ui.nameRequired }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item name="providerId" label={ui.protocol} rules={[{ required: true, message: ui.protocolRequired }]}>
-            <Select
-              options={providerOptions}
-              onChange={(nextProviderId) => {
-                const previousProviderId = normalizeProviderId(profileForm.getFieldValue("providerId"));
-                const currentProviderName = String(profileForm.getFieldValue("providerName") ?? "").trim();
-                const currentApiBase = String(profileForm.getFieldValue("apiBase") ?? "").trim();
-                const previousDefaultApiBase = getProviderDefaultApiBase(previousProviderId);
-                const nextDefaultApiBase = getProviderDefaultApiBase(nextProviderId);
-                const previousServiceDefault = getServiceProviderDefaultApiBase(currentProviderName, previousProviderId);
-                const nextProviderName = !currentProviderName
-                  || currentProviderName === normalizeServiceProviderName(currentProviderName, currentApiBase, previousProviderId)
-                  || (previousServiceDefault && currentApiBase === previousServiceDefault)
-                  ? normalizeServiceProviderName(getDefaultServiceProviderName(nextProviderId), nextDefaultApiBase, nextProviderId)
-                  : currentProviderName;
-                profileForm.setFieldsValue({
-                  providerName: nextProviderName,
-                  model: "",
-                  capabilities: ["chat"],
-                  apiBase: !currentApiBase || currentApiBase === previousDefaultApiBase ? nextDefaultApiBase : currentApiBase,
-                });
-                setDiscoveredModels([]);
-              }}
-            />
-          </Form.Item>
-          <Form.Item
-            name="providerName"
-            label={ui.serviceProvider}
-            extra={ui.serviceProviderHint}
-          >
-            <Select
-              showSearch
-              options={serviceProviderOptions}
-              placeholder={ui.serviceProviderPlaceholder}
-              onChange={(nextProviderName) => {
-                const defaultApiBase = getServiceProviderDefaultApiBase(nextProviderName, normalizedWatchedProviderId);
-                if (!defaultApiBase) return;
-                profileForm.setFieldsValue({
-                  providerName: normalizeServiceProviderName(nextProviderName, defaultApiBase, normalizedWatchedProviderId),
-                  apiBase: defaultApiBase,
-                  model: "",
-                });
-                setDiscoveredModels([]);
-              }}
-            />
-          </Form.Item>
-          <Form.Item name="apiBase" label={ui.apiBase}>
-            <Input
-              placeholder={getServiceProviderDefaultApiBase(watchedProviderName, normalizedWatchedProviderId) || (watchedProviderId ? getProviderDefaultApiBase(watchedProviderId) : "https://api.example.com/v1")}
-              onBlur={(event) => {
-                const currentProviderName = String(profileForm.getFieldValue("providerName") ?? "").trim();
-                if (!currentProviderName || currentProviderName === "Custom") {
+          <div style={profileModalGridStyle}>
+            <Form.Item name="name" label={ui.name} rules={[{ required: true, message: ui.nameRequired }]} style={profileModalItemStyle}>
+              <Input />
+            </Form.Item>
+            <Form.Item name="providerId" label={ui.protocol} rules={[{ required: true, message: ui.protocolRequired }]} style={profileModalItemStyle}>
+              <Select
+                options={providerOptions}
+                onChange={(nextProviderId) => {
+                  const previousProviderId = normalizeProviderId(profileForm.getFieldValue("providerId"));
+                  const currentProviderName = String(profileForm.getFieldValue("providerName") ?? "").trim();
+                  const currentApiBase = String(profileForm.getFieldValue("apiBase") ?? "").trim();
+                  const previousDefaultApiBase = getProviderDefaultApiBase(previousProviderId);
+                  const nextDefaultApiBase = getProviderDefaultApiBase(nextProviderId);
+                  const previousServiceDefault = getServiceProviderDefaultApiBase(currentProviderName, previousProviderId);
+                  const nextProviderName = !currentProviderName
+                    || currentProviderName === normalizeServiceProviderName(currentProviderName, currentApiBase, previousProviderId)
+                    || (previousServiceDefault && currentApiBase === previousServiceDefault)
+                    ? normalizeServiceProviderName(getDefaultServiceProviderName(nextProviderId), nextDefaultApiBase, nextProviderId)
+                    : currentProviderName;
                   profileForm.setFieldsValue({
-                    providerName: normalizeServiceProviderName(currentProviderName, event.target.value, normalizedWatchedProviderId),
+                    providerName: nextProviderName,
+                    model: "",
+                    capabilities: ["chat"],
+                    apiBase: !currentApiBase || currentApiBase === previousDefaultApiBase ? nextDefaultApiBase : currentApiBase,
                   });
-                }
-              }}
-            />
-          </Form.Item>
-          <Form.Item name="apiKey" label={editingProfile?.hasApiKey ? ui.apiKeyKeep : ui.apiKey}>
-            <ApiKeyField
-              hasApiKey={Boolean(editingProfile?.hasApiKey)}
-              inputStyle={inputStyle}
-              mutedColor={colors.textMuted}
-              placeholder="sk-..."
-              replaceText={ui.replaceApiKey}
-            />
-          </Form.Item>
-          <Form.Item
-            name="model"
-            label={(
-              <Space style={{ width: "100%", justifyContent: "space-between" }}>
-                <span>{ui.model}</span>
-                <Button type="link" icon={<ReloadOutlined />} loading={discovering} onClick={() => void discoverProfileModels()}>
-                  {ui.fetchModels}
-                </Button>
-              </Space>
-            )}
-            rules={[{ required: true, message: ui.modelRequired }]}
-          >
-            <AutoComplete
-              options={modelOptions}
-              placeholder={discovering ? ui.fetchingModels : ui.selectModel}
-              filterOption={(inputValue, option) =>
-                String(option?.value ?? "").toLowerCase().includes(inputValue.toLowerCase())
-                || String(option?.label ?? "").toLowerCase().includes(inputValue.toLowerCase())
-              }
-              onChange={(value) => {
-                const nextModel = String(value ?? "");
-                const discovered = discoveredModels.find((item) => item.id === nextModel);
-                profileForm.setFieldsValue({
-                  model: nextModel,
-                  name: profileForm.getFieldValue("name") || (discovered ? undefined : nextModel.trim()),
-                });
-              }}
-              onSelect={(value) => {
-                applyDiscoveredModel(String(value));
-              }}
-            />
-          </Form.Item>
-          <Form.Item name="capabilities" label={ui.capabilities} rules={[{ required: true, message: ui.capabilitiesRequired }]}>
-            <Checkbox.Group options={capabilityOptions} style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }} />
-          </Form.Item>
-          <Form.Item name="isPrimary" label={ui.primaryModel} valuePropName="checked">
-            <Switch />
-          </Form.Item>
-          <Form.Item name="temperature" label={ui.temperature}>
-            <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />
-          </Form.Item>
-          <div
-            style={{
-              marginBottom: 16,
-              padding: "14px 16px",
-              borderRadius: 14,
-              border: `1px solid ${colors.borderStrong}`,
-              background: colors.bgTertiary,
-            }}
-          >
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 12 }}>
-              <div>
-                <div style={{ color: colors.textPrimary, fontWeight: 600 }}>{ui.thinkingHelpTitle}</div>
-                <div style={{ color: colors.textMuted, fontSize: 12, marginTop: 4 }}>
-                  {ui.thinkingHelpText}
-                </div>
-              </div>
-              <Form.Item name="thinkingEnabled" valuePropName="checked" noStyle>
-                <Switch />
-              </Form.Item>
-            </div>
-            <Form.Item noStyle shouldUpdate={(prev, next) => prev.thinkingEnabled !== next.thinkingEnabled}>
-              {({ getFieldValue }) => (
-                <Form.Item name="thinkingEffort" label={ui.thinkingEffort} style={{ marginBottom: 0 }}>
-                  <Select
-                    disabled={getFieldValue("thinkingEnabled") === false}
-                    options={thinkingEffortOptions}
-                  />
-                </Form.Item>
+                  setDiscoveredModels([]);
+                }}
+              />
+            </Form.Item>
+            <Form.Item
+              name="providerName"
+              label={ui.serviceProvider}
+              extra={ui.serviceProviderHint}
+              style={profileModalItemStyle}
+            >
+              <Select
+                showSearch
+                options={serviceProviderOptions}
+                placeholder={ui.serviceProviderPlaceholder}
+                onChange={(nextProviderName) => {
+                  const defaultApiBase = getServiceProviderDefaultApiBase(nextProviderName, normalizedWatchedProviderId);
+                  if (!defaultApiBase) return;
+                  profileForm.setFieldsValue({
+                    providerName: normalizeServiceProviderName(nextProviderName, defaultApiBase, normalizedWatchedProviderId),
+                    apiBase: defaultApiBase,
+                    model: "",
+                  });
+                  setDiscoveredModels([]);
+                }}
+              />
+            </Form.Item>
+            <Form.Item name="apiBase" label={ui.apiBase} style={profileModalItemStyle}>
+              <Input
+                placeholder={getServiceProviderDefaultApiBase(watchedProviderName, normalizedWatchedProviderId) || (watchedProviderId ? getProviderDefaultApiBase(watchedProviderId) : "https://api.example.com/v1")}
+                onBlur={(event) => {
+                  const currentProviderName = String(profileForm.getFieldValue("providerName") ?? "").trim();
+                  if (!currentProviderName || currentProviderName === "Custom") {
+                    profileForm.setFieldsValue({
+                      providerName: normalizeServiceProviderName(currentProviderName, event.target.value, normalizedWatchedProviderId),
+                    });
+                  }
+                }}
+              />
+            </Form.Item>
+            <Form.Item name="apiKey" label={editingProfile?.hasApiKey ? ui.apiKeyKeep : ui.apiKey} style={profileModalItemStyle}>
+              <ApiKeyField
+                hasApiKey={Boolean(editingProfile?.hasApiKey)}
+                inputStyle={inputStyle}
+                mutedColor={colors.textMuted}
+                placeholder="sk-..."
+                replaceText={ui.replaceApiKey}
+              />
+            </Form.Item>
+            <Form.Item
+              name="model"
+              label={(
+                <Space style={{ width: "100%", justifyContent: "space-between" }}>
+                  <span>{ui.model}</span>
+                  <Button type="link" icon={<ReloadOutlined />} loading={discovering} onClick={() => void discoverProfileModels()}>
+                    {ui.fetchModels}
+                  </Button>
+                </Space>
               )}
+              rules={[{ required: true, message: ui.modelRequired }]}
+              style={profileModalItemStyle}
+            >
+              <AutoComplete
+                options={modelOptions}
+                placeholder={discovering ? ui.fetchingModels : ui.selectModel}
+                filterOption={(inputValue, option) =>
+                  String(option?.value ?? "").toLowerCase().includes(inputValue.toLowerCase())
+                  || String(option?.label ?? "").toLowerCase().includes(inputValue.toLowerCase())
+                }
+                onChange={(value) => {
+                  const nextModel = String(value ?? "");
+                  const discovered = discoveredModels.find((item) => item.id === nextModel);
+                  profileForm.setFieldsValue({
+                    model: nextModel,
+                    name: profileForm.getFieldValue("name") || (discovered ? undefined : nextModel.trim()),
+                  });
+                }}
+                onSelect={(value) => {
+                  applyDiscoveredModel(String(value));
+                }}
+              />
             </Form.Item>
           </div>
-          <Form.Item name="description" label={ui.description}>
-            <Input.TextArea rows={3} />
-          </Form.Item>
-          <Form.Item name="enabled" label={ui.enabledField} valuePropName="checked">
-            <Switch />
+          <div style={profileModalGridStyle}>
+            <Form.Item name="capabilities" label={ui.capabilities} rules={[{ required: true, message: ui.capabilitiesRequired }]} style={profileModalItemStyle}>
+              <Checkbox.Group options={capabilityOptions} style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }} />
+            </Form.Item>
+            <div style={profileModalStackStyle}>
+              <Form.Item name="isPrimary" label={ui.primaryModel} valuePropName="checked" style={profileModalItemStyle}>
+                <Switch />
+              </Form.Item>
+              <Form.Item name="enabled" label={ui.enabledField} valuePropName="checked" style={profileModalItemStyle}>
+                <Switch />
+              </Form.Item>
+              <Form.Item name="temperature" label={ui.temperature} style={{ ...profileModalItemStyle, ...profileModalFullRowStyle }}>
+                <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />
+              </Form.Item>
+              <div
+                style={{
+                  ...profileModalFullRowStyle,
+                  marginBottom: 14,
+                  padding: "12px 14px",
+                  borderRadius: 8,
+                  border: `1px solid ${colors.borderStrong}`,
+                  background: colors.bgTertiary,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 10 }}>
+                  <div>
+                    <div style={{ color: colors.textPrimary, fontWeight: 600 }}>{ui.thinkingHelpTitle}</div>
+                    <div style={{ color: colors.textMuted, fontSize: 12, marginTop: 4 }}>
+                      {ui.thinkingHelpText}
+                    </div>
+                  </div>
+                  <Form.Item name="thinkingEnabled" valuePropName="checked" noStyle>
+                    <Switch />
+                  </Form.Item>
+                </div>
+                <Form.Item noStyle shouldUpdate={(prev, next) => prev.thinkingEnabled !== next.thinkingEnabled}>
+                  {({ getFieldValue }) => (
+                    <Form.Item name="thinkingEffort" label={ui.thinkingEffort} style={{ marginBottom: 0 }}>
+                      <Select
+                        disabled={getFieldValue("thinkingEnabled") === false}
+                        options={thinkingEffortOptions}
+                      />
+                    </Form.Item>
+                  )}
+                </Form.Item>
+              </div>
+            </div>
+          </div>
+          <Form.Item name="description" label={ui.description} style={profileModalItemStyle}>
+            <Input.TextArea rows={2} />
           </Form.Item>
         </Form>
       </Modal>

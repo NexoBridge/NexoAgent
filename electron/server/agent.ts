@@ -10,14 +10,17 @@ import {
   resolveProviderSdkApiKey,
 } from "../../src/shared/providers";
 import type { AgentSettings, ChatMessage, ConversationSurface, MessageBlock, ToolCallTrace } from "../../src/shared/types";
+import { AI_REQUEST_TIMEOUT_MAX_MS, normalizeAiRequestTimeoutMs } from "../../src/shared/settings";
 import { extractAndStore, recallMemory } from "../memory";
 import { loadAttachmentContext } from "./attachments";
+import { AI_REQUEST_MAX_RETRIES, collectStreamWithAiRequestRetries } from "./ai-retry";
 import { circuitBreakerInfoFromDecision, createAgentLoopCircuitBreaker } from "./agent-loop-circuit-breaker";
 import { retrieveKnowledgeContext } from "./knowledge";
 import { resolveMemoryEmbeddingSettings } from "./memory-embedding";
 import { resolveAndPersistModelContextBudget, getEnabledModelCapabilitySummary } from "./model-profiles";
 import { resolvePrimaryModelConfig, resolveThinkingRequestConfig } from "./model-runtime";
-import { isRunInterrupted } from "./run-control";
+import { getRunAbortSignal, isRunInterrupted } from "./run-control";
+import { serverLog } from "./logger";
 import { pushEvent } from "./sse";
 import { getWebSettings } from "./settings";
 import { getEnabledSkillInstructions } from "./skills";
@@ -27,7 +30,7 @@ import { normalizeToolOutputForModel, type BoundedToolOutput } from "./tool-outp
 import { getAllEnabledToolDefs, toLcTool } from "./tools/registry";
 import { extractArtifactsFromToolOutput } from "./tools/multimodal";
 import type { ChatAttachment, Session, StreamEvent, ToolDef, ToolExecutionContext } from "./types";
-import { decodeHtml, safeParseToolArgs, toErrorMessage } from "./utils";
+import { decodeHtml, safeParseToolArgs, toErrorLog, toErrorMessage } from "./utils";
 import { getWorkspaceRoot } from "./workspace";
 import { createSnapshot } from "./snapshot";
 import { attachmentToDataUrl } from "./media";
@@ -37,6 +40,7 @@ const LOOP_GUARD_FALLBACK_MESSAGE = "\n\nThis run entered a repeated loop, so I 
 const EMPTY_RESPONSE_FALLBACK_MESSAGE = "I did not produce a valid reply. Please try again, or review the model configuration and retry.";
 const USER_INTERRUPTED_FALLBACK_MESSAGE = "Stopped the current run.";
 const TOKEN_EVENT_CHUNK_SIZE = 120;
+const SDK_NO_TIMEOUT_MS = AI_REQUEST_TIMEOUT_MAX_MS;
 const CONTEXT_COMPACTION_NOTICE = [
   "\u5df2\u63a5\u8fd1\u4e0a\u4e0b\u6587\u4e0a\u9650\uff0c\u6211\u5df2\u5c06\u8f83\u65e9\u7684\u5f53\u524d\u4f1a\u8bdd\u5185\u5bb9\u538b\u7f29\u6210\u6458\u8981\uff1b\u63a5\u4e0b\u6765\u4f1a\u7ee7\u7eed\u57fa\u4e8e\u538b\u7f29\u6458\u8981\u3001\u5f53\u524d\u4f1a\u8bdd\u5c3e\u90e8\u548c\u957f\u671f\u8bb0\u5fc6\u5de5\u4f5c\u3002",
   "",
@@ -76,6 +80,21 @@ function buildOpenAIThinkingCallOptions(settings: AgentSettings, model: string):
     : {};
 }
 
+function formatApiBaseForLog(apiBase: string) {
+  try {
+    const url = new URL(apiBase);
+    return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return apiBase.replace(/\/+$/, "");
+  }
+}
+
+function formatToolNamesForLog(toolCalls: Array<Pick<ToolCallTrace, "name" | "status">>) {
+  return toolCalls.length
+    ? toolCalls.map((tool) => `${tool.name}:${tool.status}`).join(",")
+    : "none";
+}
+
 function createLangChainChatModel(
   config: Awaited<ReturnType<typeof resolvePrimaryModelConfig>>,
   apiKey: string,
@@ -83,6 +102,7 @@ function createLangChainChatModel(
   overrides: { temperature?: number; maxTokens?: number; streaming?: boolean } = {},
 ) {
   const temperature = overrides.temperature ?? config.temperature ?? settings.temperature ?? 0.4;
+  const timeout = normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs) || SDK_NO_TIMEOUT_MS;
   if (config.providerId === "anthropic-compatible") {
     return new ChatAnthropic({
       apiKey,
@@ -91,6 +111,8 @@ function createLangChainChatModel(
       maxTokens: overrides.maxTokens,
       streaming: overrides.streaming ?? true,
       streamUsage: true,
+      maxRetries: AI_REQUEST_MAX_RETRIES,
+      clientOptions: { timeout },
       anthropicApiUrl: config.apiBase.replace(/\/v1\/?$/i, ""),
     });
   }
@@ -104,8 +126,10 @@ function createLangChainChatModel(
     model: config.model,
     temperature,
     maxTokens: overrides.maxTokens,
+    timeout,
     configuration: { baseURL: config.apiBase },
     streaming: overrides.streaming ?? true,
+    maxRetries: AI_REQUEST_MAX_RETRIES,
   });
 }
 
@@ -175,19 +199,17 @@ function buildBrowserSurfacePrompt(surface: ConversationSurface) {
 function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): ToolDef[] {
   return tools.map((tool) => {
     if (tool.name === "shell_command") {
-      const timeoutSec = Math.round((settings.shellCommandTimeoutMs ?? 300_000) / 1000);
       return {
         ...tool,
         description: [
           tool.description,
           `Default cwd when omitted: ${getWorkspaceRoot(settings)}.`,
-          `Configured default timeout: ${timeoutSec}s (${settings.shellCommandTimeoutMs ?? 300_000}ms).`,
-          "Omit timeoutMs to use that default.",
+          "The command is not stopped by a fixed timeout; it runs until the process exits, fails to start, or the user interrupts the run.",
           "Never run broad recursive scans from drive or system roots (for example Get-ChildItem C:\\\\ -Recurse, find /, or du -sh /) unless the user explicitly asks and you can narrow the path and depth.",
           "Prefer targeted directory listings in the relevant project path with a small depth limit instead of full-disk enumeration.",
           "Git is allowed for inspection and normal workflows, but do not run commands that discard uncommitted work, such as git checkout --, git restore, git reset --hard, or git clean, unless the user explicitly asks to restore, reset, discard, or clean those changes.",
           "When repairing generated file corruption, preserve unrelated user changes and use targeted edits instead of restoring whole files.",
-          "Never run vite/webpack/npm run dev via shell_command. Use build or ask the user to start the dev server.",
+          "Avoid starting long-lived dev servers such as vite, webpack, or npm run dev with shell_command unless the user explicitly wants that process to occupy the current run.",
         ].join(" "),
       };
     }
@@ -610,6 +632,7 @@ export async function streamFromLLM(
   );
   const effectiveApiKey = primaryConfig.apiKey || fallbackApiKey;
   const apiBase = primaryConfig.apiBase;
+  const requestLogBase = `requestId=${requestId} sessionId=${session.id} turnId=${turnId || ""}`;
   const allowsEmptyPrimaryApiKey = providerConnectionAllowsEmptyApiKey({
     providerId: primaryConfig.providerId,
     providerName: settings.providerName,
@@ -617,6 +640,7 @@ export async function streamFromLLM(
   });
 
   if (!primaryConfig.model.trim()) {
+    serverLog(`ERROR AI run precondition failed ${requestLogBase} reason=missing_primary_model`);
     return buildDoneEvent(requestId, {
       type: "done",
       content: MISSING_PRIMARY_MODEL_MESSAGE,
@@ -626,6 +650,7 @@ export async function streamFromLLM(
   }
 
   if (!effectiveApiKey && !allowsEmptyPrimaryApiKey) {
+    serverLog(`ERROR AI run precondition failed ${requestLogBase} reason=missing_api_key profile=${primaryConfig.name}`);
     return buildDoneEvent(requestId, {
       type: "done",
       content: primaryConfig.name === "default" ? MISSING_PRIMARY_MODEL_MESSAGE : MISSING_API_KEY_MESSAGE,
@@ -658,6 +683,27 @@ export async function streamFromLLM(
     contextWindowResolvedAt: primaryConfig.contextWindowResolvedAt,
   });
   const budgetConfig = computePromptBudget(settings, resolvedBudget, Math.max(512, enabledToolDefs.length * 180));
+  const normalizedAiTimeout = normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs);
+  serverLog(
+    [
+      `INFO AI run start ${requestLogBase}`,
+      `surface=${surface}`,
+      `provider=${primaryConfig.providerId}`,
+      `profile=${primaryConfig.name}`,
+      `model=${primaryConfig.model}`,
+      `apiBase=${formatApiBaseForLog(apiBase)}`,
+      `aiTimeoutMs=${normalizedAiTimeout}`,
+      `sdkTimeoutMs=${normalizedAiTimeout || SDK_NO_TIMEOUT_MS}`,
+      `maxRetries=${AI_REQUEST_MAX_RETRIES}`,
+      `messages=${messages.length}`,
+      `attachments=${attachments.length}`,
+      `tools=${enabledToolDefs.length}`,
+      `memory=${settings.enableMemory ? "on" : "off"}`,
+      `knowledge=${settings.enableKnowledge ? "on" : "off"}`,
+      `contextWindow=${budgetConfig.contextWindowTokens}`,
+      `maxInput=${budgetConfig.maxInputTokens}`,
+    ].join(" "),
+  );
 
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
   const currentSessionContext = formatCurrentSessionContextForRecall(session);
@@ -726,8 +772,8 @@ export async function streamFromLLM(
     "Before setting shell_command.cwd for a known external project, prefer recalled project paths from memory; if the path is missing or stale, verify nearby candidate directories with a narrow listing.",
     "Git may be used for status, diff, log, branch, add, commit, and other non-destructive workflows. Do not run commands that discard uncommitted changes, including git checkout --, git restore, git reset --hard, or git clean, unless the user explicitly asks to restore, reset, discard, or clean those changes.",
     "Before changing files in a dirty worktree, inspect relevant diffs and preserve user edits. To fix generated corruption, apply the smallest targeted patch instead of restoring whole files.",
-    "For shell_command: omit timeoutMs to use the configured default script timeout (Settings). Do not pass timeoutMs: 6000 or other short values for npm install, build, or dev commands.",
-    "Never use shell_command to start vite, webpack, or npm run dev because those processes do not exit and will block until timeout.",
+    "For shell_command: do not rely on timeoutMs. Commands are not stopped by fixed time and should finish by process exit, explicit error, or user interruption.",
+    "Avoid starting long-lived dev servers such as vite, webpack, or npm run dev with shell_command unless the user explicitly wants that process to occupy the current run.",
     `Primary model: ${primaryConfig.name} / ${primaryConfig.model}.`,
     `Resolved context budget: window=${budgetConfig.contextWindowTokens}, input=${budgetConfig.maxInputTokens}, compact=${budgetConfig.autoCompactTokenLimit}, source=${resolvedBudget.contextWindowSource ?? "default"}.`,
     "You are the orchestrator. Route specialist work by capability instead of asking the user for a model name.",
@@ -755,7 +801,7 @@ export async function streamFromLLM(
     const response = await summaryLlm.invoke([
       new SystemMessage(summaryInstruction),
       new HumanMessage(transcript),
-    ]);
+    ], { signal: getRunAbortSignal(requestId) } as any);
     return messageContentToText(response.content).trim() || JSON.stringify(response.content);
   };
 
@@ -844,6 +890,7 @@ export async function streamFromLLM(
     settings,
     apiKey: effectiveApiKey,
     apiBase,
+    requestId,
     capabilitySummary,
   };
 
@@ -854,9 +901,11 @@ export async function streamFromLLM(
   let interruptedByUser = false;
   let breakerInfo: ReturnType<typeof circuitBreakerInfoFromDecision> | undefined;
   const circuitBreaker = settings.circuitBreakerEnabled ? createAgentLoopCircuitBreaker(settings) : null;
+  let currentStep = 0;
 
   try {
     for (let step = 0; ; step++) {
+      currentStep = step + 1;
       if (isRunInterrupted(requestId)) {
         interruptedByUser = true;
         break;
@@ -866,16 +915,26 @@ export async function streamFromLLM(
       const toolCallBuffer: BufferedToolCall[] = [];
       const dsmlBuffer = createDsmlStreamBuffer();
       let terminalSummary = "";
+      let streamChunks = 0;
+      let streamTextChars = 0;
+      let streamToolChunks = 0;
 
-      const stream = await llmRunner.stream(lcMessages);
-      for await (const chunk of stream) {
+      serverLog(`INFO AI stream start ${requestLogBase} step=${currentStep} lcMessages=${lcMessages.length} accumulatedChars=${fullContent.length}`);
+      const chunks = await collectStreamWithAiRequestRetries<AIMessageChunk>(() =>
+        llmRunner.stream(lcMessages, { signal: getRunAbortSignal(requestId) } as any)
+      , {
+        label: `AI stream ${requestLogBase} step=${currentStep} model=${model}`,
+        shouldRetry: () => !isRunInterrupted(requestId),
+      });
+      for (const chunk of chunks) {
+        streamChunks += 1;
         if (isRunInterrupted(requestId)) {
           interruptedByUser = true;
-          await (stream as AsyncIterator<unknown> & { return?: () => Promise<IteratorResult<unknown>> }).return?.();
           break;
         }
         const c = chunk as AIMessageChunk;
         const token = messageContentToText(c.content);
+        streamTextChars += token.length;
         if (token) {
           const dsmlChunk = dsmlBuffer.push(token);
           if (dsmlChunk.visibleText) {
@@ -886,6 +945,7 @@ export async function streamFromLLM(
           toolCallBuffer.push(...dsmlChunk.calls);
         }
         if (c.tool_call_chunks?.length) {
+          streamToolChunks += c.tool_call_chunks.length;
           for (const tc of c.tool_call_chunks) {
             const key = typeof tc.index === "number"
               ? `index:${tc.index}`
@@ -913,6 +973,9 @@ export async function streamFromLLM(
           completionTokens = c.usage_metadata.output_tokens;
         }
       }
+      serverLog(
+        `INFO AI stream complete ${requestLogBase} step=${currentStep} chunks=${streamChunks} textChars=${streamTextChars} toolChunks=${streamToolChunks} interrupted=${interruptedByUser}`,
+      );
 
       if (interruptedByUser) break;
 
@@ -928,6 +991,11 @@ export async function streamFromLLM(
         const parsed = safeParseToolArgs(toolCall.args);
         return { toolCall, args: parsed.args, parseError: parsed.error };
       });
+      serverLog(
+        `INFO AI model turn parsed ${requestLogBase} step=${currentStep} visibleChars=${turnContent.length} toolCalls=${
+          parsedToolCalls.length ? parsedToolCalls.map(({ toolCall }) => toolCall.name || "(unnamed)").join(",") : "none"
+        } parseErrors=${parsedToolCalls.filter(({ parseError }) => Boolean(parseError)).length}`,
+      );
 
       circuitBreaker?.recordModelTurn({
         step: step + 1,
@@ -971,6 +1039,7 @@ export async function streamFromLLM(
           : parsedArgs;
         recordPersistentToolCall(tc.id, tc.name, displayedArgs);
         pushEvent(requestId, { type: "tool_call", id: tc.id, name: tc.name, input: displayedArgs });
+        serverLog(`INFO Tool start ${requestLogBase} step=${currentStep} tool=${tc.name || "(unnamed)"} id=${tc.id}`);
 
         const toolFn = enabledToolMap.get(tc.name);
         const t0 = Date.now();
@@ -994,6 +1063,9 @@ export async function streamFromLLM(
         } catch (error) {
           output = `Error: ${toErrorMessage(error)}`;
         }
+        if (isRunInterrupted(requestId)) {
+          interruptedByUser = true;
+        }
         if (tc.name === "browser_action" && parsedArgs.action === "resolve") {
           browserResolveAttempted = true;
         }
@@ -1015,6 +1087,18 @@ export async function streamFromLLM(
         const isError = rawOutputText.trim().startsWith("Error:");
 
         recordPersistentToolResult(tc.id, boundedOutput, elapsed, isError);
+        serverLog(
+          [
+            `${isError ? "WARN" : "INFO"} Tool complete ${requestLogBase}`,
+            `step=${currentStep}`,
+            `tool=${tc.name || "(unnamed)"}`,
+            `id=${tc.id}`,
+            `status=${isError ? "error" : "done"}`,
+            `elapsed=${elapsed.toFixed(3)}s`,
+            `outputChars=${rawOutputText.length}`,
+            `truncated=${boundedOutput.outputStats?.truncated ? "yes" : "no"}`,
+          ].join(" "),
+        );
         pushEvent(requestId, {
           type: "tool_result",
           id: tc.id,
@@ -1059,24 +1143,34 @@ export async function streamFromLLM(
     }
 
     if (!interruptedByUser && breakerInfo) {
-      const finalStream = await llmNoTools.stream([
+      const finalMessages = [
         ...lcMessages,
         new SystemMessage(
           breakerInfo
             ? `The run was stopped by the circuit breaker (${breakerInfo.reason}: ${breakerInfo.detail}). Do not call tools. Based on the available tool results, give the user a concise final response in their language. If work is incomplete, say exactly what remains.`
             : "Do not call tools. Based on the available tool results, give the user a concise final response in their language. If work is incomplete, say exactly what remains."
         ),
-      ]);
+      ];
+      serverLog(`INFO AI final stream start ${requestLogBase} step=${currentStep} reason=circuit_breaker`);
+      const finalChunks = await collectStreamWithAiRequestRetries<AIMessageChunk>(() =>
+        llmNoTools.stream(finalMessages, { signal: getRunAbortSignal(requestId) } as any)
+      , {
+        label: `AI final stream ${requestLogBase} model=${model}`,
+        shouldRetry: () => !isRunInterrupted(requestId),
+      });
       let finalContent = "";
+      let finalStreamChunks = 0;
+      let finalStreamTextChars = 0;
       const finalDsmlBuffer = createDsmlStreamBuffer();
-      for await (const chunk of finalStream) {
+      for (const chunk of finalChunks) {
+        finalStreamChunks += 1;
         if (isRunInterrupted(requestId)) {
           interruptedByUser = true;
-          await (finalStream as AsyncIterator<unknown> & { return?: () => Promise<IteratorResult<unknown>> }).return?.();
           break;
         }
         const c = chunk as AIMessageChunk;
         const token = messageContentToText(c.content);
+        finalStreamTextChars += token.length;
         if (token) {
           const dsmlChunk = finalDsmlBuffer.push(token);
           if (dsmlChunk.visibleText) {
@@ -1090,6 +1184,7 @@ export async function streamFromLLM(
           completionTokens = c.usage_metadata.output_tokens;
         }
       }
+      serverLog(`INFO AI final stream complete ${requestLogBase} chunks=${finalStreamChunks} textChars=${finalStreamTextChars} interrupted=${interruptedByUser}`);
       if (!interruptedByUser) {
         const finalDsmlChunk = finalDsmlBuffer.flush();
         if (finalDsmlChunk.visibleText) {
@@ -1105,6 +1200,17 @@ export async function streamFromLLM(
       }
     }
   } catch (error) {
+    serverLog(
+      [
+        `ERROR AI run failed ${requestLogBase}`,
+        `step=${currentStep}`,
+        `interrupted=${interruptedByUser || isRunInterrupted(requestId)}`,
+        `contentChars=${fullContent.length}`,
+        `toolCalls=${persistentToolCalls.length}`,
+        `tools=${formatToolNamesForLog(persistentToolCalls)}`,
+        `error=${toErrorLog(error)}`,
+      ].join(" "),
+    );
     return buildDoneEvent(requestId, {
       type: "done",
       hasSnapshot: turnSnapshotCreated,
@@ -1145,6 +1251,16 @@ export async function streamFromLLM(
       source: resolvedBudget.contextWindowSource,
     },
   };
+  serverLog(
+    [
+      `INFO AI run done ${requestLogBase}`,
+      `status=${doneEvent.status}`,
+      `stopReason=${doneEvent.stopReason ?? ""}`,
+      `contentChars=${doneEvent.content.length}`,
+      `toolCalls=${persistentToolCalls.length}`,
+      `tools=${formatToolNamesForLog(persistentToolCalls)}`,
+    ].join(" "),
+  );
   return buildDoneEvent(requestId, doneEvent);
 }
 
@@ -1153,7 +1269,8 @@ export async function extractMemoryAfterChat(
   assistantContent: string,
   sessionId: string,
   settings: AgentSettings,
-  storedApiKey: string
+  storedApiKey: string,
+  requestId?: string
 ) {
   const webSettings = getWebSettings();
   const fallbackApiKey = settings.apiKey || storedApiKey || webSettings.apiKey || "";
@@ -1196,7 +1313,7 @@ export async function extractMemoryAfterChat(
       const res = await llm.invoke([
         new SystemMessage(durableMemoryInstruction),
         new HumanMessage(prompt),
-      ]);
+      ], { signal: getRunAbortSignal(requestId) } as any);
       return messageContentToText(res.content);
     },
     {

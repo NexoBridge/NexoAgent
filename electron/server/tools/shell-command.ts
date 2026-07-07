@@ -2,13 +2,11 @@ import fs from "node:fs/promises";
 import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { getOptionalNumberArg, getOptionalStringArg, getStringArg } from "../utils";
+import { getOptionalStringArg, getStringArg } from "../utils";
 import type { ToolExecutionContext } from "../types";
-import { DEFAULT_AGENT_SETTINGS } from "../settings";
+import { isRunInterrupted } from "../run-control";
 import { getWorkspaceRoot, resolveWorkspacePath } from "../workspace";
 
-const MIN_TIMEOUT_MS = 1_000;
-const MAX_TIMEOUT_MS = 600_000;
 const MAX_OUTPUT_CHARS = 12_000;
 const WINDOWS_UTF8_PREAMBLE = [
   "$__nexoUtf8 = [System.Text.UTF8Encoding]::new($false)",
@@ -93,17 +91,23 @@ async function buildSpawnOptions(command: string) {
   };
 }
 
-function resolveShellTimeoutMs(args: Record<string, unknown>, ctx: ToolExecutionContext) {
-  const configuredDefault =
-    ctx.settings.shellCommandTimeoutMs ?? DEFAULT_AGENT_SETTINGS.shellCommandTimeoutMs;
-  const requested = getOptionalNumberArg(args, "timeoutMs", configuredDefault);
-  return Math.max(MIN_TIMEOUT_MS, Math.min(MAX_TIMEOUT_MS, requested));
+function stopChildProcess(child: ReturnType<typeof spawn>) {
+  if (process.platform === "win32" && child.pid) {
+    const killer = spawn("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    killer.once("error", () => {
+      child.kill();
+    });
+    return;
+  }
+  child.kill();
 }
 
 export async function runShellCommand(args: Record<string, unknown>, ctx: ToolExecutionContext) {
   const command = getStringArg(args, "command");
   const requestedCwd = getOptionalStringArg(args, "cwd");
-  const timeoutMs = resolveShellTimeoutMs(args, ctx);
   let cwd = getWorkspaceRoot(ctx.settings);
   if (requestedCwd) {
     const { target } = resolveWorkspacePath(requestedCwd, ctx.settings);
@@ -127,12 +131,15 @@ export async function runShellCommand(args: Record<string, unknown>, ctx: ToolEx
 
     let stdout = "";
     let stderr = "";
-    let timedOut = false;
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill();
-    }, timeoutMs);
+    let interrupted = false;
+    const interruptPoll = ctx.requestId
+      ? setInterval(() => {
+          if (!ctx.requestId || !isRunInterrupted(ctx.requestId) || interrupted) return;
+          interrupted = true;
+          stopChildProcess(child);
+        }, 250)
+      : undefined;
+    interruptPoll?.unref?.();
 
     child.stdout.on("data", (chunk) => {
       stdout += decodeOutput(chunk);
@@ -143,7 +150,7 @@ export async function runShellCommand(args: Record<string, unknown>, ctx: ToolEx
     });
 
     child.on("error", (error) => {
-      clearTimeout(timer);
+      if (interruptPoll) clearInterval(interruptPoll);
       if (spawnOptions.cleanupFile) {
         void fs.unlink(spawnOptions.cleanupFile).catch(() => undefined);
       }
@@ -151,7 +158,7 @@ export async function runShellCommand(args: Record<string, unknown>, ctx: ToolEx
     });
 
     child.on("close", (code) => {
-      clearTimeout(timer);
+      if (interruptPoll) clearInterval(interruptPoll);
       if (spawnOptions.cleanupFile) {
         void fs.unlink(spawnOptions.cleanupFile).catch(() => undefined);
       }
@@ -159,14 +166,11 @@ export async function runShellCommand(args: Record<string, unknown>, ctx: ToolEx
         .filter(Boolean)
         .join("\n\n");
 
-      if (timedOut) {
+      if (interrupted) {
         resolve([
-          `exit_code: timeout`,
+          "exit_code: interrupted",
           `cwd: ${cwd}`,
-          `timed_out_after_ms: ${timeoutMs}`,
-          output || "(no output before timeout)",
-          "",
-          "The command was stopped after the configured timeout. Do not retry long-running dev servers (vite, npm run dev) with shell_command — they never exit. Use build/preview commands or ask the user to start the dev server manually.",
+          output || "(no output before interruption)",
         ].join("\n\n"));
         return;
       }

@@ -94,9 +94,7 @@ function fingerprintToolCalls(calls: CircuitBreakerToolCall[]) {
 function isFailureOutput(output: string) {
   const normalized = normalizeText(output);
   return normalized.startsWith("Error:")
-    || normalized.includes("[BLOCKED]")
-    || normalized.includes("exit_code: timeout")
-    || normalized.includes("timed_out_after_ms:");
+    || normalized.includes("[BLOCKED]");
 }
 
 function usefulOutputSignature(output: string) {

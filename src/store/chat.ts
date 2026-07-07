@@ -12,7 +12,7 @@ import type {
   ToolRawOutputRef,
 } from "../shared/types";
 import { apiDelete, apiGet, apiPatch, apiPost, getRuntimeApiBase, setRuntimeApiBase, subscribeStream } from "../services/api";
-import { sanitizeApiKeyForSave } from "../shared/settings";
+import { normalizeAiRequestTimeoutMs, sanitizeApiKeyForSave } from "../shared/settings";
 import type { DesktopApi } from "../shared/desktop";
 import {
   getDefaultServiceProviderName,
@@ -116,7 +116,8 @@ const defaultSettings: AgentSettings = {
   maxContextTurns: 12,
   enableContextCompaction: true,
   contextCompactionThreshold: 24,
-  shellCommandTimeoutMs: 300_000,
+  shellCommandTimeoutMs: 0,
+  aiRequestTimeoutMs: 0,
   planningMode: "balanced",
   thinkingEnabled: true,
   thinkingEffort: "high",
@@ -146,6 +147,7 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerId,
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
+    aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
   };
 }
 

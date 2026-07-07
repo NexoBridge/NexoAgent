@@ -19,8 +19,15 @@ export function registerStreamRoutes(app: Application) {
     const { requestId } = req.params;
     let cursor = 0;
     let closed = false;
+    const keepAlive = setInterval(() => {
+      if (closed) return;
+      res.write(": keep-alive\n\n");
+      (res as unknown as { flush?: () => void }).flush?.();
+    }, 15_000);
+    keepAlive.unref?.();
 
     if (!hasSseQueue(requestId)) {
+      clearInterval(keepAlive);
       res.write(`data: ${JSON.stringify({ type: "error", message: "响应流不存在或已过期。" })}\n\n`);
       res.end();
       return;
@@ -34,6 +41,7 @@ export function registerStreamRoutes(app: Application) {
         res.write(`data: ${JSON.stringify(event)}\n\n`);
         (res as unknown as { flush?: () => void }).flush?.();
         if (event.type === "done" || event.type === "error") {
+          clearInterval(keepAlive);
           deleteSseWaiters(requestId);
           scheduleSseCleanup(requestId);
           res.end();
@@ -45,7 +53,10 @@ export function registerStreamRoutes(app: Application) {
       setSseWaiters(requestId, waiters);
     };
 
-    req.on("close", () => { closed = true; });
+    req.on("close", () => {
+      closed = true;
+      clearInterval(keepAlive);
+    });
     flush();
   });
 }

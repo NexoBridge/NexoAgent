@@ -6,6 +6,9 @@ import {
   providerConnectionAllowsEmptyApiKey,
   resolveProviderSdkApiKey,
 } from "../../src/shared/providers";
+import { normalizeAiRequestTimeoutMs } from "../../src/shared/settings";
+import { withAiRequestRetries } from "./ai-retry";
+import { getRunAbortSignal } from "./run-control";
 import {
   ensureCapabilityModelProfile,
   findStoredModelProfile,
@@ -35,6 +38,8 @@ export interface ModelRuntimeConfig {
   contextWindowSource?: string;
   contextWindowSourceDetail?: string;
   contextWindowResolvedAt?: string;
+  aiRequestTimeoutMs?: number;
+  abortSignal?: AbortSignal;
 }
 
 export interface ThinkingRequestConfig {
@@ -134,6 +139,8 @@ function toRuntimeConfig(
   temperature: number,
   contextBudget: Partial<ModelRuntimeConfig> = {},
   thinkingConfig: Pick<ModelRuntimeConfig, "thinkingEnabled" | "thinkingEffort"> = {},
+  aiRequestTimeoutMs = 0,
+  abortSignal?: AbortSignal,
 ): ModelRuntimeConfig {
   return {
     name,
@@ -151,6 +158,8 @@ function toRuntimeConfig(
     contextWindowSource: contextBudget.contextWindowSource,
     contextWindowSourceDetail: contextBudget.contextWindowSourceDetail,
     contextWindowResolvedAt: contextBudget.contextWindowResolvedAt,
+    aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(aiRequestTimeoutMs),
+    abortSignal,
   };
 }
 
@@ -165,6 +174,37 @@ function buildOpenAIRequestHeaders(
       apiBase: config.apiBase,
     }),
   };
+}
+
+async function fetchAiRequest(input: RequestInfo | URL, init: RequestInit, timeoutMs?: number, abortSignal?: AbortSignal) {
+  const normalizedTimeout = normalizeAiRequestTimeoutMs(timeoutMs);
+  if (!normalizedTimeout && !abortSignal) return fetch(input, init);
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const abort = () => controller.abort();
+  if (abortSignal?.aborted) {
+    abort();
+  } else {
+    abortSignal?.addEventListener("abort", abort, { once: true });
+  }
+  const timer = normalizedTimeout
+    ? setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, normalizedTimeout)
+    : undefined;
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(timedOut ? `AI request timed out after ${normalizedTimeout}ms.` : "AI request interrupted by user.");
+    }
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    abortSignal?.removeEventListener("abort", abort);
+  }
 }
 
 export function modelConfigAllowsEmptyApiKey(
@@ -189,6 +229,7 @@ export async function resolvePrimaryModelConfig(settings: AgentSettings, storedA
       primary.temperature ?? settings.temperature,
       budget,
       { thinkingEnabled: primary.thinkingEnabled, thinkingEffort: primary.thinkingEffort },
+      settings.aiRequestTimeoutMs,
     );
   }
   const apiKey = settings.apiKey || storedApiKey || "";
@@ -200,7 +241,7 @@ export async function resolvePrimaryModelConfig(settings: AgentSettings, storedA
   return toRuntimeConfig("default", settings.providerId, settings.apiBase, apiKey, model, settings.temperature, budget, {
     thinkingEnabled: settings.thinkingEnabled,
     thinkingEffort: settings.thinkingEffort,
-  });
+  }, settings.aiRequestTimeoutMs);
 }
 
 export async function resolveModelConfigFromArgs(
@@ -230,6 +271,8 @@ export async function resolveModelConfigFromArgs(
       profile.temperature ?? ctx.settings.temperature,
       budget,
       { thinkingEnabled: profile.thinkingEnabled, thinkingEffort: profile.thinkingEffort },
+      ctx.settings.aiRequestTimeoutMs,
+      getRunAbortSignal(ctx.requestId),
     );
   }
 
@@ -251,6 +294,8 @@ export async function resolveModelConfigFromArgs(
         profile.temperature ?? ctx.settings.temperature,
         budget,
         { thinkingEnabled: profile.thinkingEnabled, thinkingEffort: profile.thinkingEffort },
+        ctx.settings.aiRequestTimeoutMs,
+        getRunAbortSignal(ctx.requestId),
       );
     }
     if (options.allowDefault === false) {
@@ -263,7 +308,7 @@ export async function resolveModelConfigFromArgs(
     return toRuntimeConfig("default", ctx.settings.providerId, ctx.apiBase, ctx.apiKey, ctx.settings.model, ctx.settings.temperature, budget, {
       thinkingEnabled: ctx.settings.thinkingEnabled,
       thinkingEffort: ctx.settings.thinkingEffort,
-    });
+    }, ctx.settings.aiRequestTimeoutMs, getRunAbortSignal(ctx.requestId));
   }
 
   throw new Error(`Unable to resolve model profile: ${profileQuery}`);
@@ -297,6 +342,7 @@ export async function resolveCapabilityModelConfig(
     profile.temperature ?? settings.temperature ?? 0,
     budget,
     { thinkingEnabled: profile.thinkingEnabled, thinkingEffort: profile.thinkingEffort },
+    settings.aiRequestTimeoutMs,
   );
 }
 
@@ -355,58 +401,60 @@ async function callAnthropicMessages(
       content: toAnthropicContent(message.content),
     }));
 
-  const response = await fetch(`${config.apiBase}/messages`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": config.apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: config.model,
-      max_tokens: options.maxTokens ?? 1024,
-      temperature: options.temperature ?? config.temperature,
-      ...(options.thinking
-        ? {
-            thinking: {
-              type: options.thinking.anthropicThinkingType,
-            },
-          }
-        : {}),
-      ...(options.thinking?.enabled && options.thinking.anthropicEffort
-        ? {
-            output_config: {
-              effort: options.thinking.anthropicEffort,
-            },
-          }
-        : {}),
-      ...(system ? { system } : {}),
-      messages: anthropicMessages,
-    }),
+  return withAiRequestRetries(async () => {
+    const response = await fetchAiRequest(`${config.apiBase}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": config.apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: config.model,
+        max_tokens: options.maxTokens ?? 1024,
+        temperature: options.temperature ?? config.temperature,
+        ...(options.thinking
+          ? {
+              thinking: {
+                type: options.thinking.anthropicThinkingType,
+              },
+            }
+          : {}),
+        ...(options.thinking?.enabled && options.thinking.anthropicEffort
+          ? {
+              output_config: {
+                effort: options.thinking.anthropicEffort,
+              },
+            }
+          : {}),
+        ...(system ? { system } : {}),
+        messages: anthropicMessages,
+      }),
+    }, config.aiRequestTimeoutMs, config.abortSignal);
+
+    const data = await response.json().catch(() => ({})) as AnthropicMessageResponse;
+    if (!response.ok) {
+      throw new Error(data.error?.message ?? `Anthropic model call failed: ${response.status}`);
+    }
+
+    const content = (data.content ?? [])
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("")
+      .trim();
+    if (!content) {
+      throw new Error("Anthropic model call returned empty content.");
+    }
+
+    return {
+      content,
+      usage: {
+        prompt_tokens: data.usage?.input_tokens,
+        completion_tokens: data.usage?.output_tokens,
+        total_tokens: (data.usage?.input_tokens ?? 0) + (data.usage?.output_tokens ?? 0),
+      },
+    };
   });
-
-  const data = await response.json().catch(() => ({})) as AnthropicMessageResponse;
-  if (!response.ok) {
-    throw new Error(data.error?.message ?? `Anthropic model call failed: ${response.status}`);
-  }
-
-  const content = (data.content ?? [])
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("")
-    .trim();
-  if (!content) {
-    throw new Error("Anthropic model call returned empty content.");
-  }
-
-  return {
-    content,
-    usage: {
-      prompt_tokens: data.usage?.input_tokens,
-      completion_tokens: data.usage?.output_tokens,
-      total_tokens: (data.usage?.input_tokens ?? 0) + (data.usage?.output_tokens ?? 0),
-    },
-  };
 }
 
 export async function callChatCompletion(
@@ -418,37 +466,39 @@ export async function callChatCompletion(
     return callAnthropicMessages(config, messages, options);
   }
 
-  const response = await fetch(`${config.apiBase}/chat/completions`, {
-    method: "POST",
-    headers: buildOpenAIRequestHeaders(config),
-    body: JSON.stringify({
-      model: config.model,
-      temperature: options.temperature ?? config.temperature,
-      max_tokens: options.maxTokens ?? 1024,
-      ...(options.thinking?.openAIReasoningEffort
-        ? { reasoning_effort: options.thinking.openAIReasoningEffort }
-        : {}),
-      messages: messages.map((message) => ({
-        role: message.role,
-        content: normalizeChatContent(message.content),
-      })),
-    }),
+  return withAiRequestRetries(async () => {
+    const response = await fetchAiRequest(`${config.apiBase}/chat/completions`, {
+      method: "POST",
+      headers: buildOpenAIRequestHeaders(config),
+      body: JSON.stringify({
+        model: config.model,
+        temperature: options.temperature ?? config.temperature,
+        max_tokens: options.maxTokens ?? 1024,
+        ...(options.thinking?.openAIReasoningEffort
+          ? { reasoning_effort: options.thinking.openAIReasoningEffort }
+          : {}),
+        messages: messages.map((message) => ({
+          role: message.role,
+          content: normalizeChatContent(message.content),
+        })),
+      }),
+    }, config.aiRequestTimeoutMs, config.abortSignal);
+
+    const data = await response.json().catch(() => ({})) as OpenAIChatResponse;
+    if (!response.ok) {
+      throw new Error(data.error?.message ?? `Model call failed: ${response.status}`);
+    }
+
+    const content = data.choices?.[0]?.message?.content?.trim();
+    if (!content) {
+      throw new Error("Model call returned empty content.");
+    }
+
+    return {
+      content,
+      usage: data.usage,
+    };
   });
-
-  const data = await response.json().catch(() => ({})) as OpenAIChatResponse;
-  if (!response.ok) {
-    throw new Error(data.error?.message ?? `Model call failed: ${response.status}`);
-  }
-
-  const content = data.choices?.[0]?.message?.content?.trim();
-  if (!content) {
-    throw new Error("Model call returned empty content.");
-  }
-
-  return {
-    content,
-    usage: data.usage,
-  };
 }
 
 export async function callImageGeneration(
@@ -479,16 +529,18 @@ export async function callImageGeneration(
     body.response_format = "b64_json";
   }
 
-  const response = await fetch(`${config.apiBase}/images/generations`, {
-    method: "POST",
-    headers: buildOpenAIRequestHeaders(config),
-    body: JSON.stringify(body),
+  return withAiRequestRetries(async () => {
+    const response = await fetchAiRequest(`${config.apiBase}/images/generations`, {
+      method: "POST",
+      headers: buildOpenAIRequestHeaders(config),
+      body: JSON.stringify(body),
+    }, config.aiRequestTimeoutMs, config.abortSignal);
+    const data = await response.json().catch(() => ({})) as OpenAIImageResponse;
+    if (!response.ok) {
+      throw new Error(data.error?.message ?? `Image generation failed: ${response.status}`);
+    }
+    return data;
   });
-  const data = await response.json().catch(() => ({})) as OpenAIImageResponse;
-  if (!response.ok) {
-    throw new Error(data.error?.message ?? `Image generation failed: ${response.status}`);
-  }
-  return data;
 }
 
 export async function callImageEdit(
@@ -508,32 +560,34 @@ export async function callImageEdit(
     throw new Error("Anthropic compatible protocol does not provide OpenAI image editing endpoints. Configure an OpenAI-compatible image editing model for image_editing.");
   }
 
-  const form = new FormData();
-  form.append("model", config.model);
-  form.append("prompt", args.prompt);
-  form.append("n", String(Math.max(1, Math.min(10, args.n ?? 1))));
-  for (const image of args.images) {
-    form.append("image", new Blob([toBlobPart(image.buffer)], { type: image.mimeType || "application/octet-stream" }), image.filename);
-  }
-  if (args.size) form.append("size", args.size);
-  if (args.quality) form.append("quality", args.quality);
-  if (args.background) form.append("background", args.background);
-  if (args.inputFidelity) form.append("input_fidelity", args.inputFidelity);
-  if (args.outputFormat) form.append("output_format", args.outputFormat);
-  if (!/^(gpt-image|chatgpt-image)/i.test(config.model)) {
-    form.append("response_format", "b64_json");
-  }
+  return withAiRequestRetries(async () => {
+    const form = new FormData();
+    form.append("model", config.model);
+    form.append("prompt", args.prompt);
+    form.append("n", String(Math.max(1, Math.min(10, args.n ?? 1))));
+    for (const image of args.images) {
+      form.append("image", new Blob([toBlobPart(image.buffer)], { type: image.mimeType || "application/octet-stream" }), image.filename);
+    }
+    if (args.size) form.append("size", args.size);
+    if (args.quality) form.append("quality", args.quality);
+    if (args.background) form.append("background", args.background);
+    if (args.inputFidelity) form.append("input_fidelity", args.inputFidelity);
+    if (args.outputFormat) form.append("output_format", args.outputFormat);
+    if (!/^(gpt-image|chatgpt-image)/i.test(config.model)) {
+      form.append("response_format", "b64_json");
+    }
 
-  const response = await fetch(`${config.apiBase}/images/edits`, {
-    method: "POST",
-    headers: buildOpenAIRequestHeaders(config, ""),
-    body: form,
+    const response = await fetchAiRequest(`${config.apiBase}/images/edits`, {
+      method: "POST",
+      headers: buildOpenAIRequestHeaders(config, ""),
+      body: form,
+    }, config.aiRequestTimeoutMs, config.abortSignal);
+    const data = await response.json().catch(() => ({})) as OpenAIImageResponse;
+    if (!response.ok) {
+      throw new Error(data.error?.message ?? `Image edit failed: ${response.status}`);
+    }
+    return data;
   });
-  const data = await response.json().catch(() => ({})) as OpenAIImageResponse;
-  if (!response.ok) {
-    throw new Error(data.error?.message ?? `Image edit failed: ${response.status}`);
-  }
-  return data;
 }
 
 export async function callSpeechToText(
@@ -550,23 +604,25 @@ export async function callSpeechToText(
     throw new Error("Anthropic compatible protocol does not provide OpenAI speech-to-text endpoints. Configure an OpenAI-compatible audio model for speech_to_text.");
   }
 
-  const form = new FormData();
-  const blob = new Blob([toBlobPart(args.file)], { type: args.mimeType || "application/octet-stream" });
-  form.append("file", blob, args.filename);
-  form.append("model", args.modelOverride || config.model);
-  form.append("response_format", "text");
-  if (args.prompt) form.append("prompt", args.prompt);
+  return withAiRequestRetries(async () => {
+    const form = new FormData();
+    const blob = new Blob([toBlobPart(args.file)], { type: args.mimeType || "application/octet-stream" });
+    form.append("file", blob, args.filename);
+    form.append("model", args.modelOverride || config.model);
+    form.append("response_format", "text");
+    if (args.prompt) form.append("prompt", args.prompt);
 
-  const response = await fetch(`${config.apiBase}/audio/transcriptions`, {
-    method: "POST",
-    headers: buildOpenAIRequestHeaders(config, ""),
-    body: form,
+    const response = await fetchAiRequest(`${config.apiBase}/audio/transcriptions`, {
+      method: "POST",
+      headers: buildOpenAIRequestHeaders(config, ""),
+      body: form,
+    }, config.aiRequestTimeoutMs, config.abortSignal);
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(text || `Speech-to-text failed: ${response.status}`);
+    }
+    return text.trim();
   });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(text || `Speech-to-text failed: ${response.status}`);
-  }
-  return text.trim();
 }
 
 export async function callTextToSpeech(
@@ -582,24 +638,26 @@ export async function callTextToSpeech(
     throw new Error("Anthropic compatible protocol does not provide OpenAI text-to-speech endpoints. Configure an OpenAI-compatible audio model for text_to_speech.");
   }
 
-  const response = await fetch(`${config.apiBase}/audio/speech`, {
-    method: "POST",
-    headers: buildOpenAIRequestHeaders(config),
-    body: JSON.stringify({
-      model: args.modelOverride || config.model,
-      input: args.input,
-      voice: args.voice || "alloy",
-      instructions: args.instructions,
-    }),
+  return withAiRequestRetries(async () => {
+    const response = await fetchAiRequest(`${config.apiBase}/audio/speech`, {
+      method: "POST",
+      headers: buildOpenAIRequestHeaders(config),
+      body: JSON.stringify({
+        model: args.modelOverride || config.model,
+        input: args.input,
+        voice: args.voice || "alloy",
+        instructions: args.instructions,
+      }),
+    }, config.aiRequestTimeoutMs, config.abortSignal);
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!response.ok) {
+      throw new Error(buffer.toString("utf8") || `Text-to-speech failed: ${response.status}`);
+    }
+
+    const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim() || "audio/mpeg";
+    return { buffer, mimeType };
   });
-
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!response.ok) {
-    throw new Error(buffer.toString("utf8") || `Text-to-speech failed: ${response.status}`);
-  }
-
-  const mimeType = response.headers.get("content-type")?.split(";")[0]?.trim() || "audio/mpeg";
-  return { buffer, mimeType };
 }
 
 export function toBlobPart(buffer: Buffer) {

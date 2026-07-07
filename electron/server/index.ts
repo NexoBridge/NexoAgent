@@ -3,7 +3,7 @@ import express from "express";
 import cors from "cors";
 import fs from "node:fs";
 import path from "node:path";
-import { serverLog } from "./logger";
+import { migrateLegacyLogFile, serverLog } from "./logger";
 import { registerRoutes } from "./routes";
 import { startTaskScheduler, type TaskExecutionOrigin, type TaskExecutionResult } from "./tasks";
 
@@ -15,6 +15,7 @@ interface ExpressAppOptions {
 }
 
 export function createExpressApp(getStoredApiKey: () => string, options: ExpressAppOptions = {}): Application {
+  void migrateLegacyLogFile();
   const app = express();
   app.use(cors());
   app.use(express.json());

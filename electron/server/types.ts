@@ -64,6 +64,7 @@ export interface ToolExecutionContext {
   settings: AgentSettings;
   apiKey: string;
   apiBase: string;
+  requestId?: string;
   capabilitySummary?: Record<ModelCapability, string[]>;
 }
 

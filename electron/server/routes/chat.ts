@@ -6,8 +6,10 @@ import { getLatestSnapshotTurnId, getSnapshotMeta, restoreSnapshot } from "../sn
 import { clearRun, interruptRun, registerRun } from "../run-control";
 import { buildRuntimeSettings } from "../settings";
 import { ensureSessionsLoaded, getSessionsMap, saveSessionsToDisk } from "../sessions";
+import { serverLog } from "../logger";
 import { createSseQueue, pushEvent, scheduleSseCleanup } from "../sse";
 import type { ChatAttachment } from "../types";
+import { toErrorLog } from "../utils";
 import type { ServerContext } from "./context";
 
 function findAssistantMessageIndexById(messages: Array<{ id: string; role: string }>, messageId: string) {
@@ -63,9 +65,30 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
 
     const runtimeSettings = buildRuntimeSettings(settings ?? {});
     const sessionRef = session;
+    serverLog(
+      [
+        `INFO Chat request accepted requestId=${requestId}`,
+        `sessionId=${sessionId}`,
+        `turnId=${turnId}`,
+        `surface=${conversationSurface}`,
+        `messageChars=${message.length}`,
+        `attachments=${messageAttachments.length}`,
+      ].join(" "),
+    );
 
     void streamFromLLM(runtimeSettings, sessionRef, requestId, ctx.getStoredApiKey(), messageAttachments, turnId, conversationSurface)
       .then(async (doneEvent) => {
+        serverLog(
+          [
+            `${doneEvent.status === "failed" ? "ERROR" : "INFO"} Chat request completed requestId=${requestId}`,
+            `sessionId=${sessionId}`,
+            `turnId=${turnId}`,
+            `status=${doneEvent.status}`,
+            `stopReason=${doneEvent.stopReason ?? ""}`,
+            `contentChars=${doneEvent.content.length}`,
+            `toolCalls=${doneEvent.toolCalls?.length ?? 0}`,
+          ].join(" "),
+        );
         sessionRef.messages.push({
           id: turnId,
           role: "assistant",
@@ -82,10 +105,11 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
         void saveSessionsToDisk();
 
         if (runtimeSettings.enableMemory && doneEvent.status === "completed") {
-          void extractMemoryAfterChat(message, doneEvent.content, sessionId, runtimeSettings, ctx.getStoredApiKey());
+          void extractMemoryAfterChat(message, doneEvent.content, sessionId, runtimeSettings, ctx.getStoredApiKey(), requestId);
         }
       })
       .catch((error) => {
+        serverLog(`ERROR Chat request crashed requestId=${requestId} sessionId=${sessionId} turnId=${turnId} ${toErrorLog(error)}`);
         const content = error instanceof Error ? error.message : String(error);
         pushEvent(requestId, {
           type: "done",

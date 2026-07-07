@@ -31,11 +31,11 @@ import {
   MEMORY_JSON_FILE,
   MEMORY_MD_FILE,
 } from "./server/config";
+import { AI_REQUEST_MAX_RETRIES, withAiRequestRetries } from "./server/ai-retry";
 import { serverLog } from "./server/logger";
 const MEMORY_SCHEMA_VERSION = 3;
 const CHROMA_COLLECTION = "nexo_memories";
 const DREAM_DEBOUNCE_MS = 1200;
-const EMBEDDING_TIMEOUT_MS = 8000;
 const CHROMA_BACKFILL_BATCH_SIZE = 50;
 const CHROMA_RETRY_DELAY_MS = 30_000;
 const EMBEDDING_FAILURE_BACKOFF_MS = 30_000;
@@ -599,7 +599,6 @@ function clearEmbeddingFailure(config: ResolvedEmbeddingConfig) {
 async function requestOpenAICompatibleEmbeddings(
   inputs: string[],
   config: ResolvedEmbeddingConfig,
-  signal: AbortSignal,
 ) {
   const response = await fetch(`${config.apiBase}/embeddings`, {
     method: "POST",
@@ -616,7 +615,6 @@ async function requestOpenAICompatibleEmbeddings(
       input: inputs,
       encoding_format: "float",
     }),
-    signal,
   });
   const data = await response.json().catch(() => ({})) as OpenAIEmbeddingResponse;
   if (!response.ok) {
@@ -633,7 +631,6 @@ async function requestGeminiEmbeddings(
   inputs: string[],
   config: ResolvedEmbeddingConfig,
   purpose: EmbeddingPurpose,
-  signal: AbortSignal,
 ) {
   const model = normalizeGeminiModel(config.model);
   const response = await fetch(`${config.apiBase}/${model}:batchEmbedContents`, {
@@ -650,7 +647,6 @@ async function requestGeminiEmbeddings(
         },
       })),
     }),
-    signal,
   });
   const data = await response.json().catch(() => ({})) as GeminiEmbeddingResponse;
   if (!response.ok) {
@@ -668,16 +664,12 @@ async function requestEmbeddings(
   config: ResolvedEmbeddingConfig,
   purpose: EmbeddingPurpose,
 ) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), EMBEDDING_TIMEOUT_MS);
-  try {
+  return withAiRequestRetries(async () => {
     if (config.transport === "gemini") {
-      return await requestGeminiEmbeddings(inputs, config, purpose, controller.signal);
+      return await requestGeminiEmbeddings(inputs, config, purpose);
     }
-    return await requestOpenAICompatibleEmbeddings(inputs, config, controller.signal);
-  } finally {
-    clearTimeout(timeout);
-  }
+    return await requestOpenAICompatibleEmbeddings(inputs, config);
+  });
 }
 
 async function embedText(
@@ -1344,8 +1336,9 @@ ${summarizeSourceMemories(sourceMemories)}`;
             model: options.model || "gpt-4o-mini",
             temperature: 0.2,
             configuration: { baseURL: options.apiBase },
+            maxRetries: AI_REQUEST_MAX_RETRIES,
           });
-          const res = await llm.invoke([new HumanMessage(prompt)]);
+          const res = await withAiRequestRetries(() => llm.invoke([new HumanMessage(prompt)]));
           return typeof res.content === "string" ? res.content : "";
         })();
 

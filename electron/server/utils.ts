@@ -27,6 +27,22 @@ export function toErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function toErrorLog(error: unknown) {
+  if (!(error instanceof Error)) return String(error);
+  const extras: string[] = [];
+  const record = error as Error & Record<string, unknown>;
+  for (const key of ["code", "status", "type"]) {
+    const value = record[key];
+    if (typeof value === "string" || typeof value === "number") {
+      extras.push(`${key}=${value}`);
+    }
+  }
+  const cause = record.cause;
+  if (cause) extras.push(`cause=${toErrorMessage(cause)}`);
+  const prefix = `${error.name || "Error"}: ${error.message}${extras.length ? ` (${extras.join(", ")})` : ""}`;
+  return error.stack ? `${prefix}\n${error.stack}` : prefix;
+}
+
 const TOOL_ARGS_PREVIEW_LIMIT = 240;
 
 export class ToolArgsParseError extends Error {

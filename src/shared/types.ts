@@ -77,8 +77,10 @@ export interface AgentSettings extends ModelContextBudget {
   maxContextTurns: number;
   enableContextCompaction: boolean;
   contextCompactionThreshold: number;
-  /** Default timeout for shell_command when timeoutMs is omitted (ms). */
+  /** Legacy setting retained for saved-settings compatibility; shell_command no longer enforces a time limit. */
   shellCommandTimeoutMs: number;
+  /** AI request timeout in milliseconds. 0 disables app-level request timeouts. */
+  aiRequestTimeoutMs: number;
   planningMode: PlanningMode;
   thinkingEnabled: boolean;
   thinkingEffort: ThinkingEffort;

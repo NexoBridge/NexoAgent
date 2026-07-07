@@ -2,6 +2,14 @@ import type { AgentSettings } from "./types";
 
 /** 表单中表示「已保存密钥」的占位符，不会作为真实密钥提交。 */
 export const SAVED_API_KEY_MASK = "***";
+export const AI_REQUEST_TIMEOUT_DISABLED_MS = 0;
+export const AI_REQUEST_TIMEOUT_MAX_MS = 2_147_483_647;
+
+export function normalizeAiRequestTimeoutMs(value: unknown) {
+  const num = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(num) || num <= 0) return AI_REQUEST_TIMEOUT_DISABLED_MS;
+  return Math.max(1, Math.min(AI_REQUEST_TIMEOUT_MAX_MS, Math.floor(num)));
+}
 
 export function maskApiKeyForDisplay(settings: AgentSettings): AgentSettings {
   if (!settings.hasApiKey) return settings;
