@@ -14,6 +14,7 @@ import {
   findStoredModelProfile,
   findStoredModelProfileByCapability,
   getPrimaryModelProfile,
+  inferModelCapabilities,
   resolveProviderModelConnection,
 } from "./model-profiles";
 import { resolveStoredModelContextBudget } from "./model-context";
@@ -28,6 +29,7 @@ export interface ModelRuntimeConfig {
   apiBase: string;
   apiKey: string;
   model: string;
+  capabilities?: ModelCapability[];
   temperature: number;
   thinkingEnabled?: boolean;
   thinkingEffort?: ThinkingEffort;
@@ -141,13 +143,17 @@ function toRuntimeConfig(
   thinkingConfig: Pick<ModelRuntimeConfig, "thinkingEnabled" | "thinkingEffort"> = {},
   aiRequestTimeoutMs = 0,
   abortSignal?: AbortSignal,
+  capabilities?: ModelCapability[],
 ): ModelRuntimeConfig {
+  const normalizedModel = model.trim();
+  const mergedCapabilities = [...new Set([...(capabilities ?? []), ...inferModelCapabilities(normalizedModel)])];
   return {
     name,
     providerId,
     apiBase: normalizeProviderApiBase(apiBase, providerId),
     apiKey: apiKey.trim(),
-    model: model.trim(),
+    model: normalizedModel,
+    capabilities: mergedCapabilities,
     temperature,
     thinkingEnabled: thinkingConfig.thinkingEnabled,
     thinkingEffort: thinkingConfig.thinkingEffort,
@@ -230,6 +236,8 @@ export async function resolvePrimaryModelConfig(settings: AgentSettings, storedA
       budget,
       { thinkingEnabled: primary.thinkingEnabled, thinkingEffort: primary.thinkingEffort },
       settings.aiRequestTimeoutMs,
+      undefined,
+      primary.capabilities,
     );
   }
   const apiKey = settings.apiKey || storedApiKey || "";
@@ -273,6 +281,7 @@ export async function resolveModelConfigFromArgs(
       { thinkingEnabled: profile.thinkingEnabled, thinkingEffort: profile.thinkingEffort },
       ctx.settings.aiRequestTimeoutMs,
       getRunAbortSignal(ctx.requestId),
+      profile.capabilities,
     );
   }
 
@@ -296,6 +305,7 @@ export async function resolveModelConfigFromArgs(
         { thinkingEnabled: profile.thinkingEnabled, thinkingEffort: profile.thinkingEffort },
         ctx.settings.aiRequestTimeoutMs,
         getRunAbortSignal(ctx.requestId),
+        profile.capabilities,
       );
     }
     if (options.allowDefault === false) {
@@ -343,6 +353,8 @@ export async function resolveCapabilityModelConfig(
     budget,
     { thinkingEnabled: profile.thinkingEnabled, thinkingEffort: profile.thinkingEffort },
     settings.aiRequestTimeoutMs,
+    undefined,
+    profile.capabilities,
   );
 }
 

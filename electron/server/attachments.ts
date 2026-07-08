@@ -9,7 +9,7 @@ export async function loadAttachmentContext(attachments: ChatAttachment[] = []) 
   const parts: string[] = [];
   for (const attachment of attachments) {
     if (attachment.type === "image") {
-      parts.push(`Image attachment: ${attachment.name} (${attachment.url}). The image is attached directly to the current user message for multimodal models; analyze it directly instead of calling a vision tool.`);
+      parts.push(`Image attachment: ${attachment.name} (${attachment.url}). Multimodal models should analyze the attached image directly. If the active model cannot inspect image content, use invoke_model with capability="vision" and images=["${attachment.url}"].`);
       continue;
     }
     if (attachment.type === "audio") {

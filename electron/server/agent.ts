@@ -41,6 +41,7 @@ const EMPTY_RESPONSE_FALLBACK_MESSAGE = "I did not produce a valid reply. Please
 const USER_INTERRUPTED_FALLBACK_MESSAGE = "Stopped the current run.";
 const TOKEN_EVENT_CHUNK_SIZE = 120;
 const SDK_NO_TIMEOUT_MS = AI_REQUEST_TIMEOUT_MAX_MS;
+const MAX_DIRECT_IMAGE_ATTACHMENTS = 4;
 const CONTEXT_COMPACTION_NOTICE = [
   "\u5df2\u63a5\u8fd1\u4e0a\u4e0b\u6587\u4e0a\u9650\uff0c\u6211\u5df2\u5c06\u8f83\u65e9\u7684\u5f53\u524d\u4f1a\u8bdd\u5185\u5bb9\u538b\u7f29\u6210\u6458\u8981\uff1b\u63a5\u4e0b\u6765\u4f1a\u7ee7\u7eed\u57fa\u4e8e\u538b\u7f29\u6458\u8981\u3001\u5f53\u524d\u4f1a\u8bdd\u5c3e\u90e8\u548c\u957f\u671f\u8bb0\u5fc6\u5de5\u4f5c\u3002",
   "",
@@ -588,28 +589,69 @@ function mergeMemoryContext(...contexts: string[]) {
   return lines.join("\n");
 }
 
-async function buildCurrentUserMultimodalContent(
-  content: string,
-  attachments: ChatAttachment[] = [],
+async function buildUserRuntimeContent(
+  message: ChatMessage,
+  inlineImageUrls: Set<string>,
 ) {
-  const imageAttachments = attachments.filter((attachment) => attachment.type === "image");
+  const attachments = message.attachments ?? [];
+  const attachmentSummary = formatRuntimeAttachmentSummary(attachments);
+  const text = [
+    message.content || (attachments.some((attachment) => attachment.type === "image") ? "Please analyze the attached image." : ""),
+    attachmentSummary ? `Attachments:\n${attachmentSummary}` : "",
+  ].filter(Boolean).join("\n\n");
+  const imageAttachments = attachments.filter(
+    (attachment) => attachment.type === "image" && inlineImageUrls.has(attachment.url),
+  );
   if (!imageAttachments.length) {
-    return content;
+    return text || message.content;
   }
 
   const imageParts = await Promise.all(
-    imageAttachments.map(async (attachment) => ({
-      type: "image_url" as const,
-      image_url: {
-        url: await attachmentToDataUrl(attachment),
-      },
-    })),
+    imageAttachments.map(async (attachment) => {
+      try {
+        return {
+          type: "image_url" as const,
+          image_url: {
+            url: await attachmentToDataUrl(attachment),
+          },
+        };
+      } catch (error) {
+        serverLog(`WARN Failed to attach image ${attachment.url}: ${toErrorLog(error)}`);
+        return null;
+      }
+    }),
   );
+  const availableImageParts = imageParts.filter((part): part is NonNullable<typeof part> => Boolean(part));
 
   return [
-    { type: "text" as const, text: content || "Please analyze the attached image." },
-    ...imageParts,
+    { type: "text" as const, text: text || "Please analyze the attached image." },
+    ...availableImageParts,
   ];
+}
+
+function formatRuntimeAttachmentSummary(attachments: ChatAttachment[] = []) {
+  if (!attachments.length) return "";
+  return attachments.map((attachment) => {
+    const detail = [
+      attachment.type,
+      attachment.mimeType,
+      attachment.size ? `${attachment.size} bytes` : "",
+    ].filter(Boolean).join(", ");
+    return `- ${attachment.name} (${detail || "attachment"}): ${attachment.url}`;
+  }).join("\n");
+}
+
+function selectInlineImageUrls(messages: ChatMessage[], maxImages: number) {
+  const urls = new Set<string>();
+  for (let index = messages.length - 1; index >= 0 && urls.size < maxImages; index--) {
+    const message = messages[index];
+    if (message.role !== "user") continue;
+    const imageAttachments = (message.attachments ?? []).filter((attachment) => attachment.type === "image");
+    for (let attachmentIndex = imageAttachments.length - 1; attachmentIndex >= 0 && urls.size < maxImages; attachmentIndex--) {
+      urls.add(imageAttachments[attachmentIndex].url);
+    }
+  }
+  return urls;
 }
 
 export async function streamFromLLM(
@@ -738,6 +780,7 @@ export async function streamFromLLM(
     ? await retrieveKnowledgeContext(currentSessionMemoryQuery || lastUserMsg, memoryEmbeddingSettings)
     : "";
   const attachmentContext = await loadAttachmentContext(attachments);
+  const primarySupportsVision = Boolean(primaryConfig.capabilities?.includes("vision"));
 
   const trimmedAuxiliarySections = trimSectionsToBudget([
     { key: "skills", label: "Enabled skills", content: skillInstructions || "", minTokens: 128 },
@@ -763,7 +806,9 @@ export async function streamFromLLM(
     "Never claim that you clicked, navigated, refreshed, submitted, requested, queried, read, wrote, ran, verified, or inspected something unless an actual tool result in the current turn or retained context proves it. If no tool was called, describe the next step or limitation instead of reporting it as completed.",
     "When summarizing or continuing from compacted context, distinguish completed tool-backed actions from plans, intentions, assumptions, and user requests.",
     "Tool results may be bounded: a result can contain only a summary/preview plus a raw output reference. Do not assume the complete raw payload is already in context; retrieve or inspect the reference only when the full payload is necessary.",
-    "When current user attachments include images, the images are included directly in this model request. Inspect attached images directly and do not call invoke_model just to analyze them.",
+    primarySupportsVision
+      ? "When recent user messages include image attachments, up to a small number of recent images may be included directly in this model request. Inspect those attached images directly when they are present."
+      : "The primary model is not configured as vision-capable. When the user asks about image attachments, do not guess from filenames or prior text; use invoke_model with capability=\"vision\" and the attachment image URL.",
     "Never write DSML/XML-like tool call tags in the user-visible response. Use the provided tool-calling interface only.",
     "Use shell_command for terminal tasks, filesystem inspection, and command-line workflows.",
     buildBrowserSurfacePrompt(surface),
@@ -815,16 +860,15 @@ export async function streamFromLLM(
     ],
     budgetConfig
   );
-  const currentUserMessageId = [...conversationContext.recentRawMessages]
-    .reverse()
-    .find((message) => message.role === "user")?.id ?? "";
-  const currentUserContent = await buildCurrentUserMultimodalContent(lastUserMsg, attachments);
-  const runtimeContentForMessage = (message: ChatMessage) =>
-    message.role === "user" && message.id === currentUserMessageId ? currentUserContent : message.content;
-  const recentRuntimeMessages: BaseMessage[] = conversationContext.recentRawMessages.map((message) =>
-    message.role === "user"
-      ? new HumanMessage({ content: runtimeContentForMessage(message) as any })
-      : new AIMessage(message.content)
+  const inlineImageUrls = primarySupportsVision
+    ? selectInlineImageUrls(conversationContext.recentRawMessages, MAX_DIRECT_IMAGE_ATTACHMENTS)
+    : new Set<string>();
+  const recentRuntimeMessages: BaseMessage[] = await Promise.all(
+    conversationContext.recentRawMessages.map(async (message) =>
+      message.role === "user"
+        ? new HumanMessage({ content: await buildUserRuntimeContent(message, inlineImageUrls) as any })
+        : new AIMessage(message.content)
+    ),
   );
 
   const lcMessages: BaseMessage[] = [
