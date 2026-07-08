@@ -51,11 +51,6 @@ The system SHALL automatically compact thread history when the estimated prompt 
 - **WHEN** estimated input usage reaches or exceeds the configured auto-compaction limit for the active model
 - **THEN** the runtime SHALL summarize older thread context and rebuild the prompt before sending the next model request
 
-#### Scenario: Message count exceeds compact threshold
-- **WHEN** the number of non-system conversation messages not yet covered by the rolling session summary reaches the configured `contextCompactionThreshold`
-- **THEN** the runtime SHALL summarize older uncovered messages even if the active model's token budget has not been reached
-- **AND** the live prompt SHALL retain the rolling session summary plus the configured recent raw message window
-
 #### Scenario: Long task requires repeated compaction
 - **WHEN** a session continues to grow after one compact pass
 - **THEN** the runtime SHALL allow additional compaction passes to keep the conversation within the active model budget
@@ -129,4 +124,3 @@ The system SHALL allow raw tool output to be retrieved by reference without send
 - **WHEN** the assistant needs the complete raw output for a later step
 - **THEN** it SHALL explicitly request or invoke a supported retrieval path for the raw reference
 - **AND** it SHALL not assume the complete raw output is already present in prompt context
-

@@ -26,7 +26,7 @@ export type StreamEvent =
       type: "done";
       content: string;
       status: TurnCompletionStatus;
-      usage?: { promptTokens?: number; completionTokens?: number };
+      usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number; cachedTokens?: number };
       stopReason?: TurnStopReason;
       hasSnapshot?: boolean;
       attachments?: ChatAttachment[];

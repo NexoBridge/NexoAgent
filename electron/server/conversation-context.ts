@@ -96,7 +96,6 @@ export async function buildBudgetAwareConversationContext(
 ) {
   const conversationMessages = session.messages.filter((message) => message.role !== "system");
   const recentWindow = normalizePositiveInteger(settings.maxContextTurns, 12);
-  const compactionThreshold = normalizePositiveInteger(settings.contextCompactionThreshold, 24, recentWindow + 1);
   const originalThreadSummary = session.threadSummary?.trim() ?? "";
   const originalSummaryMessageCount = session.threadSummaryMessageCount;
   let threadSummary = originalThreadSummary;
@@ -117,17 +116,14 @@ export async function buildBudgetAwareConversationContext(
   const estimateSummary = () => estimateSectionTokens("Earlier conversation summary", threadSummary);
   const estimateRecent = () => estimateMessagesTokens(recentMessages);
   const estimateTotal = () => estimateBase() + estimateSummary() + estimateRecent();
-  const shouldCompactByMessageCount = () => recentMessages.length >= compactionThreshold && recentMessages.length > recentWindow;
   const shouldCompactByTokens = () => estimateTotal() >= budgetConfig.autoCompactTokenLimit;
 
   while (
     settings.enableContextCompaction
-    && (shouldCompactByMessageCount() || shouldCompactByTokens())
+    && shouldCompactByTokens()
     && passes < 4
   ) {
-    const targetRawTurns = shouldCompactByMessageCount()
-      ? Math.max(2, Math.min(recentWindow, recentMessages.length - 1))
-      : Math.max(2, Math.min(recentWindow, Math.floor(recentMessages.length / 2)));
+    const targetRawTurns = Math.max(2, Math.min(recentWindow, Math.floor(recentMessages.length / 2)));
     const summaryInput = recentMessages.slice(0, Math.max(0, recentMessages.length - targetRawTurns));
     if (!summaryInput.length) break;
 

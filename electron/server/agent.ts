@@ -3,6 +3,7 @@ import { ChatAnthropic } from "@langchain/anthropic";
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
 import type { AIMessageChunk } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
+import { createHash } from "node:crypto";
 import {
   getDefaultServiceProviderName,
   normalizeServiceProviderName,
@@ -42,6 +43,7 @@ const USER_INTERRUPTED_FALLBACK_MESSAGE = "Stopped the current run.";
 const TOKEN_EVENT_CHUNK_SIZE = 120;
 const SDK_NO_TIMEOUT_MS = AI_REQUEST_TIMEOUT_MAX_MS;
 const MAX_DIRECT_IMAGE_ATTACHMENTS = 4;
+const OPENAI_PROMPT_CACHE_RETENTION = "24h" as const;
 const CONTEXT_COMPACTION_NOTICE = [
   "\u5df2\u63a5\u8fd1\u4e0a\u4e0b\u6587\u4e0a\u9650\uff0c\u6211\u5df2\u5c06\u8f83\u65e9\u7684\u5f53\u524d\u4f1a\u8bdd\u5185\u5bb9\u538b\u7f29\u6210\u6458\u8981\uff1b\u63a5\u4e0b\u6765\u4f1a\u7ee7\u7eed\u57fa\u4e8e\u538b\u7f29\u6458\u8981\u3001\u5f53\u524d\u4f1a\u8bdd\u5c3e\u90e8\u548c\u957f\u671f\u8bb0\u5fc6\u5de5\u4f5c\u3002",
   "",
@@ -88,6 +90,38 @@ function formatApiBaseForLog(apiBase: string) {
   } catch {
     return apiBase.replace(/\/+$/, "");
   }
+}
+
+function hashForPromptCache(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
+}
+
+// Keep volatile request and turn IDs out of this fingerprint; cache routing should
+// stay stable across repeated calls that share the same long prompt prefix.
+function buildOpenAIPromptCacheOptions(
+  config: Awaited<ReturnType<typeof resolvePrimaryModelConfig>>,
+  settings: AgentSettings,
+  surface: ConversationSurface,
+  stableSystemPrompt: string,
+  tools: ToolDef[],
+): Partial<ChatOpenAICallOptions> {
+  const fingerprint = hashForPromptCache({
+    providerId: config.providerId,
+    apiBase: formatApiBaseForLog(config.apiBase),
+    model: config.model,
+    surface,
+    workspaceRoot: getWorkspaceRoot(settings),
+    systemPromptHash: hashForPromptCache(stableSystemPrompt),
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    })),
+  });
+  return {
+    promptCacheKey: `nexo-agent:${fingerprint}`,
+    promptCacheRetention: OPENAI_PROMPT_CACHE_RETENTION,
+  };
 }
 
 function formatToolNamesForLog(toolCalls: Array<Pick<ToolCallTrace, "name" | "status">>) {
@@ -146,6 +180,43 @@ function messageContentToText(content: unknown) {
       return "";
     })
     .join("");
+}
+
+interface ModelUsageSnapshot {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
+}
+
+function numberFromUnknown(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function usageFromChunk(chunk: AIMessageChunk): ModelUsageSnapshot {
+  const usageMetadata = (chunk as any).usage_metadata as Record<string, any> | undefined;
+  const responseUsage = (chunk as any).response_metadata?.usage as Record<string, any> | undefined;
+  // LangChain normalizes OpenAI cached prompt reads to input_token_details.cache_read.
+  // Some compatible gateways expose the original OpenAI usage object instead.
+  return {
+    promptTokens: numberFromUnknown(usageMetadata?.input_tokens)
+      ?? numberFromUnknown(responseUsage?.prompt_tokens),
+    completionTokens: numberFromUnknown(usageMetadata?.output_tokens)
+      ?? numberFromUnknown(responseUsage?.completion_tokens),
+    totalTokens: numberFromUnknown(usageMetadata?.total_tokens)
+      ?? numberFromUnknown(responseUsage?.total_tokens),
+    cachedTokens: numberFromUnknown(usageMetadata?.input_token_details?.cache_read)
+      ?? numberFromUnknown(responseUsage?.prompt_tokens_details?.cached_tokens),
+  };
+}
+
+function formatUsageForLog(usage: ModelUsageSnapshot) {
+  return [
+    `promptTokens=${usage.promptTokens ?? ""}`,
+    `completionTokens=${usage.completionTokens ?? ""}`,
+    `totalTokens=${usage.totalTokens ?? ""}`,
+    `cachedTokens=${usage.cachedTokens ?? ""}`,
+  ].join(" ");
 }
 
 function buildBrowserSurfacePrompt(surface: ConversationSurface) {
@@ -789,7 +860,13 @@ export async function streamFromLLM(
     { key: "attachments", label: "Current user attachments", content: attachmentContext || "", minTokens: 128 },
   ], Math.max(512, Math.floor(budgetConfig.maxInputTokens * 0.28)));
 
-  const auxiliaryPrompt = trimmedAuxiliarySections
+  const stableAuxiliaryPrompt = trimmedAuxiliarySections
+    .filter((section) => section.key === "skills")
+    .map((section) => formatAuxiliarySection(section.label, section.content))
+    .filter(Boolean)
+    .join("\n\n");
+  const dynamicAuxiliarySections = trimmedAuxiliarySections.filter((section) => section.key !== "skills");
+  const dynamicAuxiliaryPrompt = dynamicAuxiliarySections
     .map((section) => formatAuxiliarySection(section.label, section.content))
     .filter(Boolean)
     .join("\n\n");
@@ -826,7 +903,7 @@ export async function streamFromLLM(
     "Use invoke_model with a capability when a configured specialist model is better suited for a sub-task.",
     "Use recall_memory when prior durable context could materially improve the answer.",
     `Configured specialist capabilities:\n${formatCapabilitySummary(capabilitySummary)}`,
-    ...(auxiliaryPrompt ? [auxiliaryPrompt] : []),
+    ...(stableAuxiliaryPrompt ? [stableAuxiliaryPrompt] : []),
   ].join("\n");
 
   const summarizeOlderContext = async (transcript: string) => {
@@ -856,28 +933,60 @@ export async function streamFromLLM(
     summarizeOlderContext,
     [
       { key: "system", label: "System prompt", content: systemPrompt },
-      ...trimmedAuxiliarySections.map((section) => ({ key: section.key, label: section.label, content: section.content })),
+      ...dynamicAuxiliarySections.map((section) => ({ key: section.key, label: section.label, content: section.content })),
     ],
     budgetConfig
   );
   const inlineImageUrls = primarySupportsVision
     ? selectInlineImageUrls(conversationContext.recentRawMessages, MAX_DIRECT_IMAGE_ATTACHMENTS)
     : new Set<string>();
-  const recentRuntimeMessages: BaseMessage[] = await Promise.all(
-    conversationContext.recentRawMessages.map(async (message) =>
-      message.role === "user"
-        ? new HumanMessage({ content: await buildUserRuntimeContent(message, inlineImageUrls) as any })
-        : new AIMessage(message.content)
-    ),
-  );
+  const latestUserIndex = (() => {
+    for (let index = conversationContext.recentRawMessages.length - 1; index >= 0; index--) {
+      if (conversationContext.recentRawMessages[index].role === "user") return index;
+    }
+    return -1;
+  })();
+  const priorRecentMessages = latestUserIndex >= 0
+    ? conversationContext.recentRawMessages.slice(0, latestUserIndex)
+    : conversationContext.recentRawMessages;
+  const currentAndFollowingMessages = latestUserIndex >= 0
+    ? conversationContext.recentRawMessages.slice(latestUserIndex)
+    : [];
+  const toRuntimeMessage = async (message: ChatMessage) =>
+    message.role === "user"
+      ? new HumanMessage({ content: await buildUserRuntimeContent(message, inlineImageUrls) as any })
+      : new AIMessage(message.content);
+  const priorRuntimeMessages: BaseMessage[] = await Promise.all(priorRecentMessages.map(toRuntimeMessage));
+  const currentRuntimeMessages: BaseMessage[] = await Promise.all(currentAndFollowingMessages.map(toRuntimeMessage));
+  const dynamicAuxiliaryMessages: BaseMessage[] = dynamicAuxiliaryPrompt
+    // Put per-turn memory/knowledge after reusable history but before the latest user
+    // message, so the model still sees the newest user request last.
+    ? [new SystemMessage(`Current turn auxiliary context. Treat this as background and prefer the current session transcript when they conflict:\n${dynamicAuxiliaryPrompt}`)]
+    : [];
 
   const lcMessages: BaseMessage[] = [
     new SystemMessage(systemPrompt),
     ...(conversationContext.compactedSummary
       ? [new SystemMessage(`Earlier conversation summary from automatic context compaction:\n${conversationContext.compactedSummary}`)]
       : []),
-    ...recentRuntimeMessages,
+    ...priorRuntimeMessages,
+    ...dynamicAuxiliaryMessages,
+    ...currentRuntimeMessages,
   ];
+  const openAiPromptCacheOptions = primaryConfig.providerId === "openai-compatible"
+    ? buildOpenAIPromptCacheOptions(primaryConfig, settings, surface, systemPrompt, enabledToolDefs)
+    : {};
+  serverLog(
+    [
+      `INFO AI prompt assembled ${requestLogBase}`,
+      `lcMessages=${lcMessages.length}`,
+      `stableSystemChars=${systemPrompt.length}`,
+      `dynamicAuxChars=${dynamicAuxiliaryPrompt.length}`,
+      `estimatedPromptTokens=${conversationContext.estimatedPromptTokens}`,
+      `promptCacheKey=${openAiPromptCacheOptions.promptCacheKey ?? "off"}`,
+      `promptCacheRetention=${openAiPromptCacheOptions.promptCacheRetention ?? "off"}`,
+    ].join(" "),
+  );
   let turnSnapshotCreated = false;
   let fullContent = "";
   const persistentToolCalls: ToolCallTrace[] = [];
@@ -922,7 +1031,9 @@ export async function streamFromLLM(
     maxTokens: resolvedBudget.reservedOutputTokens ?? 2048,
     streaming: true,
   });
-  const modelCallOptions = primaryConfig.providerId === "openai-compatible" ? openAiThinkingOptions : {};
+  const modelCallOptions: Partial<ChatOpenAICallOptions> = primaryConfig.providerId === "openai-compatible"
+    ? { ...openAiThinkingOptions, ...openAiPromptCacheOptions }
+    : {};
 
   const enabledToolMap = new Map(enabledToolDefs.map((tool) => [tool.name, tool]));
   const toolCapableLlm = llm as any;
@@ -940,6 +1051,8 @@ export async function streamFromLLM(
 
   let promptTokens: number | undefined;
   let completionTokens: number | undefined;
+  let totalTokens: number | undefined;
+  let cachedTokens: number | undefined;
   const assistantAttachments: ChatAttachment[] = [];
   let browserResolveAttempted = false;
   let interruptedByUser = false;
@@ -1012,13 +1125,14 @@ export async function streamFromLLM(
             }
           }
         }
-        if (c.usage_metadata) {
-          promptTokens = c.usage_metadata.input_tokens;
-          completionTokens = c.usage_metadata.output_tokens;
-        }
+        const chunkUsage = usageFromChunk(c);
+        if (chunkUsage.promptTokens !== undefined) promptTokens = chunkUsage.promptTokens;
+        if (chunkUsage.completionTokens !== undefined) completionTokens = chunkUsage.completionTokens;
+        if (chunkUsage.totalTokens !== undefined) totalTokens = chunkUsage.totalTokens;
+        if (chunkUsage.cachedTokens !== undefined) cachedTokens = chunkUsage.cachedTokens;
       }
       serverLog(
-        `INFO AI stream complete ${requestLogBase} step=${currentStep} chunks=${streamChunks} textChars=${streamTextChars} toolChunks=${streamToolChunks} interrupted=${interruptedByUser}`,
+        `INFO AI stream complete ${requestLogBase} step=${currentStep} chunks=${streamChunks} textChars=${streamTextChars} toolChunks=${streamToolChunks} interrupted=${interruptedByUser} ${formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens })}`,
       );
 
       if (interruptedByUser) break;
@@ -1223,12 +1337,13 @@ export async function streamFromLLM(
             emitToken(dsmlChunk.visibleText);
           }
         }
-        if (c.usage_metadata) {
-          promptTokens = c.usage_metadata.input_tokens;
-          completionTokens = c.usage_metadata.output_tokens;
-        }
+        const chunkUsage = usageFromChunk(c);
+        if (chunkUsage.promptTokens !== undefined) promptTokens = chunkUsage.promptTokens;
+        if (chunkUsage.completionTokens !== undefined) completionTokens = chunkUsage.completionTokens;
+        if (chunkUsage.totalTokens !== undefined) totalTokens = chunkUsage.totalTokens;
+        if (chunkUsage.cachedTokens !== undefined) cachedTokens = chunkUsage.cachedTokens;
       }
-      serverLog(`INFO AI final stream complete ${requestLogBase} chunks=${finalStreamChunks} textChars=${finalStreamTextChars} interrupted=${interruptedByUser}`);
+      serverLog(`INFO AI final stream complete ${requestLogBase} chunks=${finalStreamChunks} textChars=${finalStreamTextChars} interrupted=${interruptedByUser} ${formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens })}`);
       if (!interruptedByUser) {
         const finalDsmlChunk = finalDsmlBuffer.flush();
         if (finalDsmlChunk.visibleText) {
@@ -1278,7 +1393,7 @@ export async function streamFromLLM(
       : breakerInfo
         ? "needs_input"
         : "completed",
-    usage: { promptTokens, completionTokens },
+    usage: { promptTokens, completionTokens, totalTokens, cachedTokens },
     attachments: assistantAttachments.length ? assistantAttachments : undefined,
     toolCalls: persistentToolCalls.length ? persistentToolCalls : undefined,
     messageBlocks: persistentMessageBlocks.length ? persistentMessageBlocks : undefined,
@@ -1303,6 +1418,7 @@ export async function streamFromLLM(
       `contentChars=${doneEvent.content.length}`,
       `toolCalls=${persistentToolCalls.length}`,
       `tools=${formatToolNamesForLog(persistentToolCalls)}`,
+      formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens }),
     ].join(" "),
   );
   return buildDoneEvent(requestId, doneEvent);

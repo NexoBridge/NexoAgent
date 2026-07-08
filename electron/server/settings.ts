@@ -42,7 +42,6 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   contextWindowSourceDetail: "runtime-default",
   maxContextTurns: 12,
   enableContextCompaction: true,
-  contextCompactionThreshold: 24,
   shellCommandTimeoutMs: 0,
   aiRequestTimeoutMs: 0,
   planningMode: "balanced",

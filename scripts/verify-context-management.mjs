@@ -163,16 +163,15 @@ await cleanupCache();
     createdAt: now,
   });
   const session = {
-    id: "message-count-compaction",
-    title: "Message count compaction",
-    messages: Array.from({ length: 6 }, (_, index) => message(index + 1)),
+    id: "no-message-count-compaction",
+    title: "No message count compaction",
+    messages: Array.from({ length: 12 }, (_, index) => message(index + 1)),
     createdAt: now,
     updatedAt: now,
   };
   const settings = {
     ...DEFAULT_AGENT_SETTINGS,
     enableContextCompaction: true,
-    contextCompactionThreshold: 6,
     maxContextTurns: 3,
   };
   const budget = computePromptBudget(settings, {
@@ -188,25 +187,55 @@ await cleanupCache();
   };
 
   const firstContext = await buildBudgetAwareConversationContext(settings, session, summarize, [], budget);
-  assert.equal(firstContext.compacted, true);
-  assert.equal(firstContext.recentRawMessages.length, 3);
-  assert.equal(session.threadSummary, "summary-1");
-  assert.equal(session.threadSummaryMessageCount, 3);
-  assert.equal(session.threadSummaryVersion, 1);
+  assert.equal(firstContext.compacted, false);
+  assert.equal(firstContext.recentRawMessages.length, 12);
+  assert.equal(session.threadSummary, undefined);
+  assert.equal(summarizedTranscripts.length, 0);
+}
 
+{
+  const now = new Date().toISOString();
+  const message = (index) => ({
+    id: `large-${index}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: `large message ${index}\n${"abc ".repeat(3000)}`,
+    createdAt: now,
+  });
+  const session = {
+    id: "token-budget-compaction",
+    title: "Token budget compaction",
+    messages: Array.from({ length: 6 }, (_, index) => message(index + 1)),
+    createdAt: now,
+    updatedAt: now,
+  };
+  const settings = {
+    ...DEFAULT_AGENT_SETTINGS,
+    enableContextCompaction: true,
+    maxContextTurns: 3,
+  };
+  const budget = computePromptBudget(settings, {
+    contextWindowTokens: 8_192,
+    reservedOutputTokens: 512,
+    autoCompactTokenLimit: 1_200,
+    compactionTargetRatio: 0.5,
+  }, 256);
+  const summarizedTranscripts = [];
+  const summarize = async (transcript) => {
+    summarizedTranscripts.push(transcript);
+    return `summary-${summarizedTranscripts.length}`;
+  };
+
+  const firstContext = await buildBudgetAwareConversationContext(settings, session, summarize, [], budget);
+  assert.equal(firstContext.compacted, true);
+  assert.ok(firstContext.recentRawMessages.length <= 3);
+  assert.ok(session.threadSummary?.includes("summary-1"));
+  assert.ok((session.threadSummaryMessageCount ?? 0) > 0);
+  assert.ok(summarizedTranscripts.length >= 1);
+
+  const summarizedCount = summarizedTranscripts.length;
   const secondContext = await buildBudgetAwareConversationContext(settings, session, summarize, [], budget);
   assert.equal(secondContext.compacted, false);
-  assert.equal(secondContext.recentRawMessages.length, 3);
-  assert.equal(summarizedTranscripts.length, 1);
-  assert.equal(session.threadSummaryMessageCount, 3);
-
-  session.messages.push(message(7), message(8), message(9));
-  const thirdContext = await buildBudgetAwareConversationContext(settings, session, summarize, [], budget);
-  assert.equal(thirdContext.compacted, true);
-  assert.equal(thirdContext.recentRawMessages.length, 3);
-  assert.equal(summarizedTranscripts.length, 2);
-  assert.equal(session.threadSummary, "summary-1\n\nsummary-2");
-  assert.equal(session.threadSummaryMessageCount, 6);
+  assert.equal(summarizedTranscripts.length, summarizedCount);
 }
 
 await cleanupCache();

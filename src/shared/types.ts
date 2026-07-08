@@ -76,7 +76,6 @@ export interface AgentSettings extends ModelContextBudget {
   temperature: number;
   maxContextTurns: number;
   enableContextCompaction: boolean;
-  contextCompactionThreshold: number;
   /** Legacy setting retained for saved-settings compatibility; shell_command no longer enforces a time limit. */
   shellCommandTimeoutMs: number;
   /** AI request timeout in milliseconds. 0 disables app-level request timeouts. */
@@ -419,6 +418,12 @@ export interface ChatMessage {
   meta?: {
     undoneAt?: string;
     undoneMessage?: string;
+    usage?: {
+      promptTokens?: number;
+      completionTokens?: number;
+      totalTokens?: number;
+      cachedTokens?: number;
+    };
     toolCalls?: ToolCallTrace[];
     messageBlocks?: MessageBlock[];
   };

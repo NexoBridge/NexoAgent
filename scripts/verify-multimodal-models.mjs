@@ -131,7 +131,6 @@ const settings = {
   temperature: 0,
   maxContextTurns: 12,
   enableContextCompaction: true,
-  contextCompactionThreshold: 24,
   shellCommandTimeoutMs: 300000,
   planningMode: "balanced",
   enableMemory: false,

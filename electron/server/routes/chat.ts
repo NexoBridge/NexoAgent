@@ -87,6 +87,9 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
             `stopReason=${doneEvent.stopReason ?? ""}`,
             `contentChars=${doneEvent.content.length}`,
             `toolCalls=${doneEvent.toolCalls?.length ?? 0}`,
+            `promptTokens=${doneEvent.usage?.promptTokens ?? ""}`,
+            `completionTokens=${doneEvent.usage?.completionTokens ?? ""}`,
+            `cachedTokens=${doneEvent.usage?.cachedTokens ?? ""}`,
           ].join(" "),
         );
         sessionRef.messages.push({
@@ -97,6 +100,7 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
           status: doneEvent.status,
           attachments: doneEvent.attachments ?? [],
           meta: {
+            usage: doneEvent.usage,
             toolCalls: doneEvent.toolCalls,
             messageBlocks: doneEvent.messageBlocks,
           },

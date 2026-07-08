@@ -48,7 +48,6 @@ const defaultSettings: AgentSettings = {
   contextWindowSourceDetail: "desktop-default",
   maxContextTurns: 12,
   enableContextCompaction: true,
-  contextCompactionThreshold: 24,
   shellCommandTimeoutMs: 0,
   aiRequestTimeoutMs: 0,
   planningMode: "balanced",
