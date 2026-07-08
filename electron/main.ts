@@ -29,6 +29,8 @@ interface StoredSettings extends Omit<AgentSettings, "apiKey" | "hasApiKey"> {
 }
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const APP_ID = "com.company.nexoagent";
+const APP_NAME = "Nexo Agent";
 
 const defaultSettings: AgentSettings = {
   providerId: "openai-compatible",
@@ -82,6 +84,12 @@ const DESKTOP_THEME_BACKGROUNDS: Record<DesktopThemeMode, string> = {
   dark: "#0e1726",
   light: "#f8fafc",
 };
+
+app.setName(APP_NAME);
+if (process.platform === "win32") {
+  app.setAppUserModelId(APP_ID);
+}
+
 if (!gotSingleInstanceLock) {
   app.quit();
 }
@@ -372,7 +380,7 @@ function createWindow() {
     minWidth: 1080,
     minHeight: 720,
     icon: windowIconPath(),
-    title: "Nexo Agent",
+    title: APP_NAME,
     backgroundColor: DESKTOP_THEME_BACKGROUNDS[getWindowThemeMode()],
     show: false,
     autoHideMenuBar: true,
