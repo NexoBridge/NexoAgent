@@ -25,7 +25,7 @@ import { serverLog } from "./logger";
 import { pushEvent } from "./sse";
 import { getWebSettings } from "./settings";
 import { getEnabledSkillInstructions } from "./skills";
-import { computePromptBudget, trimSectionsToBudget, truncateTextToTokenBudget } from "./token-budget";
+import { computePromptBudget, estimateTokens } from "./token-budget";
 import { buildBudgetAwareConversationContext, formatCurrentSessionContextForRecall } from "./conversation-context";
 import { normalizeToolOutputForModel, type BoundedToolOutput } from "./tool-output";
 import { getAllEnabledToolDefs, toLcTool } from "./tools/registry";
@@ -219,6 +219,44 @@ function formatUsageForLog(usage: ModelUsageSnapshot) {
   ].join(" ");
 }
 
+function estimateRuntimePromptTokens(messages: BaseMessage[]) {
+  return messages.reduce((total, message) => {
+    const getType = (message as { _getType?: () => string })._getType;
+    const role = typeof getType === "function" ? getType.call(message) : "message";
+    return total + 8 + estimateTokens(`${role}\n${messageContentToText(message.content)}`);
+  }, 0);
+}
+
+function formatCount(value: number) {
+  return Math.ceil(value).toLocaleString("en-US");
+}
+
+function buildContextOverflowMessage(
+  estimatedPromptTokens: number,
+  budgetConfig: ReturnType<typeof computePromptBudget>,
+  cause: string,
+) {
+  return [
+    "上下文过大，已停止本次模型请求，避免静默截断对话、附件或工具输出。",
+    `原因：${cause}`,
+    `估算输入 tokens：${formatCount(estimatedPromptTokens)}；当前模型输入预算：${formatCount(budgetConfig.maxInputTokens)}；上下文窗口：${formatCount(budgetConfig.contextWindowTokens)}；预留输出：${formatCount(budgetConfig.reservedOutputTokens)}；工具定义预留：${formatCount(budgetConfig.toolSchemaReserveTokens)}。`,
+    "请显式压缩/删减当前内容，或切换到更大上下文模型后重试。",
+  ].join("\n");
+}
+
+function describeContextOverflowCause(
+  conversationContext: Awaited<ReturnType<typeof buildBudgetAwareConversationContext>>,
+  budgetConfig: ReturnType<typeof computePromptBudget>,
+) {
+  if (conversationContext.latestRawMessageTokens > Math.floor(budgetConfig.maxInputTokens * 0.8)) {
+    return `当前这次发送的内容本身过大（约 ${formatCount(conversationContext.latestRawMessageTokens)} tokens，${formatCount(conversationContext.latestRawMessageChars)} 字符），自动压缩只能压缩更早的历史对话，不能安全压缩最新用户请求。`;
+  }
+  if (!conversationContext.compacted && conversationContext.originalEstimatedPromptTokens >= budgetConfig.autoCompactTokenLimit) {
+    return "已达到压缩阈值，但可压缩的历史消息不足；需要删减当前内容或分批发送。";
+  }
+  return "完整当前会话、附件、记忆、知识库上下文或系统提示已经超过模型可用输入窗口。";
+}
+
 function buildBrowserSurfacePrompt(surface: ConversationSurface) {
   const common = [
     "Browser capability:",
@@ -314,7 +352,7 @@ function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): T
           "For request capture tasks such as listening to the user's form submission and replaying it later, action=\"script\" may write its own host/runtime script, including page instrumentation through webContents/CDP when needed. Return compact structured logs with method, URL, headers, body, status, and response snippets.",
           "action=\"script\" injects scriptCache for short-lived capture samples. Scripts can call scriptCache.set/get/getEntry/list/delete/clear/capture/consume/consumeEntry/replay, and capture-like return values are automatically stored with a TTL.",
           "Use scriptCache for temporary request logs and replay samples. When a sample has served its one-time purpose, consume/delete it or call replay with deleteAfter/deleteOnSuccess so temporary captures do not linger.",
-          "Large tool outputs are bounded before they enter model context. For action=script, return concise summaries plus scriptCache keys or raw-output references instead of complete history/log/body arrays whenever possible.",
+          "Tool outputs are passed through without application-level truncation. For action=script, return concise summaries plus scriptCache keys when complete history/log/body arrays would exceed the model context.",
           "Promote only stable reusable scripts, runbooks, or replay templates to store_script_memory; in a later session, call recall_memory before recreating durable workflows.",
           "For canvas, 3D model, or map gestures, use snapshot or screenshot to obtain target bounds/coordinates, then call action=drag/wheel/click. If raw CDP is explicitly required, send CDP Input events through sendCommand/cdpSend with already-known coordinates.",
           "Do not use shell commands, PowerShell, or OS-level mouse/keyboard automation to operate ordinary browser UI controls.",
@@ -786,6 +824,7 @@ export async function streamFromLLM(
   const enabledToolDefs = withSettingsAwareToolDefs(await getAllEnabledToolDefs(), settings);
   const resolvedBudget = await resolveAndPersistModelContextBudget({
     providerId: primaryConfig.providerId,
+    apiBase: primaryConfig.apiBase,
     model: primaryConfig.model,
     contextWindowTokens: primaryConfig.contextWindowTokens,
     reservedOutputTokens: primaryConfig.reservedOutputTokens,
@@ -853,19 +892,19 @@ export async function streamFromLLM(
   const attachmentContext = await loadAttachmentContext(attachments);
   const primarySupportsVision = Boolean(primaryConfig.capabilities?.includes("vision"));
 
-  const trimmedAuxiliarySections = trimSectionsToBudget([
+  const auxiliarySections = [
     { key: "skills", label: "Enabled skills", content: skillInstructions || "", minTokens: 128 },
     { key: "memory", label: "Relevant memories about the user", content: memoryContext || "", minTokens: 160 },
     { key: "knowledge", label: "Relevant knowledge base notes", content: knowledgeContext || "", minTokens: 160 },
     { key: "attachments", label: "Current user attachments", content: attachmentContext || "", minTokens: 128 },
-  ], Math.max(512, Math.floor(budgetConfig.maxInputTokens * 0.28)));
+  ].filter((section) => section.content.trim());
 
-  const stableAuxiliaryPrompt = trimmedAuxiliarySections
+  const stableAuxiliaryPrompt = auxiliarySections
     .filter((section) => section.key === "skills")
     .map((section) => formatAuxiliarySection(section.label, section.content))
     .filter(Boolean)
     .join("\n\n");
-  const dynamicAuxiliarySections = trimmedAuxiliarySections.filter((section) => section.key !== "skills");
+  const dynamicAuxiliarySections = auxiliarySections.filter((section) => section.key !== "skills");
   const dynamicAuxiliaryPrompt = dynamicAuxiliarySections
     .map((section) => formatAuxiliarySection(section.label, section.content))
     .filter(Boolean)
@@ -882,7 +921,7 @@ export async function streamFromLLM(
     "Use tools when they are helpful.",
     "Never claim that you clicked, navigated, refreshed, submitted, requested, queried, read, wrote, ran, verified, or inspected something unless an actual tool result in the current turn or retained context proves it. If no tool was called, describe the next step or limitation instead of reporting it as completed.",
     "When summarizing or continuing from compacted context, distinguish completed tool-backed actions from plans, intentions, assumptions, and user requests.",
-    "Tool results may be bounded: a result can contain only a summary/preview plus a raw output reference. Do not assume the complete raw payload is already in context; retrieve or inspect the reference only when the full payload is necessary.",
+    "Tool results are passed through to the model without application-level truncation. If a result is too large for the model context, report the limit clearly instead of pretending the missing content was inspected.",
     primarySupportsVision
       ? "When recent user messages include image attachments, up to a small number of recent images may be included directly in this model request. Inspect those attached images directly when they are present."
       : "The primary model is not configured as vision-capable. When the user asks about image attachments, do not guess from filenames or prior text; use invoke_model with capability=\"vision\" and the attachment image URL.",
@@ -973,6 +1012,10 @@ export async function streamFromLLM(
     ...dynamicAuxiliaryMessages,
     ...currentRuntimeMessages,
   ];
+  const initialPromptTokens = Math.max(
+    conversationContext.estimatedPromptTokens,
+    estimateRuntimePromptTokens(lcMessages),
+  );
   const openAiPromptCacheOptions = primaryConfig.providerId === "openai-compatible"
     ? buildOpenAIPromptCacheOptions(primaryConfig, settings, surface, systemPrompt, enabledToolDefs)
     : {};
@@ -982,11 +1025,50 @@ export async function streamFromLLM(
       `lcMessages=${lcMessages.length}`,
       `stableSystemChars=${systemPrompt.length}`,
       `dynamicAuxChars=${dynamicAuxiliaryPrompt.length}`,
+      `compacted=${conversationContext.compacted}`,
+      `compactionPasses=${conversationContext.compactionPasses}`,
+      `compactedMessages=${conversationContext.compactedMessageCount}`,
+      `summaryMessages=${conversationContext.summaryMessageCount}`,
+      `recentMessages=${conversationContext.recentRawMessageCount}`,
+      `originalEstimatedPromptTokens=${conversationContext.originalEstimatedPromptTokens}`,
       `estimatedPromptTokens=${conversationContext.estimatedPromptTokens}`,
+      `runtimePromptTokens=${initialPromptTokens}`,
+      `autoCompactTokenLimit=${budgetConfig.autoCompactTokenLimit}`,
+      `compactionTargetTokens=${budgetConfig.compactionTargetTokens}`,
+      `latestMessageTokens=${conversationContext.latestRawMessageTokens}`,
+      `latestMessageChars=${conversationContext.latestRawMessageChars}`,
       `promptCacheKey=${openAiPromptCacheOptions.promptCacheKey ?? "off"}`,
       `promptCacheRetention=${openAiPromptCacheOptions.promptCacheRetention ?? "off"}`,
     ].join(" "),
   );
+  if (initialPromptTokens > budgetConfig.maxInputTokens) {
+    const content = buildContextOverflowMessage(
+      initialPromptTokens,
+      budgetConfig,
+      describeContextOverflowCause(conversationContext, budgetConfig),
+    );
+    serverLog(
+      [
+        `ERROR AI run precondition failed ${requestLogBase}`,
+        "reason=context_overflow",
+        `estimatedPromptTokens=${initialPromptTokens}`,
+        `maxInputTokens=${budgetConfig.maxInputTokens}`,
+      ].join(" "),
+    );
+    return buildDoneEvent(requestId, {
+      type: "done",
+      content,
+      status: "failed",
+      stopReason: "context_overflow",
+      contextBudget: {
+        contextWindowTokens: budgetConfig.contextWindowTokens,
+        maxInputTokens: budgetConfig.maxInputTokens,
+        autoCompactTokenLimit: budgetConfig.autoCompactTokenLimit,
+        estimatedPromptTokens: initialPromptTokens,
+        source: resolvedBudget.contextWindowSource,
+      },
+    });
+  }
   let turnSnapshotCreated = false;
   let fullContent = "";
   const persistentToolCalls: ToolCallTrace[] = [];
@@ -1003,6 +1085,12 @@ export async function streamFromLLM(
   const emitToken = (content: string) => {
     if (!content) return;
     appendPersistentText(content);
+    pushEvent(requestId, { type: "token", content });
+  };
+  const emitNotice = (content: string, tone: Extract<MessageBlock, { type: "notice" }>["tone"] = "info") => {
+    if (!content) return;
+    fullContent += content;
+    persistentMessageBlocks.push({ type: "notice", content, tone });
     pushEvent(requestId, { type: "token", content });
   };
   const recordPersistentToolCall = (id: string, name: string, input: unknown) => {
@@ -1023,8 +1111,7 @@ export async function streamFromLLM(
   };
   const compactionNotice = conversationContext.compacted ? CONTEXT_COMPACTION_NOTICE : "";
   if (compactionNotice) {
-    fullContent += compactionNotice;
-    emitToken(compactionNotice);
+    emitNotice(compactionNotice, "info");
   }
 
   const llm = createLangChainChatModel(primaryConfig, effectiveApiKey, settings, {
@@ -1057,6 +1144,8 @@ export async function streamFromLLM(
   let browserResolveAttempted = false;
   let interruptedByUser = false;
   let breakerInfo: ReturnType<typeof circuitBreakerInfoFromDecision> | undefined;
+  let contextOverflowContent: string | undefined;
+  let contextOverflowPromptTokens = initialPromptTokens;
   const circuitBreaker = settings.circuitBreakerEnabled ? createAgentLoopCircuitBreaker(settings) : null;
   let currentStep = 0;
 
@@ -1065,6 +1154,28 @@ export async function streamFromLLM(
       currentStep = step + 1;
       if (isRunInterrupted(requestId)) {
         interruptedByUser = true;
+        break;
+      }
+      const stepPromptTokens = estimateRuntimePromptTokens(lcMessages);
+      if (stepPromptTokens > budgetConfig.maxInputTokens) {
+        contextOverflowPromptTokens = stepPromptTokens;
+        contextOverflowContent = buildContextOverflowMessage(
+          stepPromptTokens,
+          budgetConfig,
+          "完整历史或工具输出已经超过下一次模型调用的可用输入窗口",
+        );
+        serverLog(
+          [
+            `ERROR AI run stopped ${requestLogBase}`,
+            "reason=context_overflow",
+            `step=${currentStep}`,
+            `estimatedPromptTokens=${stepPromptTokens}`,
+            `maxInputTokens=${budgetConfig.maxInputTokens}`,
+          ].join(" "),
+        );
+        const token = `${fullContent.trim() ? "\n\n" : ""}${contextOverflowContent}`;
+        fullContent += token;
+        emitToken(token);
         break;
       }
 
@@ -1274,7 +1385,7 @@ export async function streamFromLLM(
           elapsedSeconds: elapsed,
         });
         lcMessages.push(new ToolMessage({
-          content: truncateTextToTokenBudget(boundedOutput.modelOutput, Math.max(128, Math.floor(budgetConfig.maxInputTokens * 0.08))),
+          content: boundedOutput.modelOutput,
           tool_call_id: tc.id,
         }));
 
@@ -1390,23 +1501,27 @@ export async function streamFromLLM(
       : fullContent || EMPTY_RESPONSE_FALLBACK_MESSAGE,
     status: interruptedByUser
       ? "interrupted"
-      : breakerInfo
-        ? "needs_input"
-        : "completed",
+      : contextOverflowContent
+        ? "failed"
+        : breakerInfo
+          ? "needs_input"
+          : "completed",
     usage: { promptTokens, completionTokens, totalTokens, cachedTokens },
     attachments: assistantAttachments.length ? assistantAttachments : undefined,
     toolCalls: persistentToolCalls.length ? persistentToolCalls : undefined,
     messageBlocks: persistentMessageBlocks.length ? persistentMessageBlocks : undefined,
     ...(interruptedByUser
       ? { stopReason: "user_interrupt" as const }
-      : breakerInfo
-        ? { stopReason: "circuit_breaker" as const, circuitBreaker: breakerInfo }
-        : { stopReason: "completed" as const }),
+      : contextOverflowContent
+        ? { stopReason: "context_overflow" as const }
+        : breakerInfo
+          ? { stopReason: "circuit_breaker" as const, circuitBreaker: breakerInfo }
+          : { stopReason: "completed" as const }),
     contextBudget: {
       contextWindowTokens: budgetConfig.contextWindowTokens,
       maxInputTokens: budgetConfig.maxInputTokens,
       autoCompactTokenLimit: budgetConfig.autoCompactTokenLimit,
-      estimatedPromptTokens: conversationContext.estimatedPromptTokens,
+      estimatedPromptTokens: contextOverflowContent ? contextOverflowPromptTokens : conversationContext.estimatedPromptTokens,
       source: resolvedBudget.contextWindowSource,
     },
   };

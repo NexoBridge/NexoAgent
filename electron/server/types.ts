@@ -7,6 +7,7 @@ export type TurnStopReason =
   | "user_interrupt"
   | "circuit_breaker"
   | "precondition_failed"
+  | "context_overflow"
   | "runtime_error";
 
 export type StreamEvent =

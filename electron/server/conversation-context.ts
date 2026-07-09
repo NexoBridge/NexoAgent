@@ -1,10 +1,9 @@
 import type { AgentSettings, ChatMessage } from "../../src/shared/types";
 import type { Session } from "./types";
 import {
+  estimateMessageTokens,
   estimateMessagesTokens,
   estimateSectionTokens,
-  estimateTokens,
-  truncateTextToTokenBudget,
 } from "./token-budget";
 import type { computePromptBudget } from "./token-budget";
 
@@ -19,11 +18,8 @@ function normalizeNonNegativeInteger(value: number | undefined, max: number) {
   return Math.max(0, Math.min(max, normalized));
 }
 
-function trimForPrompt(text: string, maxChars: number) {
-  const clean = text.replace(/\s+\n/g, "\n").trim();
-  if (clean.length <= maxChars) return clean;
-  const half = Math.floor((maxChars - 32) / 2);
-  return `${clean.slice(0, half)}\n...[truncated]...\n${clean.slice(-half)}`;
+function normalizeForPrompt(text: string) {
+  return text.replace(/\s+\n/g, "\n").trim();
 }
 
 function formatMessageForCompaction(message: ChatMessage, index: number) {
@@ -31,32 +27,16 @@ function formatMessageForCompaction(message: ChatMessage, index: number) {
   const attachmentText = message.attachments?.length
     ? `\nAttachments: ${message.attachments.map((attachment) => `${attachment.name} (${attachment.type}, ${attachment.url})`).join("; ")}`
     : "";
-  return `#${index + 1} ${role} at ${message.createdAt}\n${trimForPrompt(message.content, 2400)}${attachmentText}`;
+  return `#${index + 1} ${role} at ${message.createdAt}\n${normalizeForPrompt(message.content)}${attachmentText}`;
 }
 
-export function buildCompactionTranscript(messages: ChatMessage[], maxChars = 28_000) {
-  const entries = messages.map(formatMessageForCompaction);
-  const selected: string[] = [];
-  let used = 0;
-
-  for (let index = entries.length - 1; index >= 0; index--) {
-    const entry = entries[index];
-    const nextUsed = used + entry.length + 2;
-    if (selected.length > 0 && nextUsed > maxChars) break;
-    selected.unshift(entry);
-    used = nextUsed;
-  }
-
-  if (selected.length < entries.length) {
-    selected.unshift(`[${entries.length - selected.length} earlier message(s) were omitted before compaction because the transcript was very large.]`);
-  }
-
-  return selected.join("\n\n");
+export function buildCompactionTranscript(messages: ChatMessage[]) {
+  return messages.map(formatMessageForCompaction).join("\n\n");
 }
 
-export function formatCurrentSessionContextForRecall(session: Session, maxChars = 28_000) {
+export function formatCurrentSessionContextForRecall(session: Session) {
   const conversationMessages = session.messages.filter((message) => message.role !== "system");
-  const transcript = buildCompactionTranscript(conversationMessages, maxChars);
+  const transcript = buildCompactionTranscript(conversationMessages);
   return [
     session.threadSummary?.trim()
       ? `Compressed earlier current-session context:\n${session.threadSummary.trim()}`
@@ -68,10 +48,10 @@ export function formatCurrentSessionContextForRecall(session: Session, maxChars 
 }
 
 function fallbackCompactMessages(messages: ChatMessage[]) {
-  const transcript = buildCompactionTranscript(messages, 7000);
+  const transcript = buildCompactionTranscript(messages);
   return [
-    "Automatic summary of earlier conversation:",
-    trimForPrompt(transcript, 4000),
+    "Automatic context compaction summary could not be generated. Full earlier conversation transcript follows:",
+    transcript,
   ].join("\n");
 }
 
@@ -111,12 +91,14 @@ export async function buildBudgetAwareConversationContext(
   let recentMessages = conversationMessages.slice(summarizedMessageCount);
   let compacted = false;
   let passes = 0;
+  const initialSummarizedMessageCount = summarizedMessageCount;
 
   const estimateBase = () => baseSections.reduce((sum, section) => sum + estimateSectionTokens(section.label, section.content), 0);
   const estimateSummary = () => estimateSectionTokens("Earlier conversation summary", threadSummary);
   const estimateRecent = () => estimateMessagesTokens(recentMessages);
   const estimateTotal = () => estimateBase() + estimateSummary() + estimateRecent();
   const shouldCompactByTokens = () => estimateTotal() >= budgetConfig.autoCompactTokenLimit;
+  const originalEstimatedPromptTokens = estimateTotal();
 
   while (
     settings.enableContextCompaction
@@ -142,14 +124,6 @@ export async function buildBudgetAwareConversationContext(
       summarizedMessageCount += 1;
       compacted = true;
     }
-
-    if (estimateTokens(threadSummary) > Math.max(512, Math.floor(budgetConfig.maxInputTokens * 0.35))) {
-      threadSummary = truncateTextToTokenBudget(threadSummary, Math.max(512, Math.floor(budgetConfig.maxInputTokens * 0.3)));
-    }
-  }
-
-  if (threadSummary && estimateTotal() > budgetConfig.maxInputTokens) {
-    threadSummary = truncateTextToTokenBudget(threadSummary, Math.max(384, Math.floor(budgetConfig.compactionTargetTokens * 0.35)));
   }
 
   session.threadSummary = threadSummary || undefined;
@@ -170,7 +144,18 @@ export async function buildBudgetAwareConversationContext(
   return {
     compactedSummary: threadSummary,
     estimatedPromptTokens: estimateTotal(),
+    originalEstimatedPromptTokens,
     compacted,
+    compactedMessageCount: Math.max(0, summarizedMessageCount - initialSummarizedMessageCount),
+    compactionPasses: passes,
+    summaryMessageCount: summarizedMessageCount,
+    recentRawMessageCount: recentMessages.length,
+    latestRawMessageTokens: conversationMessages.length
+      ? estimateMessageTokens(conversationMessages[conversationMessages.length - 1])
+      : 0,
+    latestRawMessageChars: conversationMessages.length
+      ? conversationMessages[conversationMessages.length - 1].content.length
+      : 0,
     recentRawMessages: recentMessages,
   };
 }

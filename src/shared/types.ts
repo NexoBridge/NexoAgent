@@ -406,6 +406,7 @@ export interface ToolOutputStats {
 
 export type MessageBlock =
   | { type: "text"; content: string }
+  | { type: "notice"; content: string; tone?: "info" | "warning" | "error" }
   | { type: "tool"; id: string };
 
 export interface ChatMessage {

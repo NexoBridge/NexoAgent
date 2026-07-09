@@ -7,7 +7,6 @@ import type { ToolExecutionContext } from "../types";
 import { isRunInterrupted } from "../run-control";
 import { getWorkspaceRoot, resolveWorkspacePath } from "../workspace";
 
-const MAX_OUTPUT_CHARS = 12_000;
 const WINDOWS_UTF8_PREAMBLE = [
   "$__nexoUtf8 = [System.Text.UTF8Encoding]::new($false)",
   "[Console]::InputEncoding = $__nexoUtf8",
@@ -18,9 +17,7 @@ const WINDOWS_UTF8_PREAMBLE = [
 ].join("; ");
 
 function trimOutput(value: string) {
-  const normalized = value.replace(/\r/g, "").trim();
-  if (normalized.length <= MAX_OUTPUT_CHARS) return normalized;
-  return `${normalized.slice(0, MAX_OUTPUT_CHARS)}\n\n[output truncated by Nexo]`;
+  return value.replace(/\r/g, "").trim();
 }
 
 function decodeOutput(chunk: Buffer | string) {

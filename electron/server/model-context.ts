@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import type { AgentSettings, DiscoveredModel, ModelContextBudget, ModelContextSource, ModelProfile } from "../../src/shared/types";
 import { providerConnectionAllowsEmptyApiKey } from "../../src/shared/providers";
 import { MODEL_CONTEXT_CACHE_FILE, DATA_DIR } from "./config";
+import { serverLog } from "./logger";
 import type { ChatCompletionMessage } from "./model-runtime";
 import { getWebSettings } from "./settings";
 
@@ -29,6 +30,7 @@ export interface ResolveModelContextOptions {
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_RESERVED_OUTPUT = 8_192;
 const DEFAULT_TARGET_RATIO = 0.6;
+const OLLAMA_METADATA_LOOKUP_TIMEOUT_MS = 3_000;
 
 const CONTEXT_DICTIONARY: ContextDictionaryEntry[] = [
   { pattern: /\bgpt-5\.4-(mini|nano)\b/i, contextWindowTokens: 400_000, reservedOutputTokens: 32_768, autoCompactTokenLimit: 280_000, compactionTargetRatio: 0.55, detail: "OpenAI GPT-5.4 mini/nano" },
@@ -128,9 +130,110 @@ function defaultCompactionTargetRatio(contextWindowTokens: number) {
   return contextWindowTokens >= 200_000 ? 0.55 : DEFAULT_TARGET_RATIO;
 }
 
+function formatLogValue(value: unknown) {
+  return String(value ?? "").replace(/\s+/g, "_") || "unknown";
+}
+
 function isFallbackDefaultBudget(budget: Partial<ModelContextBudget> | null | undefined) {
   if (!budget) return false;
   return normalizeSource(budget.contextWindowSource) === "default";
+}
+
+function isOllamaApiBase(apiBase: unknown) {
+  if (typeof apiBase !== "string" || !apiBase.trim()) return false;
+  try {
+    const url = new URL(apiBase);
+    return url.port === "11434";
+  } catch {
+    return /:11434(?:\/|$)/.test(apiBase);
+  }
+}
+
+function ollamaApiRoot(apiBase: unknown) {
+  if (typeof apiBase !== "string" || !apiBase.trim()) return "";
+  try {
+    const url = new URL(apiBase);
+    url.pathname = url.pathname.replace(/\/v1\/?$/i, "").replace(/\/+$/, "");
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return apiBase.replace(/\/v1\/?$/i, "").replace(/\/+$/, "");
+  }
+}
+
+function readContextLengthFromModelInfo(modelInfo: unknown) {
+  if (!modelInfo || typeof modelInfo !== "object") return undefined;
+  for (const [key, value] of Object.entries(modelInfo as Record<string, unknown>)) {
+    const normalizedKey = key.toLowerCase();
+    if (
+      normalizedKey === "context_length"
+      || normalizedKey.endsWith(".context_length")
+      || normalizedKey.endsWith(".context_length_train")
+      || normalizedKey.endsWith(".max_position_embeddings")
+    ) {
+      const parsed = sanitizePositiveInteger(value);
+      if (parsed) return parsed;
+    }
+  }
+  return undefined;
+}
+
+async function fetchOllamaShow(apiBase: string, model: string) {
+  const root = ollamaApiRoot(apiBase);
+  if (!root) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), OLLAMA_METADATA_LOOKUP_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${root}/api/show`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, verbose: true }),
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    return await response.json() as Record<string, unknown>;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function resolveOllamaModelContextBudget(profile: Partial<ModelProfile> | null, settings: Partial<AgentSettings> | null, model: string) {
+  const apiBase = profile?.apiBase ?? settings?.apiBase;
+  if (!model || typeof apiBase !== "string" || !isOllamaApiBase(apiBase)) return null;
+  const root = ollamaApiRoot(apiBase);
+  serverLog(`INFO Ollama context lookup start model=${formatLogValue(model)} apiRoot=${formatLogValue(root)}`);
+  const show = await fetchOllamaShow(apiBase, model);
+  if (!show) {
+    serverLog(`WARN Ollama context lookup unavailable model=${formatLogValue(model)} apiRoot=${formatLogValue(root)}`);
+    return null;
+  }
+
+  const modelContext = readContextLengthFromModelInfo(show.model_info);
+  const contextWindowTokens = modelContext;
+  if (!contextWindowTokens) {
+    const modelInfoKeys = show.model_info && typeof show.model_info === "object"
+      ? Object.keys(show.model_info as Record<string, unknown>).slice(0, 12).join(",")
+      : "missing";
+    serverLog(`WARN Ollama context lookup missing_context_length model=${formatLogValue(model)} modelInfoKeys=${formatLogValue(modelInfoKeys)}`);
+    return null;
+  }
+  const reservedOutputTokens = defaultReservedOutputTokens(contextWindowTokens);
+  serverLog(`INFO Ollama context lookup resolved model=${formatLogValue(model)} contextWindow=${contextWindowTokens} apiRoot=${formatLogValue(root)}`);
+  return mergeBudgets({
+    contextWindowTokens,
+    reservedOutputTokens,
+    autoCompactTokenLimit: defaultAutoCompactTokenLimit(contextWindowTokens),
+    compactionTargetRatio: defaultCompactionTargetRatio(contextWindowTokens),
+    contextWindowSource: "provider",
+    contextWindowSourceDetail: [
+      "ollama-/api/show",
+      modelContext ? `model_context=${modelContext}` : "",
+    ].filter(Boolean).join(" "),
+    contextWindowResolvedAt: nowIso(),
+  });
 }
 
 export function isExplicitProfileContextBudget(profile: Partial<ModelProfile> | null | undefined) {
@@ -142,6 +245,16 @@ export function isExplicitProfileContextBudget(profile: Partial<ModelProfile> | 
 
 function cacheKey(providerId: string | undefined, model: string) {
   return `${providerId || "default"}::${model.trim().toLowerCase()}`;
+}
+
+function isOllamaLookupBudget(budget: Partial<ModelContextBudget> | null | undefined) {
+  return typeof budget?.contextWindowSourceDetail === "string"
+    && budget.contextWindowSourceDetail.startsWith("ollama-/api/show");
+}
+
+function isDeprecatedOllamaDefaultBudget(budget: Partial<ModelContextBudget> | null | undefined) {
+  return typeof budget?.contextWindowSourceDetail === "string"
+    && budget.contextWindowSourceDetail.includes("Ollama OpenAI-compatible default context");
 }
 
 async function readContextCache() {
@@ -309,11 +422,27 @@ export async function resolveStoredModelContextBudget(options: ResolveModelConte
 
   if (model) {
     const cached = await getStoredModelContextCacheEntry(providerId, model);
-    if (cached?.contextWindowTokens) {
+    if (isOllamaLookupBudget(cached) && cached?.contextWindowTokens) {
+      serverLog(`INFO Ollama context cache hit model=${formatLogValue(model)} contextWindow=${cached.contextWindowTokens}`);
+      return mergeBudgets(cached, {
+        contextWindowSource: cached.contextWindowSource === "lookup" ? "cache" : cached.contextWindowSource ?? "cache",
+        contextWindowSourceDetail: cached.contextWindowSourceDetail || "persisted-ollama-model-context-cache",
+      });
+    }
+
+    const ollamaBudget = await resolveOllamaModelContextBudget(profile, settings, model);
+    if (ollamaBudget?.contextWindowTokens) {
+      return ollamaBudget;
+    }
+
+    if (cached?.contextWindowTokens && !isDeprecatedOllamaDefaultBudget(cached)) {
       return mergeBudgets(cached, {
         contextWindowSource: cached.contextWindowSource === "lookup" ? "cache" : cached.contextWindowSource ?? "cache",
         contextWindowSourceDetail: cached.contextWindowSourceDetail || "persisted-model-context-cache",
       });
+    }
+    if (isDeprecatedOllamaDefaultBudget(cached)) {
+      serverLog(`INFO Ollama deprecated default context cache ignored model=${formatLogValue(model)} cachedWindow=${cached?.contextWindowTokens ?? "unknown"}`);
     }
 
     const dictionary = findDictionaryBudget(model);

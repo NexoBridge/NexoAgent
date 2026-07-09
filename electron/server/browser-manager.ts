@@ -54,11 +54,9 @@ const DEFAULT_DOM_PROBE_TIMEOUT_MS = 900;
 const DEFAULT_DOM_SNAPSHOT_TIMEOUT_MS = 2_500;
 const DEFAULT_DOM_METADATA_TIMEOUT_MS = 650;
 const DEFAULT_SNAPSHOT_TIMEOUT_MS = 8_000;
-const MAX_SCRIPT_RESULT_CHARS = 12_000;
 const DEFAULT_SCRIPT_CACHE_TTL_MS = 30 * 60 * 1000;
 const MAX_SCRIPT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_SCRIPT_CACHE_ENTRIES = 100;
-const MAX_SCRIPT_CACHE_VALUE_CHARS = 120_000;
 
 type ScriptCacheInternalEntry = BrowserScriptCacheEntry & {
   expiresAtMs: number;
@@ -93,7 +91,6 @@ type ScriptCacheReplayOptions = {
   cacheKey?: unknown;
   ttlMs?: unknown;
   metadata?: unknown;
-  responseBodyLimit?: unknown;
   deleteAfter?: unknown;
   deleteOnSuccess?: unknown;
   removeAfterReplay?: unknown;
@@ -1260,16 +1257,6 @@ function frameUrl(frame: BrowserFrameTreeNode["frame"]): string {
   return frame.url ? `${frame.url}${frame.urlFragment ?? ""}` : "unknown";
 }
 
-function truncateReadableText(value: string, maxChars = MAX_SCRIPT_RESULT_CHARS) {
-  if (value.length <= maxChars) {
-    return { text: value, truncated: false };
-  }
-  return {
-    text: `${value.slice(0, maxChars)}\n... [truncated by Nexo]`,
-    truncated: true,
-  };
-}
-
 function browserScriptError(error: unknown): BrowserScriptError {
   if (error instanceof Error) {
     return {
@@ -1307,15 +1294,13 @@ function browserScriptResultValue(value: unknown): BrowserScriptExecutionResult[
     const rendered = inspect(value, {
       depth: 4,
       breakLength: 100,
-      maxArrayLength: 50,
-      maxStringLength: 4_000,
+      maxArrayLength: Infinity,
+      maxStringLength: Infinity,
     });
-    const { text, truncated } = truncateReadableText(rendered);
     return {
       format: "inspect",
       type,
-      text,
-      truncated: truncated || undefined,
+      text: rendered,
     };
   }
 }
@@ -1324,12 +1309,6 @@ function normalizeScriptCacheTtlMs(value: unknown, fallback = DEFAULT_SCRIPT_CAC
   const raw = Number(value ?? fallback);
   if (!Number.isFinite(raw) || raw <= 0) return fallback;
   return Math.min(MAX_SCRIPT_CACHE_TTL_MS, Math.max(1, Math.floor(raw)));
-}
-
-function normalizePositiveInteger(value: unknown, fallback: number, max: number) {
-  const raw = Number(value ?? fallback);
-  if (!Number.isFinite(raw) || raw <= 0) return fallback;
-  return Math.min(max, Math.max(1, Math.floor(raw)));
 }
 
 function normalizeScriptCacheKey(value: unknown) {
@@ -1375,39 +1354,25 @@ function serializeScriptCacheValue(value: unknown) {
   try {
     const json = JSON.stringify(value);
     const size = Buffer.byteLength(json ?? "", "utf8");
-    if (json.length <= MAX_SCRIPT_CACHE_VALUE_CHARS) {
-      return {
-        value: JSON.parse(json) as unknown,
-        size,
-        truncated: false,
-      };
-    }
-    const { text, truncated } = truncateReadableText(json, MAX_SCRIPT_CACHE_VALUE_CHARS);
     return {
-      value: {
-        format: "json-text",
-        text,
-        truncated,
-      },
+      value: JSON.parse(json) as unknown,
       size,
-      truncated,
+      truncated: false,
     };
   } catch {
     const rendered = inspect(value, {
       depth: 5,
       breakLength: 100,
-      maxArrayLength: 80,
-      maxStringLength: 8_000,
+      maxArrayLength: Infinity,
+      maxStringLength: Infinity,
     });
-    const { text, truncated } = truncateReadableText(rendered, MAX_SCRIPT_CACHE_VALUE_CHARS);
     return {
       value: {
         format: "inspect",
-        text,
-        truncated,
+        text: rendered,
       },
-      size: Buffer.byteLength(text, "utf8"),
-      truncated,
+      size: Buffer.byteLength(rendered, "utf8"),
+      truncated: false,
     };
   }
 }
@@ -1820,8 +1785,6 @@ export class BrowserManager {
 
     const response = await fetch(url, init);
     const responseText = await response.text();
-    const bodyLimit = normalizePositiveInteger(options.responseBodyLimit, MAX_SCRIPT_RESULT_CHARS, MAX_SCRIPT_CACHE_VALUE_CHARS);
-    const { text, truncated } = truncateReadableText(responseText, bodyLimit);
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;
@@ -1832,8 +1795,7 @@ export class BrowserManager {
       statusText: response.statusText,
       url: response.url,
       headers: responseHeaders,
-      body: text,
-      bodyTruncated: truncated || undefined,
+      body: responseText,
       replayedRequest: {
         method,
         url,

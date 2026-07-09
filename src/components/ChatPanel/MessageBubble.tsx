@@ -72,6 +72,24 @@ const MarkdownText: React.FC<{ content: string; streaming?: boolean; colors: The
   );
 };
 
+const NoticeBlock: React.FC<{ content: string; tone?: "info" | "warning" | "error"; colors: ThemeColors }> = ({ content, tone = "info", colors }) => {
+  const accent = tone === "error" ? "#ef4444" : tone === "warning" ? "#f59e0b" : "#3b82f6";
+  return (
+    <div
+      style={{
+        borderLeft: `3px solid ${accent}`,
+        background: colors.bgTertiary,
+        borderRadius: 8,
+        padding: "8px 10px",
+        margin: "6px 0 10px",
+        color: colors.textSecondary,
+      }}
+    >
+      <MarkdownText content={content} colors={colors} />
+    </div>
+  );
+};
+
 function extractUploadArtifacts(content: string) {
   const matches = [...content.matchAll(/(?:^|\s)(\/uploads\/[^\s)]+?\.(?:png|jpe?g|webp|gif|mp3|wav|m4a|ogg|webm))/gi)];
   const seen = new Set<string>();
@@ -294,6 +312,16 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
                       key={`text-${index}`}
                       content={stripDsmlArtifacts(block.content)}
                       streaming={streaming && isLast}
+                      colors={colors}
+                    />
+                  );
+                }
+                if (block.type === "notice") {
+                  return (
+                    <NoticeBlock
+                      key={`notice-${index}`}
+                      content={stripDsmlArtifacts(block.content)}
+                      tone={block.tone}
                       colors={colors}
                     />
                   );
