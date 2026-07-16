@@ -82,6 +82,20 @@ const MANAGED_SIDEcar_FILE = ".nexo-skill.json";
 const SKILLSHUB_META_FILE = ".skillshub-meta.json";
 const MAX_SKILL_CHARS = 8_000;
 const MAX_TOTAL_SKILL_CHARS = 24_000;
+const MAX_SKILL_INDEX_CHARS = 6_000;
+const MAX_DETAILED_SKILLS_PER_REQUEST = 4;
+const MIN_DETAILED_SKILL_MATCH_SCORE = 3;
+const SKILL_ROUTING_QUERY_MAX_CHARS = 4_000;
+const SKILL_ROUTING_STOP_WORDS = new Set([
+  "skill",
+  "skills",
+  "user",
+  "message",
+  "request",
+  "current",
+  "please",
+  "pls",
+]);
 
 let bundledSkillsCache: StoredSkill[] | null = null;
 
@@ -495,7 +509,12 @@ function skillPriority(skill: StoredSkill) {
   return 3;
 }
 
-function scoreSkillMatch(skill: StoredSkill, query: string, tokens: string[]) {
+function scoreSkillMatch(
+  skill: StoredSkill,
+  query: string,
+  tokens: string[],
+  options: { includeStatusBoosts?: boolean } = {},
+) {
   const name = skill.name.toLowerCase();
   const key = skill.key.toLowerCase();
   const category = skill.category.toLowerCase();
@@ -523,8 +542,10 @@ function scoreSkillMatch(skill: StoredSkill, query: string, tokens: string[]) {
     if (author.includes(token) || marketplace.includes(token)) score += 3;
   }
 
-  if (skill.enabled) score += 1;
-  if (skill.managed) score += 1;
+  if (options.includeStatusBoosts !== false) {
+    if (skill.enabled) score += 1;
+    if (skill.managed) score += 1;
+  }
   return score;
 }
 
@@ -743,17 +764,165 @@ function trimSkillInstruction(content: string, remaining: number) {
   return { output: slice, consumed: remaining };
 }
 
-export async function getEnabledSkillInstructions() {
-  const skills = await loadAllSkills();
-  let remaining = MAX_TOTAL_SKILL_CHARS;
-  const sections: string[] = [];
+interface SkillRoutingHint {
+  matches: (skill: StoredSkill) => boolean;
+  terms: string[];
+  score?: number;
+}
 
-  for (const skill of skills.filter((item) => item.enabled && item.instruction.trim())) {
-    if (remaining <= 0) break;
-    const limit = Math.min(MAX_SKILL_CHARS, remaining);
+const SKILL_ROUTING_HINTS: SkillRoutingHint[] = [
+  {
+    matches: (skill) => skill.key === "coding",
+    terms: [
+      "code",
+      "coding",
+      "implement",
+      "fix",
+      "bug",
+      "typescript",
+      "javascript",
+      "react",
+      "vue",
+      "electron",
+      "build",
+      "test",
+      "代码",
+      "编码",
+      "实现",
+      "修复",
+      "修改",
+      "组件",
+      "接口",
+      "项目",
+      "编译",
+      "报错",
+      "重构",
+      "开发",
+    ],
+  },
+  {
+    matches: (skill) => skill.key === "research",
+    terms: ["research", "search", "verify", "latest", "source", "资料", "调研", "搜索", "查询", "验证", "最新", "来源"],
+  },
+  {
+    matches: (skill) => skill.key === "workflow",
+    terms: ["workflow", "todo", "plan", "steps", "multi-step", "计划", "步骤", "流程", "任务", "多步", "拆解"],
+  },
+  {
+    matches: (skill) => skill.key === "skill-creator",
+    terms: ["create skill", "new skill", "skill creator", "创建skill", "创建技能", "新技能", "写skill"],
+  },
+  {
+    matches: (skill) => skill.key === "skill-finder",
+    terms: ["find skill", "install skill", "skill marketplace", "查找skill", "安装skill", "技能市场", "找技能"],
+  },
+  {
+    matches: (skill) => /\b(frontend|front-end|web|ui|ux|design)\b/.test(`${skill.key} ${skill.name}`.toLowerCase()),
+    terms: ["frontend", "front-end", "web ui", "ui", "ux", "page", "component", "react", "vue", "css", "html", "tailwind", "前端", "界面", "页面", "组件", "样式", "设计", "美化"],
+  },
+  {
+    matches: (skill) => skill.key.includes("openspec") || skill.name.toLowerCase().includes("openspec"),
+    terms: ["openspec", "open spec", "spec", "proposal", "archive", "apply", "需求", "规范", "提案", "归档", "变更"],
+  },
+  {
+    matches: (skill) => /\b(stock|fundamental|yahoo)\b/.test(`${skill.key} ${skill.name}`.toLowerCase()),
+    terms: ["stock", "fundamental", "finance", "market", "股票", "基本面", "行情", "财报", "估值", "金融"],
+  },
+  {
+    matches: (skill) => skill.key.includes("markitdown") || skill.name.toLowerCase().includes("markitdown"),
+    terms: ["markitdown", "markdown", "convert", "转换", "文档转换", "转markdown"],
+  },
+];
+
+function normalizeSkillRoutingQuery(query?: string) {
+  return (query ?? "")
+    .replace(/\bcurrent user message:\b/gi, " ")
+    .replace(/\bcurrent-session context[^:]*:/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .slice(0, SKILL_ROUTING_QUERY_MAX_CHARS);
+}
+
+function scoreSkillRoutingHints(skill: StoredSkill, query: string) {
+  let score = 0;
+
+  for (const hint of SKILL_ROUTING_HINTS) {
+    if (!hint.matches(skill)) continue;
+    const matchedTerms = hint.terms.filter((term) => query.includes(term.toLowerCase()));
+    if (matchedTerms.length > 0) {
+      score += (hint.score ?? 12) + Math.min(8, matchedTerms.length * 2);
+    }
+  }
+
+  return score;
+}
+
+function tokenizeSkillRoutingQuery(query: string) {
+  return tokenizeSearch(query)
+    .filter((token) => !SKILL_ROUTING_STOP_WORDS.has(token))
+    .filter((token) => !/^[a-z0-9]{1,2}$/.test(token));
+}
+
+function selectDetailedSkills(skills: StoredSkill[], query?: string) {
+  const normalizedQuery = normalizeSkillRoutingQuery(query);
+  if (!normalizedQuery) return [];
+
+  const tokens = tokenizeSkillRoutingQuery(normalizedQuery);
+  return skills
+    .map((skill) => ({
+      skill,
+      score:
+        scoreSkillMatch(skill, normalizedQuery, tokens, { includeStatusBoosts: false })
+        + scoreSkillRoutingHints(skill, normalizedQuery),
+    }))
+    .filter((entry) => entry.score >= MIN_DETAILED_SKILL_MATCH_SCORE)
+    .sort((left, right) =>
+      right.score - left.score
+      || skillPriority(left.skill) - skillPriority(right.skill)
+      || left.skill.name.localeCompare(right.skill.name),
+    )
+    .slice(0, MAX_DETAILED_SKILLS_PER_REQUEST)
+    .map((entry) => entry.skill);
+}
+
+function formatEnabledSkillIndex(skills: StoredSkill[]) {
+  const lines = [
+    `Enabled skills index (${skills.length} total). Full instructions are loaded on demand for skills matching the current request:`,
+  ];
+
+  for (const skill of skills) {
+    const labels = [skill.key, skill.source, skill.category].filter(Boolean).join("; ");
+    lines.push(`- ${skill.name} (${labels}): ${summarizeText(skill.description, 180)}`);
+  }
+
+  const index = lines.join("\n");
+  if (index.length <= MAX_SKILL_INDEX_CHARS) return index;
+  return `${index.slice(0, MAX_SKILL_INDEX_CHARS - 31).trim()}\n[skill index trimmed by Nexo]`;
+}
+
+export async function getEnabledSkillInstructions(skillQuery?: string) {
+  const skills = await loadAllSkills();
+  const enabledSkills = skills.filter((item) => item.enabled && item.instruction.trim());
+  if (enabledSkills.length === 0) return "";
+
+  const index = formatEnabledSkillIndex(enabledSkills);
+  const selectedSkills = selectDetailedSkills(enabledSkills, skillQuery);
+  const selectedSummary = selectedSkills.length > 0
+    ? `Detailed skill instructions selected for this request (${selectedSkills.map((skill) => skill.key).join(", ")}):`
+    : "No detailed skill instructions matched this request. Use the enabled skills index only.";
+  let detailRemaining = Math.max(0, MAX_TOTAL_SKILL_CHARS - index.length - selectedSummary.length - 4);
+  const sections: string[] = [index, selectedSummary];
+
+  for (const skill of selectedSkills) {
+    if (detailRemaining <= 0) {
+      break;
+    }
+
+    const limit = Math.min(MAX_SKILL_CHARS, detailRemaining);
     const { output, consumed } = trimSkillInstruction(skill.instruction, limit);
-    remaining -= consumed;
-    sections.push(`### ${skill.name}\n${output}`);
+    detailRemaining -= consumed;
+    sections.push(`### ${skill.name} [${skill.key}]\n${output}`);
   }
 
   return sections.join("\n\n");

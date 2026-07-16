@@ -841,7 +841,18 @@ export async function streamFromLLM(
     model,
   );
   const capabilitySummary = await getEnabledModelCapabilitySummary();
-  const skillInstructions = await getEnabledSkillInstructions();
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const currentSessionContext = formatCurrentSessionContextForRecall(session);
+  const currentSessionMemoryQuery = [
+    "Current user message:",
+    lastUserMsg,
+    "Current-session context, authoritative for resolving omitted references and current targets:",
+    currentSessionContext,
+  ].filter((part) => part.trim()).join("\n\n");
+  const skillRoutingQuery = [lastUserMsg, currentSessionContext]
+    .filter((part) => part.trim())
+    .join("\n\n");
+  const skillInstructions = await getEnabledSkillInstructions(skillRoutingQuery || lastUserMsg);
   const enabledToolDefs = withSettingsAwareToolDefs(await getAllEnabledToolDefs(), settings);
   const resolvedBudget = await resolveAndPersistModelContextBudget({
     providerId: primaryConfig.providerId,
@@ -878,14 +889,6 @@ export async function streamFromLLM(
     ].join(" "),
   );
 
-  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  const currentSessionContext = formatCurrentSessionContextForRecall(session);
-  const currentSessionMemoryQuery = [
-    "Current user message:",
-    lastUserMsg,
-    "Current-session context, authoritative for resolving omitted references and current targets:",
-    currentSessionContext,
-  ].filter((part) => part.trim()).join("\n\n");
   const memoryEmbeddingSettings = await resolveMemoryEmbeddingSettings({
     providerId: primaryConfig.providerId,
     providerName: settings.providerName,
@@ -935,7 +938,7 @@ export async function streamFromLLM(
 
   const systemPrompt = [
     "You are Nexo Agent, a helpful AI assistant.",
-    `???????${getRuntimeEnvironmentLabel()}`,
+    `当前运行环境：${getRuntimeEnvironmentLabel()}`,
     "Answer in the user's language. Be concise and action-oriented.",
     `Planning mode: ${settings.planningMode}.`,
     "If a tool loop starts repeating the same visible response without producing fresh progress, stop calling tools and give the best final answer from the current results.",
