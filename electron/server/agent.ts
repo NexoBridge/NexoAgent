@@ -219,6 +219,27 @@ function formatUsageForLog(usage: ModelUsageSnapshot) {
   ].join(" ");
 }
 
+function getRuntimeEnvironmentLabel() {
+  switch (process.platform) {
+    case "win32":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    case "darwin":
+      return "macOS";
+    case "freebsd":
+      return "FreeBSD";
+    case "openbsd":
+      return "OpenBSD";
+    case "aix":
+      return "AIX";
+    case "sunos":
+      return "Solaris";
+    default:
+      return process.platform || "Unknown";
+  }
+}
+
 function estimateRuntimePromptTokens(messages: BaseMessage[]) {
   return messages.reduce((total, message) => {
     const getType = (message as { _getType?: () => string })._getType;
@@ -914,6 +935,7 @@ export async function streamFromLLM(
 
   const systemPrompt = [
     "You are Nexo Agent, a helpful AI assistant.",
+    `???????${getRuntimeEnvironmentLabel()}`,
     "Answer in the user's language. Be concise and action-oriented.",
     `Planning mode: ${settings.planningMode}.`,
     "If a tool loop starts repeating the same visible response without producing fresh progress, stop calling tools and give the best final answer from the current results.",
