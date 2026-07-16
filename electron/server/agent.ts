@@ -220,7 +220,24 @@ function formatUsageForLog(usage: ModelUsageSnapshot) {
 }
 
 function getRuntimeEnvironmentLabel() {
-  return process.platform || "Unknown";
+  switch (process.platform) {
+    case "win32":
+      return "Windows";
+    case "linux":
+      return "Linux";
+    case "darwin":
+      return "macOS";
+    case "freebsd":
+      return "FreeBSD";
+    case "openbsd":
+      return "OpenBSD";
+    case "aix":
+      return "AIX";
+    case "sunos":
+      return "Solaris";
+    default:
+      return process.platform || "Unknown";
+  }
 }
 
 function estimateRuntimePromptTokens(messages: BaseMessage[]) {
