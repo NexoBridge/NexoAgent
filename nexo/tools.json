@@ -45,7 +45,7 @@
           },
           "capability": {
             "type": "string",
-            "description": "Optional capability: orchestration, chat, vision, image_generation, image_editing, speech_to_text, text_to_speech, or embedding"
+            "description": "Optional capability: orchestration, chat, vision, image_generation, image_editing, speech_to_text, text_to_speech, or embedding. For image_generation, include images when using source/reference images for an edit-style generation."
           },
           "prompt": {
             "type": "string",
@@ -68,7 +68,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Optional image upload paths, URLs, or data URLs for capability=vision or capability=image_editing"
+            "description": "Optional image upload paths, URLs, or data URLs for capability=vision, capability=image_editing, or capability=image_generation when using source/reference images"
           },
           "audio": {
             "type": "string",

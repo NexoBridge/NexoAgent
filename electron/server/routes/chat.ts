@@ -103,6 +103,7 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
             usage: doneEvent.usage,
             toolCalls: doneEvent.toolCalls,
             messageBlocks: doneEvent.messageBlocks,
+            knowledgeSources: doneEvent.knowledgeSources,
           },
         });
         sessionRef.updatedAt = new Date().toISOString();

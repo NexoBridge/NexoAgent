@@ -70,6 +70,7 @@ export const SKILL_STATE_FILE = path.join(DATA_DIR, "skill-state.json");
 export const MANAGED_SKILLS_DIR = path.join(DATA_DIR, "skills");
 export const MANAGED_CUSTOM_SKILLS_DIR = path.join(MANAGED_SKILLS_DIR, "custom");
 export const MANAGED_MARKETPLACE_SKILLS_DIR = path.join(MANAGED_SKILLS_DIR, "marketplace");
+export const MANAGED_SKILLSHUB_MARKETPLACE_SKILLS_DIR = path.join(MANAGED_MARKETPLACE_SKILLS_DIR, "skillshub");
 export const TASKS_FILE = path.join(DATA_DIR, "tasks.json");
 export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 export const MEMORY_DB_FILE = path.join(DATA_DIR, "memory.sqlite");

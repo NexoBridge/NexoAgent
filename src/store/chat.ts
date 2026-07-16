@@ -6,6 +6,7 @@ import type {
   Attachment as ChatAttachment,
   ChatMessage,
   ConversationSurface,
+  KnowledgeSourceHit,
   MessageBlock as SharedMessageBlock,
   ModelProfile,
   ToolOutputStats,
@@ -498,6 +499,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
           const responseMessageBlocks = Array.isArray(event.messageBlocks)
             ? (event.messageBlocks as MessageBlock[])
             : undefined;
+          const responseKnowledgeSources = Array.isArray(event.knowledgeSources)
+            ? (event.knowledgeSources as KnowledgeSourceHit[])
+            : undefined;
           set((state) => ({
             streaming: false,
             cancelStream: () => {},
@@ -518,6 +522,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
                       ...(message.meta ?? {}),
                       ...(responseToolCalls ? { toolCalls: responseToolCalls } : {}),
                       ...(responseMessageBlocks ? { messageBlocks: responseMessageBlocks } : {}),
+                      ...(responseKnowledgeSources ? { knowledgeSources: responseKnowledgeSources } : {}),
                     },
                   }
                 : message

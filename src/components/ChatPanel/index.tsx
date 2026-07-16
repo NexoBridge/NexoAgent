@@ -16,9 +16,10 @@ interface ChatPanelProps {
   surface?: ConversationSurface;
   externalFillValue?: { text: string; ts: number } | null;
   onOpenSettings?: () => void;
+  onOpenKnowledgeSource?: (path: string) => void;
 }
 
-export const ChatPanel: React.FC<ChatPanelProps> = ({ surface = "chat", externalFillValue = null, onOpenSettings }) => {
+export const ChatPanel: React.FC<ChatPanelProps> = ({ surface = "chat", externalFillValue = null, onOpenSettings, onOpenKnowledgeSource }) => {
   const {
     streaming,
     sendMessage,
@@ -144,6 +145,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({ surface = "chat", external
           <MessageList
             onSuggest={(text) => setFillValue({ text, ts: Date.now() })}
             hasInput={inputText.length > 0}
+            onOpenKnowledgeSource={onOpenKnowledgeSource}
           />
           <InputBar
             onSend={(content, messageAttachments) => {

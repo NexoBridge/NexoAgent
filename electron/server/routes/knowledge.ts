@@ -2,6 +2,7 @@ import type { Application } from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { KNOWLEDGE_DIR } from "../config";
+import { serverLog } from "../logger";
 import { buildKnowledgeTree, deleteKnowledgeVectors, upsertKnowledgeFile } from "../knowledge";
 import { resolveMemoryEmbeddingSettings } from "../memory-embedding";
 import { resolveDataPath } from "../utils";
@@ -26,11 +27,18 @@ export function registerKnowledgeRoutes(app: Application) {
   app.post("/api/knowledge/file", async (req, res) => {
     const { path: relPath, content } = req.body;
     if (!relPath || typeof relPath !== "string") return res.status(400).json({ error: "path required" });
+    const textContent = typeof content === "string" ? content : "";
     const fullPath = resolveDataPath(KNOWLEDGE_DIR, relPath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, content || "", "utf8");
+    await fs.writeFile(fullPath, textContent, "utf8");
     const embeddingSettings = await resolveMemoryEmbeddingSettings();
-    void upsertKnowledgeFile(relPath, embeddingSettings).catch(() => undefined);
+    void upsertKnowledgeFile(relPath, embeddingSettings)
+      .then((ok) => {
+        if (!ok) serverLog(`WARN Knowledge file saved but not indexed: ${relPath}`);
+      })
+      .catch((error) => {
+        serverLog(`WARN Knowledge file saved but indexing failed for ${relPath}: ${error instanceof Error ? error.message : String(error)}`);
+      });
     res.json({ ok: true });
   });
 

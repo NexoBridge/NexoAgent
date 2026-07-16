@@ -23,9 +23,13 @@ function readStringList(value: unknown) {
   return [];
 }
 
+function readImageInputs(args: Record<string, unknown>) {
+  return readStringList(args.images ?? args.image ?? args.imageUrl ?? args.image_url ?? args.sourceImages ?? args.source_images);
+}
+
 function inferCapability(args: Record<string, unknown>, explicitCapability: ModelCapability | ""): ModelCapability | "" {
   if (explicitCapability) return explicitCapability;
-  if (readStringList(args.images ?? args.image ?? args.imageUrl ?? args.image_url).length > 0) {
+  if (readImageInputs(args).length > 0) {
     return "vision";
   }
   if (getOptionalStringArg(args, "audio") || getOptionalStringArg(args, "audioUrl") || getOptionalStringArg(args, "audio_url")) {
@@ -48,6 +52,9 @@ export async function invokeModel(args: Record<string, unknown>, ctx: ToolExecut
 
   if (capability === "image_generation") {
     const prompt = getStringArg(args, "prompt");
+    if (readImageInputs(args).length > 0) {
+      return editImage({ ...args, prompt }, ctx, { fallbackCapability: "image_generation" });
+    }
     return generateImage({ ...args, prompt }, ctx);
   }
 

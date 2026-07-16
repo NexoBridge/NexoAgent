@@ -1,10 +1,10 @@
-﻿import React, { useMemo } from "react";
+﻿import React, { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Avatar, Button, Popconfirm, Tag, Tooltip } from "antd";
-import { DownloadOutlined, FileOutlined, RobotOutlined, SoundOutlined, UndoOutlined, UserOutlined } from "@ant-design/icons";
-import type { Attachment, ChatMessage } from "../../shared/types";
+import { BookOutlined, DownOutlined, DownloadOutlined, FileOutlined, RightOutlined, RobotOutlined, SoundOutlined, UndoOutlined, UserOutlined } from "@ant-design/icons";
+import type { Attachment, ChatMessage, KnowledgeSourceHit, KnowledgeSourceMethod } from "../../shared/types";
 import { ToolCallItem } from "./ToolCallSteps";
 import type { ToolCallEvent } from "./ToolCallSteps";
 import type { MessageBlock } from "../../store/chat";
@@ -21,6 +21,7 @@ interface Props {
   attachments?: ChatMessage["attachments"];
   undoable?: boolean;
   onUndo?: () => void;
+  onOpenKnowledgeSource?: (path: string) => void;
 }
 
 const STREAM_CURSOR = "|";
@@ -86,6 +87,103 @@ const NoticeBlock: React.FC<{ content: string; tone?: "info" | "warning" | "erro
       }}
     >
       <MarkdownText content={content} colors={colors} />
+    </div>
+  );
+};
+
+function formatKnowledgeMethod(method: KnowledgeSourceMethod, t: ReturnType<typeof useI18n>["t"]) {
+  switch (method) {
+    case "semantic":
+      return t("knowledgeMethodSemantic");
+    case "keyword+semantic":
+      return t("knowledgeMethodBoth");
+    case "keyword":
+    default:
+      return t("knowledgeMethodKeyword");
+  }
+}
+
+function formatKnowledgeChunk(source: KnowledgeSourceHit, t: ReturnType<typeof useI18n>["t"]) {
+  if (!source.chunkCount) return "";
+  return t("knowledgeChunk", {
+    index: (source.chunkIndex ?? 0) + 1,
+    count: source.chunkCount,
+  });
+}
+
+const KnowledgeSourcesBlock: React.FC<{
+  sources: KnowledgeSourceHit[];
+  colors: ThemeColors;
+  t: ReturnType<typeof useI18n>["t"];
+  onOpenSource?: (path: string) => void;
+}> = ({ sources, colors, t, onOpenSource }) => {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        border: `1px solid ${colors.border}`,
+        borderRadius: 8,
+        background: colors.bgTertiary,
+        color: colors.textMuted,
+        fontSize: 12,
+        overflow: "hidden",
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((current) => !current)}
+        style={{
+          width: "100%",
+          minHeight: 34,
+          display: "flex",
+          alignItems: "center",
+          gap: 7,
+          padding: "7px 9px",
+          border: 0,
+          background: "transparent",
+          color: colors.textSecondary,
+          cursor: "pointer",
+          textAlign: "left",
+        }}
+      >
+        {expanded ? <DownOutlined /> : <RightOutlined />}
+        <BookOutlined />
+        <span>{t("knowledgeSources")} ({sources.length})</span>
+      </button>
+      {expanded ? (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 9px 9px 9px" }}>
+          {sources.map((source, index) => {
+            const chunk = formatKnowledgeChunk(source, t);
+            const label = [source.rel, formatKnowledgeMethod(source.method, t), chunk].filter(Boolean).join(" · ");
+            return (
+              <Tooltip key={`${source.rel}-${source.method}-${index}`} title={source.excerpt || source.rel}>
+                <button
+                  type="button"
+                  onClick={() => onOpenSource?.(source.rel)}
+                  style={{
+                    maxWidth: 420,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    minHeight: 24,
+                    padding: "2px 8px",
+                    border: `1px solid ${colors.borderStrong}`,
+                    borderRadius: 6,
+                    background: colors.bgSecondary,
+                    color: colors.textSecondary,
+                    cursor: onOpenSource ? "pointer" : "default",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {label}
+                </button>
+              </Tooltip>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 };
@@ -234,7 +332,7 @@ function getMessageStatusMeta(status: ChatMessage["status"], t: ReturnType<typeo
   }
 }
 
-const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls, blocks, undoable, onUndo }) => {
+const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls, blocks, undoable, onUndo, onOpenKnowledgeSource }) => {
   const { colors } = useTheme();
   const { t } = useI18n();
   const isUser = message.role === "user";
@@ -244,6 +342,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
   const hasBlocks = !isUser && Boolean(effectiveBlocks?.length);
   const apiBase = getApiBase();
   const safeContent = useMemo(() => (!isUser ? stripDsmlArtifacts(message.content) : message.content), [isUser, message.content]);
+  const knowledgeSources = !isUser ? message.meta?.knowledgeSources ?? [] : [];
   const normalizedAttachments = useMemo(() => {
     const explicit = message.attachments ?? [];
     if (isUser) return explicit;
@@ -337,6 +436,9 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
             <MarkdownText content={safeContent} streaming={streaming} colors={colors} />
           )}
         </div>
+        {knowledgeSources.length ? (
+          <KnowledgeSourcesBlock sources={knowledgeSources} colors={colors} t={t} onOpenSource={onOpenKnowledgeSource} />
+        ) : null}
         <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           {statusMeta ? <Tag color={statusMeta.color}>{statusMeta.label}</Tag> : null}
           {!isUser && isUndone && message.meta?.undoneMessage ? (
@@ -379,4 +481,5 @@ export const MessageBubble = React.memo(MessageBubbleComponent, (prev, next) => 
   && prev.blocks === next.blocks
   && prev.attachments === next.attachments
   && prev.undoable === next.undoable
+  && prev.onOpenKnowledgeSource === next.onOpenKnowledgeSource
 ));

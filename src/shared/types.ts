@@ -404,6 +404,16 @@ export interface ToolOutputStats {
   reason?: "inline" | "oversized" | "raw-storage-limit";
 }
 
+export type KnowledgeSourceMethod = "keyword" | "semantic" | "keyword+semantic";
+
+export interface KnowledgeSourceHit {
+  rel: string;
+  method: KnowledgeSourceMethod;
+  chunkIndex?: number;
+  chunkCount?: number;
+  excerpt?: string;
+}
+
 export type MessageBlock =
   | { type: "text"; content: string }
   | { type: "notice"; content: string; tone?: "info" | "warning" | "error" }
@@ -427,6 +437,7 @@ export interface ChatMessage {
     };
     toolCalls?: ToolCallTrace[];
     messageBlocks?: MessageBlock[];
+    knowledgeSources?: KnowledgeSourceHit[];
   };
 }
 

@@ -1,24 +1,25 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { MarkdownTextSplitter, RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 import type { Collection, Metadata } from "chromadb";
+import type { KnowledgeSourceHit, KnowledgeSourceMethod } from "../../src/shared/types";
 import { embedRetrievalText, getChromaCollection, type MemoryEmbeddingSettings } from "../memory";
 import { KNOWLEDGE_DIR } from "./config";
 import { serverLog } from "./logger";
 import { resolveDataPath } from "./utils";
 
 export const MAX_FILE_READ_BYTES = 200_000;
-export const MAX_FILE_WRITE_BYTES = 1_000_000;
 const KNOWLEDGE_COLLECTION = "nexo_knowledge";
 const KNOWLEDGE_INDEX_SCAN_LIMIT = 300;
 const KNOWLEDGE_BACKFILL_FILE_LIMIT = 24;
 const KNOWLEDGE_CHUNK_CHARS = 1800;
 const KNOWLEDGE_CHUNK_OVERLAP = 160;
 const KNOWLEDGE_EXCERPT_CHARS = 3000;
+const TEXT_SPLITTER_SEPARATORS = ["\n\n", "\n", "\u3002", "\uff1b", "\uff0c", " ", ""];
 
 interface KnowledgeFile {
   rel: string;
   fullPath: string;
-  content: string;
   mtimeMs: number;
   size: number;
 }
@@ -33,6 +34,9 @@ interface KnowledgeHit {
   rel: string;
   content: string;
   score: number;
+  method: KnowledgeSourceMethod;
+  chunkIndex?: number;
+  chunkCount?: number;
 }
 
 let knowledgeIndexing: Promise<void> | null = null;
@@ -75,14 +79,11 @@ async function readKnowledgeFiles(limit = KNOWLEDGE_INDEX_SCAN_LIMIT): Promise<K
 
   for (const file of files) {
     const stat = await fs.stat(file).catch(() => null);
-    if (!stat?.isFile() || stat.size > MAX_FILE_READ_BYTES) continue;
-    const content = await fs.readFile(file, "utf8").catch(() => "");
-    if (!content.trim()) continue;
+    if (!stat?.isFile() || stat.size === 0) continue;
     const rel = normalizeKnowledgeRel(path.relative(KNOWLEDGE_DIR, file));
     knowledgeFiles.push({
       rel,
       fullPath: file,
-      content,
       mtimeMs: Math.round(stat.mtimeMs),
       size: stat.size,
     });
@@ -91,30 +92,28 @@ async function readKnowledgeFiles(limit = KNOWLEDGE_INDEX_SCAN_LIMIT): Promise<K
   return knowledgeFiles;
 }
 
-function chunkKnowledgeContent(content: string) {
-  const clean = content.replace(/\r\n/g, "\n").trim();
-  if (!clean) return [];
-  if (clean.length <= KNOWLEDGE_CHUNK_CHARS) return [clean];
-
+function createKnowledgeChunkAccumulator() {
   const chunks: string[] = [];
   const pushLongText = (text: string) => {
     const step = Math.max(1, KNOWLEDGE_CHUNK_CHARS - KNOWLEDGE_CHUNK_OVERLAP);
     for (let start = 0; start < text.length; start += step) {
-      chunks.push(text.slice(start, start + KNOWLEDGE_CHUNK_CHARS).trim());
+      const chunk = text.slice(start, start + KNOWLEDGE_CHUNK_CHARS).trim();
+      if (chunk) chunks.push(chunk);
     }
   };
 
   let current = "";
-  for (const paragraph of clean.split(/\n{2,}/)) {
+
+  const pushParagraph = (paragraph: string) => {
     const part = paragraph.trim();
-    if (!part) continue;
+    if (!part) return;
     if (part.length > KNOWLEDGE_CHUNK_CHARS) {
       if (current) {
         chunks.push(current);
         current = "";
       }
       pushLongText(part);
-      continue;
+      return;
     }
     const next = current ? `${current}\n\n${part}` : part;
     if (next.length > KNOWLEDGE_CHUNK_CHARS) {
@@ -123,9 +122,58 @@ function chunkKnowledgeContent(content: string) {
     } else {
       current = next;
     }
+  };
+
+  return {
+    pushParagraph,
+    finish() {
+      if (current) chunks.push(current);
+      current = "";
+      return chunks.filter(Boolean);
+    },
+  };
+}
+
+function chunkKnowledgeContent(content: string) {
+  const clean = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!clean) return [];
+  if (clean.length <= KNOWLEDGE_CHUNK_CHARS) return [clean];
+
+  const accumulator = createKnowledgeChunkAccumulator();
+  for (const paragraph of clean.split(/\n{2,}/)) {
+    accumulator.pushParagraph(paragraph);
   }
-  if (current) chunks.push(current);
-  return chunks.filter(Boolean);
+  return accumulator.finish();
+}
+
+function isMarkdownKnowledgeFile(file: KnowledgeFile) {
+  const lower = file.rel.toLowerCase();
+  return lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+
+async function splitLargeKnowledgeContent(file: KnowledgeFile, content: string) {
+  const clean = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!clean) return [];
+  const splitter = isMarkdownKnowledgeFile(file)
+    ? new MarkdownTextSplitter({
+        chunkSize: KNOWLEDGE_CHUNK_CHARS,
+        chunkOverlap: KNOWLEDGE_CHUNK_OVERLAP,
+        keepSeparator: true,
+      })
+    : new RecursiveCharacterTextSplitter({
+        chunkSize: KNOWLEDGE_CHUNK_CHARS,
+        chunkOverlap: KNOWLEDGE_CHUNK_OVERLAP,
+        keepSeparator: true,
+        separators: TEXT_SPLITTER_SEPARATORS,
+      });
+  return (await splitter.splitText(clean)).map((chunk) => chunk.trim()).filter(Boolean);
+}
+
+async function chunkKnowledgeFile(file: KnowledgeFile) {
+  const content = await fs.readFile(file.fullPath, "utf8").catch(() => "");
+  return file.size > MAX_FILE_READ_BYTES
+    ? splitLargeKnowledgeContent(file, content)
+    : chunkKnowledgeContent(content);
 }
 
 function knowledgeVectorId(rel: string, chunkIndex: number) {
@@ -176,6 +224,10 @@ function metadataNumber(metadata: Metadata | null | undefined, key: string) {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+function mergeKnowledgeSourceMethod(left: KnowledgeSourceMethod, right: KnowledgeSourceMethod): KnowledgeSourceMethod {
+  return left === right ? left : "keyword+semantic";
+}
+
 async function readIndexedKnowledge(collection: Collection): Promise<Map<string, IndexedKnowledgeFile>> {
   const indexed = new Map<string, IndexedKnowledgeFile>();
   const pageSize = 500;
@@ -213,8 +265,11 @@ async function upsertKnowledgeDocument(
   settings: MemoryEmbeddingSettings = {},
   existingIds: string[] = [],
 ) {
-  const chunks = chunkKnowledgeContent(file.content);
-  if (!chunks.length) return false;
+  const chunks = await chunkKnowledgeFile(file);
+  if (!chunks.length) {
+    await deleteKnowledgeIds(collection, existingIds);
+    return false;
+  }
 
   const embeddings: number[][] = [];
   const ids = chunks.map((_, index) => knowledgeVectorId(file.rel, index));
@@ -236,6 +291,7 @@ async function upsertKnowledgeDocument(
 
   await deleteKnowledgeIds(collection, existingIds);
   await collection.upsert({ ids, embeddings, metadatas, documents });
+  serverLog(`INFO Indexed knowledge file ${file.rel} chunks=${chunks.length} size=${file.size}`);
   return true;
 }
 
@@ -286,13 +342,7 @@ export async function upsertKnowledgeFile(relPath: string, settings: MemoryEmbed
 
   const indexed = await readIndexedKnowledge(collection);
   const existingIds = indexed.get(rel)?.ids ?? [];
-  if (!stat?.isFile() || stat.size > MAX_FILE_READ_BYTES) {
-    await deleteKnowledgeIds(collection, existingIds);
-    return false;
-  }
-
-  const content = await fs.readFile(fullPath, "utf8").catch(() => "");
-  if (!content.trim()) {
+  if (!stat?.isFile()) {
     await deleteKnowledgeIds(collection, existingIds);
     return false;
   }
@@ -300,7 +350,6 @@ export async function upsertKnowledgeFile(relPath: string, settings: MemoryEmbed
   return upsertKnowledgeDocument(collection, {
     rel,
     fullPath,
-    content,
     mtimeMs: Math.round(stat.mtimeMs),
     size: stat.size,
   }, settings, existingIds);
@@ -343,15 +392,18 @@ async function semanticKnowledgeHits(
     const content = typeof document === "string" ? document.trim() : "";
     if (!rel || !content) return;
     const score = Number.isFinite(distances[index]) ? -Number(distances[index]) : 0;
+    const chunkIndex = metadataNumber(metadata, "chunk_index");
+    const chunkCount = metadataNumber(metadata, "chunk_count");
     const current = byRel.get(rel);
     if (!current) {
-      byRel.set(rel, { rel, content, score });
+      byRel.set(rel, { rel, content, score, method: "semantic", chunkIndex, chunkCount });
       return;
     }
     if (current.content.length < KNOWLEDGE_EXCERPT_CHARS) {
       current.content = `${current.content}\n\n...\n\n${content}`;
     }
     current.score = Math.max(current.score, score);
+    current.method = mergeKnowledgeSourceMethod(current.method, "semantic");
   });
 
   return Array.from(byRel.values()).slice(0, maxFiles);
@@ -359,12 +411,30 @@ async function semanticKnowledgeHits(
 
 async function keywordKnowledgeHits(query: string, maxFiles = 4): Promise<KnowledgeHit[]> {
   const files = await readKnowledgeFiles();
-  return files
-    .map((file) => ({
+  const hits: KnowledgeHit[] = [];
+
+  for (const file of files) {
+    const chunks = await chunkKnowledgeFile(file);
+    const scoredChunks = chunks
+      .map((chunk, index) => ({
+        content: chunk,
+        chunkIndex: index,
+        score: scoreKnowledge(query, chunk, file.rel),
+      }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score);
+    if (!scoredChunks.length) continue;
+    hits.push({
       rel: file.rel,
-      content: file.content,
-      score: scoreKnowledge(query, file.content, file.rel),
-    }))
+      content: scoredChunks.slice(0, 3).map((item) => item.content).join("\n\n...\n\n"),
+      score: scoredChunks[0].score,
+      method: "keyword",
+      chunkIndex: scoredChunks[0].chunkIndex,
+      chunkCount: chunks.length,
+    });
+  }
+
+  return hits
     .filter((item) => item.score > 0)
     .sort((a, b) => b.score - a.score || a.rel.localeCompare(b.rel))
     .slice(0, maxFiles);
@@ -378,26 +448,54 @@ function excerptKnowledge(content: string) {
 }
 
 function formatKnowledgeContext(hits: KnowledgeHit[]) {
-  return hits.map((item) => `## ${item.rel}\n${excerptKnowledge(item.content)}`).join("\n\n---\n\n");
+  return hits.map((item) => {
+    const chunkLabel = item.chunkCount
+      ? `chunk ${(item.chunkIndex ?? 0) + 1}/${item.chunkCount}`
+      : "chunk unknown";
+    return [
+      `## ${item.rel}`,
+      `Retrieval: ${item.method}; ${chunkLabel}`,
+      "",
+      excerptKnowledge(item.content),
+    ].join("\n");
+  }).join("\n\n---\n\n");
 }
 
-export async function retrieveKnowledgeContext(
+function toKnowledgeSourceHit(hit: KnowledgeHit): KnowledgeSourceHit {
+  return {
+    rel: hit.rel,
+    method: hit.method,
+    chunkIndex: hit.chunkIndex,
+    chunkCount: hit.chunkCount,
+    excerpt: excerptKnowledge(hit.content).slice(0, 600),
+  };
+}
+
+export async function retrieveKnowledgeContextWithSources(
   query: string,
   settingsOrMaxFiles: MemoryEmbeddingSettings | number = {},
   maxFiles = 4,
-) {
+): Promise<{ context: string; sources: KnowledgeSourceHit[] }> {
   const settings = typeof settingsOrMaxFiles === "number" ? {} : settingsOrMaxFiles;
   const limit = typeof settingsOrMaxFiles === "number" ? settingsOrMaxFiles : maxFiles;
   const picked: KnowledgeHit[] = [];
-  const seen = new Set<string>();
+  const byRel = new Map<string, KnowledgeHit>();
   const addHits = (hits: KnowledgeHit[] | null | undefined) => {
     for (const hit of hits ?? []) {
-      if (seen.has(hit.rel)) continue;
-      seen.add(hit.rel);
-      picked.push(hit);
+      const existing = byRel.get(hit.rel);
+      if (existing) {
+        existing.method = mergeKnowledgeSourceMethod(existing.method, hit.method);
+        if (existing.chunkIndex === undefined) existing.chunkIndex = hit.chunkIndex;
+        if (existing.chunkCount === undefined) existing.chunkCount = hit.chunkCount;
+        continue;
+      }
       if (picked.length >= limit) break;
+      byRel.set(hit.rel, hit);
+      picked.push(hit);
     }
   };
+
+  addHits(await keywordKnowledgeHits(query, limit));
 
   try {
     addHits(await semanticKnowledgeHits(query, settings, limit));
@@ -405,10 +503,20 @@ export async function retrieveKnowledgeContext(
     serverLog(`WARN Knowledge semantic retrieval failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  addHits(await keywordKnowledgeHits(query, limit));
+  if (!picked.length) return { context: "", sources: [] };
+  const hits = picked.slice(0, limit);
+  return {
+    context: formatKnowledgeContext(hits),
+    sources: hits.map(toKnowledgeSourceHit),
+  };
+}
 
-  if (!picked.length) return "";
-  return formatKnowledgeContext(picked.slice(0, limit));
+export async function retrieveKnowledgeContext(
+  query: string,
+  settingsOrMaxFiles: MemoryEmbeddingSettings | number = {},
+  maxFiles = 4,
+) {
+  return (await retrieveKnowledgeContextWithSources(query, settingsOrMaxFiles, maxFiles)).context;
 }
 
 export async function buildKnowledgeTree(dir: string): Promise<unknown[]> {

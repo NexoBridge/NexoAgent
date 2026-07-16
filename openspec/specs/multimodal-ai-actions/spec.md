@@ -25,6 +25,10 @@ The system MUST support generating new images from text prompts and editing exis
 - **WHEN** the user supplies a source image and asks for an edit
 - **THEN** the system routes the request to an image-editing-capable profile and returns the edited image artifact
 
+#### Scenario: Generate from a source image through image_generation
+- **WHEN** a capability-routed image generation request includes one or more source images
+- **THEN** the system treats the images as edit/reference inputs and returns an edited image artifact
+
 ### Requirement: Speech-to-text transcription
 The system MUST accept audio input for transcription requests and route the work to a speech-to-text-capable profile.
 
@@ -57,4 +61,3 @@ Multimodal capabilities SHALL remain callable after tool-surface reduction and M
 #### Scenario: Media generation still returns managed artifacts
 - **WHEN** image or speech generation succeeds after tool reduction
 - **THEN** the runtime SHALL still save and return managed artifacts without requiring removed utility tools
-

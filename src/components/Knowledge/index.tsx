@@ -22,6 +22,10 @@ interface KnowledgeApiNode {
   children?: KnowledgeApiNode[];
 }
 
+interface KnowledgeProps {
+  openPath?: string | null;
+}
+
 function mapApiNodeToTreeNode(node: KnowledgeApiNode): TreeNode {
   return {
     key: node.path,
@@ -31,7 +35,12 @@ function mapApiNodeToTreeNode(node: KnowledgeApiNode): TreeNode {
   };
 }
 
-export default function Knowledge() {
+function parentPathKeys(filePath: string) {
+  const parts = filePath.split("/").filter(Boolean);
+  return parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
+}
+
+export default function Knowledge({ openPath = null }: KnowledgeProps) {
   const { colors } = useTheme();
   const { lang, t } = useI18n();
   const [treeData, setTreeData] = useState<TreeNode[]>([]);
@@ -42,6 +51,7 @@ export default function Knowledge() {
   const [editContent, setEditContent] = useState("");
   const [newFileName, setNewFileName] = useState("");
   const [dragActive, setDragActive] = useState(false);
+  const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
 
   const ui = useMemo(
     () => ({
@@ -137,12 +147,18 @@ export default function Knowledge() {
       const data = await apiGet<{ content?: string } | string>(`/api/knowledge/file?path=${encodeURIComponent(path)}`);
       setContent(typeof data === "string" ? data : (data.content ?? ""));
       setSelectedPath(path);
+      setExpandedKeys((current) => [...new Set([...current, ...parentPathKeys(path)])]);
       setEditing(false);
       setCreating(false);
     } catch {
       void message.error(ui.loadFileFailed);
     }
   };
+
+  useEffect(() => {
+    if (!openPath) return;
+    void loadFile(openPath);
+  }, [openPath]);
 
   const deleteFile = async (path: string) => {
     try {
@@ -313,6 +329,9 @@ export default function Knowledge() {
           <Tree
             treeData={treeData}
             titleRender={titleRender as never}
+            selectedKeys={selectedPath ? [selectedPath] : []}
+            expandedKeys={expandedKeys}
+            onExpand={(keys) => setExpandedKeys(keys.map(String))}
             onSelect={(keys, { node }) => {
               if ((node as TreeNode).isLeaf && keys[0]) {
                 void loadFile(String(keys[0]));

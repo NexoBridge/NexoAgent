@@ -232,6 +232,9 @@ assert.match(localChatOutput, /vision analysis ok/);
 const generatedImage = await modelCall.invokeModel({ capability: "image_generation", prompt: "draw a square" }, ctx);
 assert.match(generatedImage, /\/uploads\/generated\/image-/);
 
+const generatedFromSourceImage = await modelCall.invokeModel({ capability: "image_generation", prompt: "make a softer variant", images: [imageDataUrl] }, ctx);
+assert.match(generatedFromSourceImage, /\/uploads\/generated\/edited-image-/);
+
 const editedImage = await modelCall.invokeModel({ capability: "image_editing", prompt: "make it brighter", images: [imageDataUrl] }, ctx);
 assert.match(editedImage, /\/uploads\/generated\/edited-image-/);
 

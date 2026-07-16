@@ -2,7 +2,7 @@ import { callChatCompletion, callImageEdit, callImageGeneration, callSpeechToTex
 import { attachmentToDataUrl, loadSourceBytes, saveGeneratedArtifact } from "../media";
 import type { ToolExecutionContext } from "../types";
 import { getOptionalNumberArg, getOptionalStringArg, getStringArg } from "../utils";
-import type { AttachmentType } from "../../../src/shared/types";
+import type { AttachmentType, ModelCapability } from "../../../src/shared/types";
 
 interface ImageApiDataItem {
   b64_json?: string;
@@ -74,6 +74,11 @@ function formatArtifacts(title: string, artifacts: ArtifactResult[], extraLines:
     ...artifacts.map((artifact, index) => `${index + 1}. ${artifact.name} (${artifact.mimeType}, ${artifact.size} bytes): ${artifact.url}`),
     ...extraLines,
   ].join("\n");
+}
+
+function isMissingCapabilityProfileError(error: unknown, capability: ModelCapability) {
+  return error instanceof Error
+    && error.message.includes(`No enabled model profile is configured for capability "${capability}"`);
 }
 
 export function extractArtifactsFromToolOutput(output: string): ArtifactResult[] {
@@ -152,13 +157,19 @@ export async function generateImage(args: Record<string, unknown>, ctx: ToolExec
   return formatArtifacts(`Generated ${artifacts.length} image artifact(s) with ${config.name} / ${config.model}:`, artifacts);
 }
 
-export async function editImage(args: Record<string, unknown>, ctx: ToolExecutionContext) {
+export async function editImage(args: Record<string, unknown>, ctx: ToolExecutionContext, options: { fallbackCapability?: ModelCapability } = {}) {
   const prompt = getStringArg(args, "prompt");
-  const images = readStringList(args.images ?? args.image ?? args.sourceImages ?? args.source_images);
+  const images = readStringList(args.images ?? args.image ?? args.sourceImages ?? args.source_images ?? args.imageUrl ?? args.image_url);
   if (!images.length) {
     throw new Error("At least one source image is required.");
   }
-  const config = await resolveModelConfigFromArgs(args, ctx, { capability: "image_editing", allowDefault: false });
+  const config = await resolveModelConfigFromArgs(args, ctx, { capability: "image_editing", allowDefault: false })
+    .catch(async (error) => {
+      if (!options.fallbackCapability || !isMissingCapabilityProfileError(error, "image_editing")) {
+        throw error;
+      }
+      return resolveModelConfigFromArgs(args, ctx, { capability: options.fallbackCapability, allowDefault: false });
+    });
   if (!config.apiKey && !modelConfigAllowsEmptyApiKey(config)) throw new Error(`Model profile "${config.name}" does not have an API key.`);
 
   const sourceImages = await Promise.all(images.map(async (image) => {

@@ -1,6 +1,6 @@
 ﻿import type { AgentSettings, ChatMessage, ModelCapability, TurnCompletionStatus } from "../../src/shared/types";
 
-import type { MessageBlock, ToolCallTrace, ToolOutputStats, ToolRawOutputRef } from "../../src/shared/types";
+import type { KnowledgeSourceHit, MessageBlock, ToolCallTrace, ToolOutputStats, ToolRawOutputRef } from "../../src/shared/types";
 
 export type TurnStopReason =
   | "completed"
@@ -33,6 +33,7 @@ export type StreamEvent =
       attachments?: ChatAttachment[];
       toolCalls?: ToolCallTrace[];
       messageBlocks?: MessageBlock[];
+      knowledgeSources?: KnowledgeSourceHit[];
       circuitBreaker?: {
         reason: string;
         detail: string;

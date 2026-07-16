@@ -12,6 +12,7 @@ import {
   DATA_DIR,
   MANAGED_CUSTOM_SKILLS_DIR,
   MANAGED_MARKETPLACE_SKILLS_DIR,
+  MANAGED_SKILLSHUB_MARKETPLACE_SKILLS_DIR,
   MANAGED_SKILLS_DIR,
   SKILLS_FILE,
   SKILL_STATE_FILE,
@@ -70,7 +71,15 @@ interface DirectoryScanOptions {
   maxDepth?: number;
 }
 
+interface SkillshubMetaFile {
+  slug?: string;
+  version?: string;
+  registry?: string;
+  installedAt?: string;
+}
+
 const MANAGED_SIDEcar_FILE = ".nexo-skill.json";
+const SKILLSHUB_META_FILE = ".skillshub-meta.json";
 const MAX_SKILL_CHARS = 8_000;
 const MAX_TOTAL_SKILL_CHARS = 24_000;
 
@@ -354,6 +363,9 @@ async function loadSkillFromDirectory(
 ): Promise<StoredSkill> {
   const skillFile = await fs.readFile(path.join(skillDir, "SKILL.md"), "utf8");
   const sidecar = await readJsonIfExists<ManagedSkillSidecar>(path.join(skillDir, MANAGED_SIDEcar_FILE));
+  const skillshubMeta = await readJsonIfExists<SkillshubMetaFile>(
+    path.join(skillDir, SKILLSHUB_META_FILE),
+  );
   const metadataJson = await readJsonIfExists<{ version?: string; organization?: string; abstract?: string }>(
     path.join(skillDir, "metadata.json"),
   );
@@ -397,7 +409,7 @@ async function loadSkillFromDirectory(
     marketplaceName: sidecar?.marketplaceName || options.marketplaceName,
     homepage: sidecar?.homepage,
     author: sidecar?.author || metadata.author || metadataJson?.organization,
-    version: sidecar?.version || metadata.version || metadataJson?.version || metaJson?.version,
+    version: sidecar?.version || skillshubMeta?.version || metadata.version || metadataJson?.version || metaJson?.version,
     contentSize: skillFile.length,
   };
 }
@@ -618,6 +630,27 @@ async function writeManagedSkillFiles(
   );
 }
 
+async function writeSkillshubMetaFile(
+  targetDir: string,
+  skill: {
+    key: string;
+    version?: string;
+    registry?: string;
+    installedAt: string;
+  },
+) {
+  await fs.writeFile(
+    path.join(targetDir, SKILLSHUB_META_FILE),
+    JSON.stringify({
+      slug: skill.key,
+      version: skill.version || "1.0.0",
+      registry: skill.registry,
+      installedAt: skill.installedAt,
+    } satisfies SkillshubMetaFile, null, 2),
+    "utf8",
+  );
+}
+
 async function clearLegacySkill(key: string) {
   const legacy = await readLegacyStoredSkills();
   const next = legacy.filter((skill) => skill.key !== key);
@@ -777,7 +810,8 @@ export async function installMarketplaceSkill(request: SkillInstallRequest) {
 
     const specKey = request.installSpec.split("@").pop() ?? request.installSpec;
     const key = slugify(request.key || specKey || loaded.key || loaded.name) || slugify(path.basename(skillDir));
-    const targetDir = path.join(MANAGED_MARKETPLACE_SKILLS_DIR, marketplace.id, key);
+    const targetDir = path.join(MANAGED_SKILLSHUB_MARKETPLACE_SKILLS_DIR, key);
+    const createdAt = new Date().toISOString();
     await fs.rm(targetDir, { recursive: true, force: true }).catch(() => undefined);
     await fs.mkdir(path.dirname(targetDir), { recursive: true });
     await fs.cp(skillDir, targetDir, { recursive: true });
@@ -795,11 +829,17 @@ export async function installMarketplaceSkill(request: SkillInstallRequest) {
         author: loaded.author,
         version: loaded.version,
         managed: true,
-        createdAt: new Date().toISOString(),
+        createdAt,
         installSpec: request.installSpec,
       } satisfies ManagedSkillSidecar, null, 2),
       "utf8",
     );
+    await writeSkillshubMetaFile(targetDir, {
+      key,
+      version: loaded.version,
+      registry: request.homepage || loaded.homepage || marketplace.homepage,
+      installedAt: createdAt,
+    });
 
     await clearLegacySkill(key);
     await setSkillState(key, true);

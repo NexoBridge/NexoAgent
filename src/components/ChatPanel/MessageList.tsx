@@ -8,11 +8,12 @@ interface Props {
   onSuggest: (text: string) => void;
   hasInput: boolean;
   emptyState?: React.ReactNode;
+  onOpenKnowledgeSource?: (path: string) => void;
 }
 
 const STREAM_SCROLL_THROTTLE_MS = 90;
 
-export const MessageList: React.FC<Props> = ({ onSuggest, hasInput, emptyState }) => {
+export const MessageList: React.FC<Props> = ({ onSuggest, hasInput, emptyState, onOpenKnowledgeSource }) => {
   const { messages, streaming, toolCalls, messageBlocks, undoableMessageIds, undoAssistantMessage } = useChatStore();
   const { colors } = useTheme();
   const { t } = useI18n();
@@ -128,6 +129,7 @@ export const MessageList: React.FC<Props> = ({ onSuggest, hasInput, emptyState }
           blocks={messageBlocks[message.id]}
           undoable={undoable}
           onUndo={undoable ? () => undoAssistantMessage(message.id) : undefined}
+          onOpenKnowledgeSource={onOpenKnowledgeSource}
         />)}
       )}
       <div ref={bottomRef} />

@@ -47,6 +47,7 @@ type View = "chat" | "browser" | "memory" | "knowledge" | "tools" | "skills" | "
 
 export const AppLayout: React.FC = () => {
   const [view, setView] = useState<View>("chat");
+  const [knowledgeOpenPath, setKnowledgeOpenPath] = useState<string | null>(null);
   const [sessionSiderCollapsed, setSessionSiderCollapsed] = useState(() => localStorage.getItem("nexo-session-sider-collapsed") === "true");
   const [sessionSiderWidth, setSessionSiderWidth] = useState(() => {
     const saved = Number(localStorage.getItem("nexo-session-sider-width"));
@@ -318,6 +319,11 @@ export const AppLayout: React.FC = () => {
     await useChatStore.getState().selectSession(sessionId);
   };
 
+  const openKnowledgeSource = (path: string) => {
+    setKnowledgeOpenPath(path);
+    setView("knowledge");
+  };
+
   useEffect(() => {
     const unsubscribe = desktopApi?.onTaskSessionRequested?.((sessionId) => {
       void openTaskSession(sessionId);
@@ -465,10 +471,10 @@ export const AppLayout: React.FC = () => {
       )}
 
       <Content style={{ display: "flex", flexDirection: "column", overflow: "hidden", background: colors.bgPrimary }}>
-        {view === "chat" && <ChatPanel onOpenSettings={() => setView("settings")} />}
+        {view === "chat" && <ChatPanel onOpenSettings={() => setView("settings")} onOpenKnowledgeSource={openKnowledgeSource} />}
         {browserWorkbenchAvailable && view === "browser" && <BrowserWorkbench />}
         {view === "memory" && <MemoryPanel />}
-        {view === "knowledge" && <Knowledge />}
+        {view === "knowledge" && <Knowledge openPath={knowledgeOpenPath} />}
         {view === "tools" && <Tools />}
         {view === "skills" && <Skills />}
         {view === "tasks" && <Tasks onOpenTaskSession={openTaskSession} />}

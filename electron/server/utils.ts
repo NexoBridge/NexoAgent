@@ -23,8 +23,23 @@ export function getOptionalStringArg(args: Record<string, unknown>, key: string,
   return fallback;
 }
 
+function formatErrorCause(cause: unknown) {
+  if (!(cause instanceof Error)) return String(cause);
+  const extras: string[] = [];
+  const record = cause as Error & Record<string, unknown>;
+  for (const key of ["code", "status", "type"]) {
+    const value = record[key];
+    if (typeof value === "string" || typeof value === "number") {
+      extras.push(`${key}=${value}`);
+    }
+  }
+  return `${cause.name || "Error"}${extras.length ? ` (${extras.join(", ")})` : ""}: ${cause.message}`;
+}
+
 export function toErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  if (!(error instanceof Error)) return String(error);
+  const cause = (error as Error & { cause?: unknown }).cause;
+  return cause ? `${error.message}: ${formatErrorCause(cause)}` : error.message;
 }
 
 export function toErrorLog(error: unknown) {
@@ -38,7 +53,7 @@ export function toErrorLog(error: unknown) {
     }
   }
   const cause = record.cause;
-  if (cause) extras.push(`cause=${toErrorMessage(cause)}`);
+  if (cause) extras.push(`cause=${formatErrorCause(cause)}`);
   const prefix = `${error.name || "Error"}: ${error.message}${extras.length ? ` (${extras.join(", ")})` : ""}`;
   return error.stack ? `${prefix}\n${error.stack}` : prefix;
 }

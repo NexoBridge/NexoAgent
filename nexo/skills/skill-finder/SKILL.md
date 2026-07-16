@@ -53,25 +53,48 @@ Show **all results found** across all marketplaces — do not cap or filter. Ask
 
 ## Step 3 — Install
 
-When the user picks a skill (by number or name), run the corresponding install command:
+When the user picks a skill (by number or name), install it through Nexo's marketplace workflow. Do not install skills into the current project source tree.
 
-| Marketplace | Install command |
+Final install target:
+
+```text
+%USERPROFILE%\.NexoAgent\skills\marketplace\skillshub\<skill-key>\
+```
+
+On this machine, that resolves to:
+
+```text
+C:\Users\106681\.NexoAgent\skills\marketplace\skillshub\<skill-key>\
+```
+
+Registration requirements:
+
+- Place `SKILL.md` under the final install target.
+- Write `.nexo-skill.json` with key, name, description, source `marketplace`, marketplace id/name, install spec, and managed metadata.
+- Write `.skillshub-meta.json` with slug, version, registry, and installedAt.
+- Update `%USERPROFILE%\.NexoAgent\skill-state.json` so the skill key is present with `enabled: true`.
+
+Use upstream marketplace CLIs only to stage or download the selected skill, then copy the resolved skill directory into the final Nexo target and register it. Temporary staging directories may be under the system temp directory or another disposable location, not inside the user's project repository.
+
+Suggested staging commands by marketplace:
+
+| Marketplace | Staging command |
 |---|---|
-| kills.sh | `npx skills add <owner/repo>` |
-| SkillsMP | `gh repo clone <owner/repo>` into `.kiro/skills/` |
-| Agent Skills Hub | `npx agent-skills-hub --claude` then select skill |
-| OSM | `osm install <skill-slug>` |
-| Agensi | `gh repo clone <owner/repo>` into `.kiro/skills/` |
-| SkillForge | `gh repo clone <owner/repo>` into `.kiro/skills/` |
-| Heurist Mesh | `npx @heurist-network/skills add <slug>` |
-| mekaskill | `mekaskill-cli install <skill-name>` |
-| SkillsHub | `skillshub install <skill-name>` (requires `npm i -g @nodeskai/skillshub`) |
-| itismyskillmarket | `skm install <skill-name>` |
+| kills.sh | `npx skills add <owner/repo> --skill <slug> --agent claude-code --copy -y` in a temp directory |
+| SkillsMP | `gh repo clone <owner/repo> <temp-dir>` |
+| Agent Skills Hub | `npx agent-skills-hub install <slug> --path <temp-dir>` |
+| OSM | `osm install <skill-slug>` into a temp/staging directory if supported |
+| Agensi | `gh repo clone <owner/repo> <temp-dir>` |
+| SkillForge | `gh repo clone <owner/repo> <temp-dir>` |
+| Heurist Mesh | `npx @heurist-network/skills add <slug> --agent claude-code --copy -y` in a temp directory |
+| mekaskill | `mekaskill-cli install <skill-name>` into a temp/staging directory if supported |
+| SkillsHub | `npx @nodeskai/skillshub install <skill-name> --dir <temp-dir>` |
+| itismyskillmarket | `skm install <skill-name>` into a temp/staging directory if supported |
 
-Run the command in the user's working directory via PowerShell (Windows) or Bash. Report success/failure and the installed path.
+After staging, locate the directory containing `SKILL.md`, copy that directory to the final Nexo target, write both metadata files, enable it in `skill-state.json`, and report success/failure with the final installed path.
 
 ## Notes
 
 - If a CLI tool is not installed, tell the user the prerequisite and offer to install it first.
-- For GitHub-based marketplaces without a dedicated CLI, clone into `.kiro/skills/<skill-name>/` and confirm.
+- For GitHub-based marketplaces without a dedicated CLI, clone into a temp directory first, then install/register into the final Nexo target.
 - Never install without the user explicitly choosing a skill.

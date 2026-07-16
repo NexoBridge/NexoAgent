@@ -16,7 +16,7 @@ import { extractAndStore, recallMemory } from "../memory";
 import { loadAttachmentContext } from "./attachments";
 import { AI_REQUEST_MAX_RETRIES, collectStreamWithAiRequestRetries } from "./ai-retry";
 import { circuitBreakerInfoFromDecision, createAgentLoopCircuitBreaker } from "./agent-loop-circuit-breaker";
-import { retrieveKnowledgeContext } from "./knowledge";
+import { retrieveKnowledgeContextWithSources } from "./knowledge";
 import { resolveMemoryEmbeddingSettings } from "./memory-embedding";
 import { resolveAndPersistModelContextBudget, getEnabledModelCapabilitySummary } from "./model-profiles";
 import { resolvePrimaryModelConfig, resolveThinkingRequestConfig } from "./model-runtime";
@@ -328,7 +328,7 @@ function withSettingsAwareToolDefs(tools: ToolDef[], settings: AgentSettings): T
         ...tool,
         description: [
           tool.description,
-          'Use capability="vision" for image analysis, "image_generation" for text-to-image, "image_editing" for image edits, "speech_to_text" for transcription, and "text_to_speech" for spoken audio generation.',
+          'Use capability="vision" for image analysis, "image_generation" for text-to-image or source-image generation when images are provided, "image_editing" for explicit image edits, "speech_to_text" for transcription, and "text_to_speech" for spoken audio generation.',
         ].join(" "),
       };
     }
@@ -886,9 +886,11 @@ export async function streamFromLLM(
     ]);
     memoryContext = mergeMemoryContext(taskMemoryContext, operationalMemoryContext);
   }
-  const knowledgeContext = settings.enableKnowledge
-    ? await retrieveKnowledgeContext(currentSessionMemoryQuery || lastUserMsg, memoryEmbeddingSettings)
-    : "";
+  const knowledgeResult = settings.enableKnowledge
+    ? await retrieveKnowledgeContextWithSources(currentSessionMemoryQuery || lastUserMsg, memoryEmbeddingSettings)
+    : { context: "", sources: [] };
+  const knowledgeContext = knowledgeResult.context;
+  const knowledgeSources = knowledgeResult.sources;
   const attachmentContext = await loadAttachmentContext(attachments);
   const primarySupportsVision = Boolean(primaryConfig.capabilities?.includes("vision"));
 
@@ -938,7 +940,7 @@ export async function streamFromLLM(
     `Primary model: ${primaryConfig.name} / ${primaryConfig.model}.`,
     `Resolved context budget: window=${budgetConfig.contextWindowTokens}, input=${budgetConfig.maxInputTokens}, compact=${budgetConfig.autoCompactTokenLimit}, source=${resolvedBudget.contextWindowSource ?? "default"}.`,
     "You are the orchestrator. Route specialist work by capability instead of asking the user for a model name.",
-    'Use invoke_model with capability="vision" only when you need a separate specialist vision model; use capability="image_generation" for text-to-image, capability="image_editing" for editing existing images, capability="speech_to_text" for transcription, and capability="text_to_speech" for spoken audio generation.',
+    'Use invoke_model with capability="vision" only when you need a separate specialist vision model; use capability="image_generation" for text-to-image and source/reference-image generation with images, capability="image_editing" for explicit edits to existing images, capability="speech_to_text" for transcription, and capability="text_to_speech" for spoken audio generation.',
     "Use invoke_model with a capability when a configured specialist model is better suited for a sub-task.",
     "Use recall_memory when prior durable context could materially improve the answer.",
     `Configured specialist capabilities:\n${formatCapabilitySummary(capabilitySummary)}`,
@@ -1490,6 +1492,7 @@ export async function streamFromLLM(
       attachments: assistantAttachments.length ? assistantAttachments : undefined,
       toolCalls: persistentToolCalls.length ? persistentToolCalls : undefined,
       messageBlocks: persistentMessageBlocks.length ? persistentMessageBlocks : undefined,
+      knowledgeSources: knowledgeSources.length ? knowledgeSources : undefined,
     });
   }
 
@@ -1510,6 +1513,7 @@ export async function streamFromLLM(
     attachments: assistantAttachments.length ? assistantAttachments : undefined,
     toolCalls: persistentToolCalls.length ? persistentToolCalls : undefined,
     messageBlocks: persistentMessageBlocks.length ? persistentMessageBlocks : undefined,
+    knowledgeSources: knowledgeSources.length ? knowledgeSources : undefined,
     ...(interruptedByUser
       ? { stopReason: "user_interrupt" as const }
       : contextOverflowContent
