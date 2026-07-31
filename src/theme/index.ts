@@ -95,10 +95,17 @@ export function applyThemeCssVars(colors: ThemeColors) {
   root.style.setProperty("--nexo-bg-secondary", colors.bgSecondary);
   root.style.setProperty("--nexo-bg-tertiary", colors.bgTertiary);
   root.style.setProperty("--nexo-hover-bg", colors.hoverBg);
+  root.style.setProperty("--nexo-accent", colors.accent);
   root.style.setProperty("--nexo-text-primary", colors.textPrimary);
+  root.style.setProperty("--nexo-text-secondary", colors.textSecondary);
   root.style.setProperty("--nexo-text-muted", colors.textMuted);
   root.style.setProperty("--nexo-border", colors.border);
   root.style.setProperty("--nexo-border-strong", colors.borderStrong);
+  root.style.setProperty("--nexo-bubble-assistant", colors.bubbleAssistant);
+  root.style.setProperty("--nexo-bubble-user", colors.bubbleUser);
+  root.style.setProperty("--nexo-code-bg", colors.codeBg);
+  root.style.setProperty("--nexo-tool-bg", colors.toolBg);
+  root.style.setProperty("--nexo-assistant-avatar", colors.assistantAvatar);
   document.body.style.background = colors.bgPrimary;
   document.body.style.color = colors.textPrimary;
 }

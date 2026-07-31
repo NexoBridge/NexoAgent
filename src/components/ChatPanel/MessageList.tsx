@@ -1,8 +1,8 @@
 import React, { useEffect, useRef } from "react";
 import { MessageBubble } from "./MessageBubble";
 import { useChatStore } from "../../store/chat";
-import { useTheme } from "../../theme";
 import { useI18n } from "../../i18n";
+import "./MessageList.scss";
 
 interface Props {
   onSuggest: (text: string) => void;
@@ -15,7 +15,6 @@ const STREAM_SCROLL_THROTTLE_MS = 90;
 
 export const MessageList: React.FC<Props> = ({ onSuggest, hasInput, emptyState, onOpenKnowledgeSource }) => {
   const { messages, streaming, toolCalls, messageBlocks, undoableMessageIds, undoAssistantMessage } = useChatStore();
-  const { colors } = useTheme();
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -63,48 +62,22 @@ export const MessageList: React.FC<Props> = ({ onSuggest, hasInput, emptyState, 
 
   if (messages.length === 0) {
     if (emptyState) {
-      return <div style={{ flex: 1, minHeight: 0 }}>{emptyState}</div>;
+      return <div className="message-list">{emptyState}</div>;
     }
     return (
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          color: colors.textSecondary,
-        }}
-      >
-        <div style={{ textAlign: "center" }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>✦</div>
-          <div style={{ fontSize: 16, marginBottom: 4 }}>{t("startConversation")}</div>
-          <div style={{ fontSize: 13, color: colors.textMuted, marginBottom: 24 }}>{t("typeMessage")}</div>
+      <div className="message-list message-list__empty">
+        <div className="message-list__empty-center">
+          <div className="message-list__empty-icon">✦</div>
+          <div className="message-list__empty-title">{t("startConversation")}</div>
+          <div className="message-list__empty-subtitle">{t("typeMessage")}</div>
         </div>
         {!hasInput ? (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, justifyContent: "center", maxWidth: 480, padding: "0 24px" }}>
+          <div className="message-list__suggestions">
             {[t("suggestion1"), t("suggestion2"), t("suggestion3"), t("suggestion4")].map((text) => (
               <div
                 key={text}
                 onClick={() => onSuggest(text)}
-                style={{
-                  padding: "8px 16px",
-                  borderRadius: 20,
-                  cursor: "pointer",
-                  background: colors.bgTertiary,
-                  border: `1px solid ${colors.border}`,
-                  color: colors.textSecondary,
-                  fontSize: 13,
-                  transition: "all 0.15s",
-                }}
-                onMouseEnter={(event) => {
-                  event.currentTarget.style.borderColor = colors.accent;
-                  event.currentTarget.style.color = colors.textPrimary;
-                }}
-                onMouseLeave={(event) => {
-                  event.currentTarget.style.borderColor = colors.border;
-                  event.currentTarget.style.color = colors.textSecondary;
-                }}
+                className="message-list__suggestion"
               >
                 {text}
               </div>
@@ -116,7 +89,7 @@ export const MessageList: React.FC<Props> = ({ onSuggest, hasInput, emptyState, 
   }
 
   return (
-    <div ref={containerRef} style={{ flex: 1, overflowY: "auto", padding: "20px 24px" }}>
+    <div ref={containerRef} className="message-list message-list__scroll">
       {messages.map((message, index) => {
         const undoable = undoableMessageIds.has(message.id);
         return (

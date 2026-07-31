@@ -33,10 +33,10 @@ import { useChatStore } from "../../store/chat";
 import { useTheme } from "../../theme";
 import { useI18n } from "../../i18n";
 import { getApiBase, isElectron } from "../../services/api";
+import "./index.scss";
 
 const { Content, Sider } = Layout;
 const brandIconUrl = new URL("../../../assets/nexoagent-icon-32.png", import.meta.url).href;
-const DESKTOP_DRAG_BAR_HEIGHT = 44;
 const COLLAPSED_SESSION_SIDER_WIDTH = 60;
 const MIN_SESSION_SIDER_WIDTH = 220;
 const DEFAULT_SESSION_SIDER_WIDTH = 280;
@@ -44,6 +44,10 @@ const MAX_SESSION_SIDER_WIDTH = 520;
 const DEFAULT_EXPANDED_SESSION_SIDER_WIDTH = 340;
 
 type View = "chat" | "browser" | "memory" | "knowledge" | "tools" | "skills" | "tasks" | "logs" | "channels" | "settings";
+
+function joinClasses(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(" ");
+}
 
 export const AppLayout: React.FC = () => {
   const [view, setView] = useState<View>("chat");
@@ -64,7 +68,7 @@ export const AppLayout: React.FC = () => {
   const browserWorkbenchAvailable = isDesktopApp;
   const isWindowsDesktop = isDesktopApp && navigator.userAgent.includes("Windows");
   const { ensureRuntimeReady, loadSessions, loadModelProfiles, newSession, loadSettings } = useChatStore();
-  const { mode, colors, toggleTheme } = useTheme();
+  const { mode, toggleTheme } = useTheme();
   const { lang, setLang, t } = useI18n();
   const resizeOriginRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const desktopApi = window.nexoDesktop;
@@ -221,23 +225,12 @@ export const AppLayout: React.FC = () => {
     setResizingSessionSider(true);
   };
 
-  const iconButtonStyle = (active: boolean): React.CSSProperties => ({
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    cursor: "pointer",
-    fontSize: 18,
-    color: active ? colors.textPrimary : colors.textSecondary,
-    background: active ? colors.bgTertiary : "transparent",
-    transition: "all 0.15s",
-  });
-
   const navItem = (targetView: View, icon: React.ReactNode, label: string) => (
     <Tooltip title={label} placement="right" key={targetView}>
-      <div onClick={() => setView(targetView)} style={iconButtonStyle(view === targetView)}>
+      <div
+        onClick={() => setView(targetView)}
+        className={joinClasses("app-layout__nav-btn", view === targetView && "app-layout__nav-btn--active")}
+      >
         {icon}
       </div>
     </Tooltip>
@@ -252,47 +245,11 @@ export const AppLayout: React.FC = () => {
     window.open(targetUrl, "_blank", "noopener,noreferrer");
   };
 
-  const titlebarButtonBaseStyle = (
-    control: "minimize" | "maximize" | "close",
-  ): React.CSSProperties & { WebkitAppRegion?: "no-drag" } => ({
-    width: 46,
-    height: DESKTOP_DRAG_BAR_HEIGHT,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    color: control === "close" && hoveredWindowControl === "close" ? "#ffffff" : colors.textSecondary,
-    background:
-      control === "close" && hoveredWindowControl === "close"
-        ? "#dc2626"
-        : hoveredWindowControl === control
-          ? colors.hoverBg
-          : "transparent",
-    cursor: "pointer",
-    WebkitAppRegion: "no-drag",
-    transition: "background 0.15s ease, color 0.15s ease",
-  });
-
-  const desktopDragBarStyle: React.CSSProperties & { WebkitAppRegion?: "drag" } = {
-    position: "fixed",
-    top: 0,
-    left: 0,
-    right: 0,
-    height: DESKTOP_DRAG_BAR_HEIGHT,
-    background: colors.bgSecondary,
-    borderBottom: `1px solid ${colors.border}`,
-    WebkitAppRegion: "drag",
-    zIndex: 20,
-    display: "flex",
-    alignItems: "stretch",
-    justifyContent: "space-between",
-  };
-
-  const windowControlGroupStyle: React.CSSProperties & { WebkitAppRegion?: "no-drag" } = {
-    display: "flex",
-    alignItems: "stretch",
-    marginLeft: "auto",
-    WebkitAppRegion: "no-drag",
-  };
+  const windowButtonClass = (control: "minimize" | "maximize" | "close") => joinClasses(
+    "app-layout__window-btn",
+    control === "close" && "app-layout__window-btn--close",
+    hoveredWindowControl === control && "app-layout__window-btn--hovered",
+  );
 
   const handleMinimize = async () => {
     await desktopApi?.minimizeWindow?.();
@@ -334,43 +291,26 @@ export const AppLayout: React.FC = () => {
   }, [desktopApi]);
 
   return (
-    <Layout style={{ height: "100vh", background: colors.bgPrimary, paddingTop: isWindowsDesktop ? DESKTOP_DRAG_BAR_HEIGHT : 0, position: "relative" }}>
+    <Layout className={joinClasses("app-layout", isWindowsDesktop && "app-layout--desktop-titlebar")}>
       {isWindowsDesktop && (
-        <div style={desktopDragBarStyle}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              paddingLeft: 12,
-              minWidth: 0,
-            }}
-          >
+        <div className="app-layout__drag-bar">
+          <div className="app-layout__brand">
             <img
               src={brandIconUrl}
               alt="NexoAgent"
-              style={{ width: 16, height: 16, display: "block", borderRadius: 4, flexShrink: 0 }}
+              className="app-layout__brand-icon"
             />
-            <span
-              style={{
-                color: colors.textPrimary,
-                fontSize: 13,
-                fontWeight: 600,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
+            <span className="app-layout__brand-title">
               Nexo Agent
             </span>
           </div>
 
-          <div style={windowControlGroupStyle}>
+          <div className="app-layout__window-controls">
             <div
               onClick={() => void handleMinimize()}
               onMouseEnter={() => setHoveredWindowControl("minimize")}
               onMouseLeave={() => setHoveredWindowControl(null)}
-              style={titlebarButtonBaseStyle("minimize")}
+              className={windowButtonClass("minimize")}
             >
               <MinusOutlined />
             </div>
@@ -378,7 +318,7 @@ export const AppLayout: React.FC = () => {
               onClick={() => void handleToggleMaximize()}
               onMouseEnter={() => setHoveredWindowControl("maximize")}
               onMouseLeave={() => setHoveredWindowControl(null)}
-              style={titlebarButtonBaseStyle("maximize")}
+              className={windowButtonClass("maximize")}
             >
               {windowMaximized ? <CopyOutlined /> : <BorderOutlined />}
             </div>
@@ -386,47 +326,44 @@ export const AppLayout: React.FC = () => {
               onClick={() => void handleCloseWindow()}
               onMouseEnter={() => setHoveredWindowControl("close")}
               onMouseLeave={() => setHoveredWindowControl(null)}
-              style={titlebarButtonBaseStyle("close")}
+              className={windowButtonClass("close")}
             >
               <CloseOutlined />
             </div>
           </div>
         </div>
       )}
-      <Sider width={52} style={{ background: colors.bgSecondary, borderRight: `1px solid ${colors.border}` }}>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "12px 0", gap: 4, height: "100%" }}>
-          {/* <img
-            src={brandIconUrl}
-            alt="NexoAgent"
-            style={{ width: 22, height: 22, marginBottom: 16, display: "block", borderRadius: 6 }}
-          /> */}
-
+      <Sider width={52} className="app-layout__icon-sider">
+        <div className="app-layout__icon-rail">
           {navItem("chat", <MessageOutlined />, t("chat"))}
           {browserWorkbenchAvailable && navItem("browser", <GlobalOutlined />, t("browserWorkbench"))}
 
-          <Divider style={{ margin: "4px 0", borderColor: colors.border, minWidth: 36, width: 36 }} />
+          <Divider className="app-layout__nav-divider" />
 
           {navItem("memory", <DatabaseOutlined />, t("memory"))}
           {navItem("knowledge", <BookOutlined />, t("knowledge"))}
           {navItem("tools", <ToolOutlined />, t("tools"))}
           {navItem("skills", <ThunderboltOutlined />, t("skills"))}
 
-          <Divider style={{ margin: "4px 0", borderColor: colors.border, minWidth: 36, width: 36 }} />
+          <Divider className="app-layout__nav-divider" />
 
           {navItem("tasks", <ClockCircleOutlined />, t("tasks"))}
           {navItem("logs", <FileTextOutlined />, t("logs"))}
           {navItem("channels", <ApiOutlined />, t("channels"))}
 
-          <div style={{ flex: 1 }} />
+          <div className="app-layout__rail-spacer" />
 
           <Tooltip title={lang === "zh" ? t("switchToEnglish") : t("switchToChinese")} placement="right">
-            <div onClick={() => setLang(lang === "zh" ? "en" : "zh")} style={{ ...iconButtonStyle(false), fontSize: 11, fontWeight: 700 }}>
+            <div
+              onClick={() => setLang(lang === "zh" ? "en" : "zh")}
+              className="app-layout__nav-btn app-layout__nav-btn--lang"
+            >
               {lang === "zh" ? "EN" : "ZH"}
             </div>
           </Tooltip>
 
           <Tooltip title={mode === "dark" ? t("lightMode") : t("darkMode")} placement="right">
-            <div onClick={toggleTheme} style={iconButtonStyle(false)}>
+            <div onClick={toggleTheme} className="app-layout__nav-btn">
               {mode === "dark" ? <SunOutlined /> : <MoonOutlined />}
             </div>
           </Tooltip>
@@ -435,7 +372,7 @@ export const AppLayout: React.FC = () => {
 
           <Tooltip title={t("openWebConsole")} placement="right">
             <Badge dot status="success">
-              <div onClick={() => void openWebConsole()} style={iconButtonStyle(false)}>
+              <div onClick={() => void openWebConsole()} className="app-layout__nav-btn">
                 <GlobalOutlined />
               </div>
             </Badge>
@@ -447,7 +384,7 @@ export const AppLayout: React.FC = () => {
         <>
           <Sider
             width={sessionSiderCollapsed ? COLLAPSED_SESSION_SIDER_WIDTH : sessionSiderWidth}
-            style={{ background: colors.bgSecondary, borderRight: `1px solid ${colors.border}`, overflow: "hidden" }}
+            className="app-layout__session-sider"
           >
             <SessionList
               collapsed={sessionSiderCollapsed}
@@ -457,20 +394,13 @@ export const AppLayout: React.FC = () => {
           {!sessionSiderCollapsed && (
             <div
               onMouseDown={startSessionResize}
-              style={{
-                width: 10,
-                cursor: "col-resize",
-                background: resizingSessionSider ? colors.accent : colors.bgPrimary,
-                borderRight: `1px solid ${colors.border}`,
-                transition: resizingSessionSider ? "none" : "background 0.15s",
-                flexShrink: 0,
-              }}
+              className={joinClasses("app-layout__resize-handle", resizingSessionSider && "app-layout__resize-handle--active")}
             />
           )}
         </>
       )}
 
-      <Content style={{ display: "flex", flexDirection: "column", overflow: "hidden", background: colors.bgPrimary }}>
+      <Content className="app-layout__content">
         {view === "chat" && <ChatPanel onOpenSettings={() => setView("settings")} onOpenKnowledgeSource={openKnowledgeSource} />}
         {browserWorkbenchAvailable && view === "browser" && <BrowserWorkbench />}
         {view === "memory" && <MemoryPanel />}

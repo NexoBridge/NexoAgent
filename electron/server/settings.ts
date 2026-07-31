@@ -1,5 +1,10 @@
 import type { AgentSettings } from "../../src/shared/types";
-import { isPreservedApiKeyInput, normalizeAiRequestTimeoutMs } from "../../src/shared/settings";
+import {
+  DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
+  isPreservedApiKeyInput,
+  normalizeAiRequestTimeoutMs,
+  normalizePlannerExecutorRoutingSettings,
+} from "../../src/shared/settings";
 import {
   normalizeProviderApiBase,
   getDefaultServiceProviderName,
@@ -17,13 +22,13 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerId,
     settings.providerName,
   );
-  return {
+  return normalizePlannerExecutorRoutingSettings({
     ...settings,
     providerId,
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
     aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
-  };
+  });
 }
 
 export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
@@ -45,6 +50,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   shellCommandTimeoutMs: 0,
   aiRequestTimeoutMs: 0,
   planningMode: "balanced",
+  ...DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
   thinkingEnabled: true,
   thinkingEffort: "high",
   circuitBreakerEnabled: true,

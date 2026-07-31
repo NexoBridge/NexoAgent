@@ -1,4 +1,11 @@
-import type { AgentSettings, ChatMessage, ModelCapability, ProviderId, ThinkingEffort } from "../../src/shared/types";
+import type {
+  AgentSettings,
+  ChatMessage,
+  ModelCapability,
+  PlannerExecutorModelRole,
+  ProviderId,
+  ThinkingEffort,
+} from "../../src/shared/types";
 import { isModelCapability } from "../../src/shared/types";
 import {
   buildOpenAICompatibleAuthHeaders,
@@ -13,19 +20,24 @@ import {
   ensureCapabilityModelProfile,
   findStoredModelProfile,
   findStoredModelProfileByCapability,
+  getStoredModelProfile,
   getPrimaryModelProfile,
   inferModelCapabilities,
   resolveProviderModelConnection,
+  type StoredModelProfile,
 } from "./model-profiles";
 import { resolveStoredModelContextBudget } from "./model-context";
+import { normalizeChatCompletionMessages } from "./model-message-normalization";
 import type { ToolExecutionContext } from "./types";
 import { getOptionalStringArg, getStringArg } from "./utils";
 
 const MISSING_PRIMARY_MODEL_MESSAGE = "No primary model is configured. Go to Settings > Models, create a model, add an API key, and mark it as Primary.";
 
 export interface ModelRuntimeConfig {
+  profileId?: string;
   name: string;
   providerId: ProviderId;
+  providerName?: string;
   apiBase: string;
   apiKey: string;
   model: string;
@@ -135,6 +147,7 @@ export function resolveThinkingRequestConfig(
 function toRuntimeConfig(
   name: string,
   providerId: ProviderId,
+  providerName: string | undefined,
   apiBase: string,
   apiKey: string,
   model: string,
@@ -144,12 +157,15 @@ function toRuntimeConfig(
   aiRequestTimeoutMs = 0,
   abortSignal?: AbortSignal,
   capabilities?: ModelCapability[],
+  profileId?: string,
 ): ModelRuntimeConfig {
   const normalizedModel = model.trim();
   const mergedCapabilities = [...new Set([...(capabilities ?? []), ...inferModelCapabilities(normalizedModel)])];
   return {
+    profileId,
     name,
     providerId,
+    providerName,
     apiBase: normalizeProviderApiBase(apiBase, providerId),
     apiKey: apiKey.trim(),
     model: normalizedModel,
@@ -170,13 +186,14 @@ function toRuntimeConfig(
 }
 
 function buildOpenAIRequestHeaders(
-  config: Pick<ModelRuntimeConfig, "providerId" | "apiBase" | "apiKey">,
+  config: Pick<ModelRuntimeConfig, "providerId" | "providerName" | "apiBase" | "apiKey">,
   contentType = "application/json",
 ) {
   return {
     ...(contentType ? { "Content-Type": contentType } : {}),
     ...buildOpenAICompatibleAuthHeaders(config.apiKey, {
       providerId: config.providerId,
+      providerName: config.providerName,
       apiBase: config.apiBase,
     }),
   };
@@ -214,12 +231,137 @@ async function fetchAiRequest(input: RequestInfo | URL, init: RequestInit, timeo
 }
 
 export function modelConfigAllowsEmptyApiKey(
-  config: Pick<ModelRuntimeConfig, "providerId" | "apiBase">,
+  config: Pick<ModelRuntimeConfig, "providerId" | "providerName" | "apiBase">,
 ) {
   return providerConnectionAllowsEmptyApiKey({
     providerId: config.providerId,
+    providerName: config.providerName,
     apiBase: config.apiBase,
   });
+}
+
+function roleDisplayName(role: PlannerExecutorModelRole) {
+  switch (role) {
+    case "planner":
+      return "planner";
+    case "executor":
+      return "executor";
+    case "verifier":
+      return "verifier";
+    default:
+      return "primary";
+  }
+}
+
+function configHasChatCapability(config: Pick<ModelRuntimeConfig, "capabilities">) {
+  return Boolean(config.capabilities?.includes("chat") || config.capabilities?.includes("orchestration"));
+}
+
+function validateRoleConfig(role: PlannerExecutorModelRole, config: ModelRuntimeConfig) {
+  const roleName = roleDisplayName(role);
+  if (!config.model.trim()) {
+    return `${roleName} profile "${config.name}" does not have a model id.`;
+  }
+  if (!configHasChatCapability(config)) {
+    return `${roleName} profile "${config.name}" must include the chat or orchestration capability.`;
+  }
+  if (!config.apiKey.trim() && !modelConfigAllowsEmptyApiKey(config)) {
+    return `${roleName} profile "${config.name}" does not have an API key.`;
+  }
+  return "";
+}
+
+async function toRuntimeConfigFromStoredProfile(
+  profile: StoredModelProfile,
+  settings: Partial<AgentSettings>,
+  requestId?: string,
+): Promise<ModelRuntimeConfig> {
+  const budget = await resolveStoredModelContextBudget({ profile, settings });
+  return toRuntimeConfig(
+    profile.name,
+    profile.providerId,
+    profile.providerName,
+    profile.apiBase,
+    profile.apiKey,
+    profile.model,
+    profile.temperature ?? settings.temperature ?? 0,
+    budget,
+    { thinkingEnabled: profile.thinkingEnabled, thinkingEffort: profile.thinkingEffort },
+    settings.aiRequestTimeoutMs,
+    requestId ? getRunAbortSignal(requestId) : undefined,
+    profile.capabilities,
+    profile.id,
+  );
+}
+
+export interface PlannerExecutorRoleConfigs {
+  enabled: boolean;
+  primary: ModelRuntimeConfig;
+  planner: ModelRuntimeConfig;
+  executor?: ModelRuntimeConfig;
+  verifier?: ModelRuntimeConfig;
+  executorSelectionReason?: string;
+  executorCostConfidence?: "known" | "unknown";
+  usingPrimaryAsExecutor?: boolean;
+  errors: string[];
+}
+
+export async function resolvePlannerExecutorRoleConfigs(
+  settings: AgentSettings,
+  primaryConfig: ModelRuntimeConfig,
+  requestId?: string,
+): Promise<PlannerExecutorRoleConfigs> {
+  if (!settings.plannerExecutorRoutingEnabled) {
+    return {
+      enabled: false,
+      primary: primaryConfig,
+      planner: primaryConfig,
+      executor: primaryConfig,
+      verifier: primaryConfig,
+      errors: [],
+    };
+  }
+
+  const errors: string[] = [];
+  const primaryValidationError = validateRoleConfig("primary", primaryConfig);
+  if (primaryValidationError) {
+    errors.push(`Unable to use the primary model for planning and checking: ${primaryValidationError}`);
+  }
+
+  const selectedExecutorProfileId = settings.executorProfileId?.trim() ?? "";
+  let executorProfile: StoredModelProfile | null = null;
+  if (!selectedExecutorProfileId) {
+    errors.push("Planner/executor routing is enabled, but no executor model profile is selected in Settings.");
+  } else if (selectedExecutorProfileId === primaryConfig.profileId) {
+    errors.push("The executor model profile must be different from the primary model profile.");
+  } else {
+    executorProfile = await getStoredModelProfile(selectedExecutorProfileId);
+    if (!executorProfile) {
+      errors.push("The selected executor model profile was not found.");
+    } else if (!executorProfile.enabled) {
+      errors.push(`The selected executor model profile "${executorProfile.name}" is disabled.`);
+    }
+  }
+
+  const executorConfig = executorProfile && executorProfile.enabled
+    ? await toRuntimeConfigFromStoredProfile(executorProfile, settings, requestId)
+    : undefined;
+  const executorValidationError = executorConfig ? validateRoleConfig("executor", executorConfig) : "";
+  if (executorValidationError) {
+    errors.push(`Unable to use the selected executor model: ${executorValidationError}`);
+  }
+
+  return {
+    enabled: true,
+    primary: primaryConfig,
+    planner: primaryConfig,
+    executor: executorValidationError ? undefined : executorConfig,
+    verifier: primaryConfig,
+    executorSelectionReason: executorProfile ? "configured_executor_profile" : "missing_configured_executor_profile",
+    executorCostConfidence: "unknown",
+    usingPrimaryAsExecutor: false,
+    errors,
+  };
 }
 
 export async function resolvePrimaryModelConfig(settings: AgentSettings, storedApiKey = ""): Promise<ModelRuntimeConfig> {
@@ -229,6 +371,7 @@ export async function resolvePrimaryModelConfig(settings: AgentSettings, storedA
     return toRuntimeConfig(
       primary.name,
       primary.providerId,
+      primary.providerName,
       primary.apiBase,
       primary.apiKey,
       primary.model,
@@ -238,6 +381,7 @@ export async function resolvePrimaryModelConfig(settings: AgentSettings, storedA
       settings.aiRequestTimeoutMs,
       undefined,
       primary.capabilities,
+      primary.id,
     );
   }
   const apiKey = settings.apiKey || storedApiKey || "";
@@ -246,7 +390,7 @@ export async function resolvePrimaryModelConfig(settings: AgentSettings, storedA
     throw new Error(MISSING_PRIMARY_MODEL_MESSAGE);
   }
   const budget = await resolveStoredModelContextBudget({ settings });
-  return toRuntimeConfig("default", settings.providerId, settings.apiBase, apiKey, model, settings.temperature, budget, {
+  return toRuntimeConfig("default", settings.providerId, settings.providerName, settings.apiBase, apiKey, model, settings.temperature, budget, {
     thinkingEnabled: settings.thinkingEnabled,
     thinkingEffort: settings.thinkingEffort,
   }, settings.aiRequestTimeoutMs);
@@ -273,6 +417,7 @@ export async function resolveModelConfigFromArgs(
     return toRuntimeConfig(
       profile.name,
       profile.providerId,
+      profile.providerName,
       profile.apiBase,
       profile.apiKey,
       profile.model,
@@ -282,6 +427,7 @@ export async function resolveModelConfigFromArgs(
       ctx.settings.aiRequestTimeoutMs,
       getRunAbortSignal(ctx.requestId),
       profile.capabilities,
+      profile.id,
     );
   }
 
@@ -297,6 +443,7 @@ export async function resolveModelConfigFromArgs(
       return toRuntimeConfig(
         profile.name,
         profile.providerId,
+        profile.providerName,
         profile.apiBase,
         profile.apiKey,
         profile.model,
@@ -306,6 +453,7 @@ export async function resolveModelConfigFromArgs(
         ctx.settings.aiRequestTimeoutMs,
         getRunAbortSignal(ctx.requestId),
         profile.capabilities,
+        profile.id,
       );
     }
     if (options.allowDefault === false) {
@@ -313,9 +461,32 @@ export async function resolveModelConfigFromArgs(
     }
   }
 
+  if ((!profileQuery || profileQuery === "default") && ctx.defaultModelProfileId) {
+    const profile = await findStoredModelProfile(ctx.defaultModelProfileId);
+    if (!profile) {
+      throw new Error(`Default ${ctx.defaultModelRole || "model"} profile is unavailable: ${ctx.defaultModelProfileId}`);
+    }
+    const budget = await resolveStoredModelContextBudget({ profile, settings: ctx.settings });
+    return toRuntimeConfig(
+      profile.name,
+      profile.providerId,
+      profile.providerName,
+      profile.apiBase,
+      profile.apiKey,
+      profile.model,
+      profile.temperature ?? ctx.settings.temperature,
+      budget,
+      { thinkingEnabled: profile.thinkingEnabled, thinkingEffort: profile.thinkingEffort },
+      ctx.settings.aiRequestTimeoutMs,
+      getRunAbortSignal(ctx.requestId),
+      profile.capabilities,
+      profile.id,
+    );
+  }
+
   if (!profileQuery || profileQuery === "default" || options.allowDefault !== false) {
     const budget = await resolveStoredModelContextBudget({ settings: ctx.settings });
-    return toRuntimeConfig("default", ctx.settings.providerId, ctx.apiBase, ctx.apiKey, ctx.settings.model, ctx.settings.temperature, budget, {
+    return toRuntimeConfig("default", ctx.settings.providerId, ctx.settings.providerName, ctx.apiBase, ctx.apiKey, ctx.settings.model, ctx.settings.temperature, budget, {
       thinkingEnabled: ctx.settings.thinkingEnabled,
       thinkingEffort: ctx.settings.thinkingEffort,
     }, ctx.settings.aiRequestTimeoutMs, getRunAbortSignal(ctx.requestId));
@@ -346,6 +517,7 @@ export async function resolveCapabilityModelConfig(
   return toRuntimeConfig(
     profile.name,
     profile.providerId,
+    profile.providerName,
     profile.apiBase,
     profile.apiKey,
     profile.model,
@@ -355,6 +527,7 @@ export async function resolveCapabilityModelConfig(
     settings.aiRequestTimeoutMs,
     undefined,
     profile.capabilities,
+    profile.id,
   );
 }
 
@@ -401,12 +574,13 @@ async function callAnthropicMessages(
   messages: ChatCompletionMessage[],
   options: { temperature?: number; maxTokens?: number; thinking?: ThinkingRequestConfig } = {},
 ) {
-  const system = messages
+  const normalizedMessages = normalizeChatCompletionMessages(messages);
+  const system = normalizedMessages
     .filter((message) => message.role === "system")
     .map((message) => typeof message.content === "string" ? message.content : "")
     .filter(Boolean)
     .join("\n\n");
-  const anthropicMessages = messages
+  const anthropicMessages = normalizedMessages
     .filter((message) => message.role !== "system")
     .map((message) => ({
       role: message.role === "assistant" ? "assistant" : "user",
@@ -474,8 +648,9 @@ export async function callChatCompletion(
   messages: ChatCompletionMessage[],
   options: { temperature?: number; maxTokens?: number; thinking?: ThinkingRequestConfig } = {},
 ) {
+  const normalizedMessages = normalizeChatCompletionMessages(messages);
   if (config.providerId === "anthropic-compatible") {
-    return callAnthropicMessages(config, messages, options);
+    return callAnthropicMessages(config, normalizedMessages, options);
   }
 
   return withAiRequestRetries(async () => {
@@ -489,7 +664,7 @@ export async function callChatCompletion(
         ...(options.thinking?.openAIReasoningEffort
           ? { reasoning_effort: options.thinking.openAIReasoningEffort }
           : {}),
-        messages: messages.map((message) => ({
+        messages: normalizedMessages.map((message) => ({
           role: message.role,
           content: normalizeChatContent(message.content),
         })),

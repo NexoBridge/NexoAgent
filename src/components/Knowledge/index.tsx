@@ -5,8 +5,8 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import { apiGet, apiPost, apiDelete } from "../../services/api";
 import { useI18n } from "../../i18n";
-import { useTheme } from "../../theme";
 import { OverflowMenuButton } from "../Common/OverflowMenuButton";
+import "./index.scss";
 
 interface TreeNode {
   key: string;
@@ -41,7 +41,6 @@ function parentPathKeys(filePath: string) {
 }
 
 export default function Knowledge({ openPath = null }: KnowledgeProps) {
-  const { colors } = useTheme();
   const { lang, t } = useI18n();
   const [treeData, setTreeData] = useState<TreeNode[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
@@ -207,11 +206,11 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
   };
 
   const titleRender = (node: TreeNode) => (
-    <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", color: colors.textPrimary }}>
+    <span className="knowledge-panel__tree-node">
       <span>{node.title}</span>
       {node.isLeaf && (
         <OverflowMenuButton
-          color={colors.textSecondary}
+          color="var(--nexo-text-secondary)"
           items={[{ key: "delete", label: t("delete"), danger: true }]}
           onItemClick={(key) => {
             if (key === "delete") {
@@ -223,17 +222,6 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
     </span>
   );
 
-  const editorStyle: React.CSSProperties = {
-    flex: 1,
-    background: colors.bgSecondary,
-    border: `1px solid ${colors.borderStrong}`,
-    color: colors.textPrimary,
-    padding: 12,
-    borderRadius: 8,
-    resize: "none",
-    fontFamily: "Consolas, Monaco, monospace",
-  };
-
   const handleKnowledgeDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragActive(false);
@@ -244,7 +232,7 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
 
   return (
     <div
-      style={{ display: "flex", height: "100%", background: colors.bgPrimary, color: colors.textPrimary, position: "relative", overflow: "hidden" }}
+      className="knowledge-panel"
       onDragEnter={(event) => {
         if (!event.dataTransfer.types.includes("Files")) return;
         event.preventDefault();
@@ -262,39 +250,14 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
       onDrop={handleKnowledgeDrop}
     >
       {dragActive && (
-        <div
-          style={{
-            position: "absolute",
-            inset: 12,
-            zIndex: 10,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 10,
-            background: `${colors.bgPrimary}ee`,
-            border: `2px dashed ${colors.accent}`,
-            borderRadius: 8,
-            color: colors.textPrimary,
-            pointerEvents: "none",
-          }}
-        >
-          <InboxOutlined style={{ fontSize: 40, color: colors.accent }} />
-          <div style={{ fontWeight: 700 }}>{ui.importFiles}</div>
-          <div style={{ color: colors.textSecondary }}>{ui.importHint}</div>
+        <div className="knowledge-panel__drop-overlay">
+          <InboxOutlined className="knowledge-panel__drop-icon" />
+          <div className="knowledge-panel__drop-title">{ui.importFiles}</div>
+          <div className="knowledge-panel__drop-hint">{ui.importHint}</div>
         </div>
       )}
-      <div
-        style={{
-          width: 260,
-          flexShrink: 0,
-          background: colors.bgSecondary,
-          borderRight: `1px solid ${colors.border}`,
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        <div style={{ padding: "12px 8px", borderBottom: `1px solid ${colors.border}` }}>
+      <div className="knowledge-panel__sidebar">
+        <div className="knowledge-panel__sidebar-header">
           <Button
             block
             icon={<FileOutlined />}
@@ -305,27 +268,16 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
               setEditContent("");
               setNewFileName("");
             }}
-            style={{ background: colors.bgTertiary, color: colors.textPrimary, border: `1px solid ${colors.borderStrong}` }}
+            className="knowledge-panel__create-btn"
           >
             {ui.createFile}
           </Button>
-          <div
-            style={{
-              marginTop: 10,
-              padding: "10px 8px",
-              border: `1px dashed ${colors.borderStrong}`,
-              borderRadius: 8,
-              color: colors.textSecondary,
-              fontSize: 12,
-              lineHeight: 1.5,
-              textAlign: "center",
-            }}
-          >
-            <InboxOutlined style={{ marginRight: 6 }} />
+          <div className="knowledge-panel__import-hint">
+            <InboxOutlined className="knowledge-panel__import-icon" />
             {ui.importFiles}
           </div>
         </div>
-        <div style={{ flex: 1, overflow: "auto", padding: "8px 4px" }}>
+        <div className="knowledge-panel__tree-wrap">
           <Tree
             treeData={treeData}
             titleRender={titleRender as never}
@@ -337,36 +289,27 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
                 void loadFile(String(keys[0]));
               }
             }}
-            style={{ background: "transparent", color: colors.textPrimary }}
+            className="knowledge-panel__tree"
           />
         </div>
       </div>
 
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <div className="knowledge-panel__main">
         {!selectedPath && !creating ? (
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              color: colors.textSecondary,
-            }}
-          >
-            <BookOutlined style={{ fontSize: 48, marginBottom: 16 }} />
+          <div className="knowledge-panel__empty">
+            <BookOutlined className="knowledge-panel__empty-icon" />
             <span>{ui.emptyState}</span>
           </div>
         ) : creating ? (
-          <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 12, flex: 1 }}>
+          <div className="knowledge-panel__editor-wrap">
             <Input
               placeholder={ui.filePathPlaceholder}
               value={newFileName}
               onChange={(event) => setNewFileName(event.target.value)}
-              style={{ background: colors.bgSecondary, borderColor: colors.borderStrong, color: colors.textPrimary }}
+              className="knowledge-panel__path-input"
             />
-            <textarea value={editContent} onChange={(event) => setEditContent(event.target.value)} style={editorStyle} />
-            <div style={{ display: "flex", gap: 8 }}>
+            <textarea value={editContent} onChange={(event) => setEditContent(event.target.value)} className="knowledge-panel__editor" />
+            <div className="knowledge-panel__actions">
               <Button type="primary" onClick={() => void saveFile()}>
                 {t("save")}
               </Button>
@@ -374,9 +317,9 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
             </div>
           </div>
         ) : editing ? (
-          <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 12, flex: 1 }}>
-            <textarea value={editContent} onChange={(event) => setEditContent(event.target.value)} style={editorStyle} />
-            <div style={{ display: "flex", gap: 8 }}>
+          <div className="knowledge-panel__editor-wrap">
+            <textarea value={editContent} onChange={(event) => setEditContent(event.target.value)} className="knowledge-panel__editor" />
+            <div className="knowledge-panel__actions">
               <Button type="primary" onClick={() => void saveFile()}>
                 {t("save")}
               </Button>
@@ -384,11 +327,11 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
             </div>
           </div>
         ) : (
-          <div style={{ padding: 24, flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-              <span style={{ fontWeight: 600, color: colors.textPrimary }}>{selectedPath}</span>
+          <div className="knowledge-panel__viewer">
+            <div className="knowledge-panel__viewer-header">
+              <span className="knowledge-panel__viewer-title">{selectedPath}</span>
               <OverflowMenuButton
-                color={colors.textSecondary}
+                color="var(--nexo-text-secondary)"
                 items={[
                   { key: "edit", label: t("edit") },
                   { key: "delete", label: t("delete"), danger: true },
@@ -405,7 +348,7 @@ export default function Knowledge({ openPath = null }: KnowledgeProps) {
                 }}
               />
             </div>
-            <div style={{ flex: 1, overflow: "auto", color: colors.textPrimary }}>
+            <div className="knowledge-panel__markdown">
               <ReactMarkdown rehypePlugins={[rehypeHighlight]}>{content}</ReactMarkdown>
             </div>
           </div>

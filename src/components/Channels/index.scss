@@ -1,0 +1,94 @@
+.channels-panel {
+  padding: 28px 32px;
+  color: var(--nexo-text-primary);
+  background: var(--nexo-bg-primary);
+  min-height: 100%;
+
+  &__title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 24px;
+  }
+
+  &__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 20px;
+  }
+
+  &__card {
+    background: var(--nexo-bg-secondary);
+    border: 1px solid var(--nexo-border);
+    border-radius: 10px;
+    padding: 20px 24px;
+  }
+
+  &__card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  &__card-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  &__card-name {
+    color: var(--nexo-text-primary);
+    font-weight: 600;
+  }
+
+  &__card-desc {
+    color: var(--nexo-text-secondary);
+    font-size: 12px;
+  }
+
+  &__callback {
+    margin-top: 16px;
+  }
+
+  &__label {
+    color: var(--nexo-text-secondary);
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+
+  &__input {
+    background: var(--nexo-bg-primary);
+    border-color: var(--nexo-border-strong);
+    color: var(--nexo-text-primary);
+  }
+
+  &__copy-icon {
+    color: var(--nexo-text-muted);
+    cursor: pointer;
+  }
+
+  &__note {
+    margin-top: 12px;
+  }
+
+  &__fields {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  &__save-btn {
+    align-self: flex-end;
+    margin-top: 4px;
+  }
+
+  &__icon--web {
+    font-size: 22px;
+    color: #38bdf8;
+  }
+
+  &__icon-char {
+    font-size: 22px;
+  }
+}

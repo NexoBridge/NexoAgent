@@ -7,6 +7,60 @@ export type ProviderId =
 
 export type PlanningMode = "fast" | "balanced" | "deep";
 export type ThinkingEffort = "high" | "max";
+export type PlannerExecutorRouteClass = "simple" | "medium" | "complex" | "reasoning" | "agentic";
+export type PlannerExecutorModelRole = "primary" | "planner" | "executor" | "verifier";
+export type PlannerExecutorExecutionMode =
+  | "fast_executor"
+  | "planned_executor"
+  | "iterative_orchestration"
+  | "verified_executor"
+  | "primary_takeover";
+export type PlannerExecutorRiskLevel = "low" | "medium" | "high";
+export type PlannerExecutorVerificationLevel = "none" | "deterministic" | "primary";
+
+export interface ModelRoutingUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
+}
+
+export interface ModelRoutingTraceStep {
+  role: PlannerExecutorModelRole;
+  status: "resolved" | "started" | "completed" | "failed" | "skipped";
+  routeClass?: PlannerExecutorRouteClass;
+  executionMode?: PlannerExecutorExecutionMode;
+  riskLevel?: PlannerExecutorRiskLevel;
+  verificationLevel?: PlannerExecutorVerificationLevel;
+  iteration?: number;
+  profileId?: string;
+  profileName?: string;
+  providerId?: ProviderId;
+  model?: string;
+  reason?: string;
+  replanReason?: string;
+  usage?: ModelRoutingUsage;
+}
+
+export interface ModelRoutingMetadata {
+  enabled: boolean;
+  routeClass?: PlannerExecutorRouteClass;
+  executionMode?: PlannerExecutorExecutionMode;
+  riskLevel?: PlannerExecutorRiskLevel;
+  verificationLevel?: PlannerExecutorVerificationLevel;
+  checkTriggered?: boolean;
+  checkReasons?: string[];
+  replanTriggered?: boolean;
+  replanReasons?: string[];
+  loopIterations?: number;
+  executorSelectionReason?: string;
+  executorCostConfidence?: "known" | "unknown";
+  usingPrimaryAsExecutor?: boolean;
+  qualityScore?: number;
+  qualityThreshold?: number;
+  steps: ModelRoutingTraceStep[];
+  error?: string;
+}
 
 export type ModelContextSource =
   | "user"
@@ -81,6 +135,8 @@ export interface AgentSettings extends ModelContextBudget {
   /** AI request timeout in milliseconds. 0 disables app-level request timeouts. */
   aiRequestTimeoutMs: number;
   planningMode: PlanningMode;
+  plannerExecutorRoutingEnabled: boolean;
+  executorProfileId?: string;
   thinkingEnabled: boolean;
   thinkingEffort: ThinkingEffort;
   circuitBreakerEnabled: boolean;
@@ -438,6 +494,7 @@ export interface ChatMessage {
     toolCalls?: ToolCallTrace[];
     messageBlocks?: MessageBlock[];
     knowledgeSources?: KnowledgeSourceHit[];
+    routing?: ModelRoutingMetadata;
   };
 }
 

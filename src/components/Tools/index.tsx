@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import type { CSSProperties } from "react";
 import {
   Alert,
   Button,
@@ -28,9 +27,9 @@ import {
 } from "@ant-design/icons";
 import type { McpServerConfig, McpServerListItem, McpServerStatus } from "../../shared/types";
 import { apiGet, apiPost } from "../../services/api";
-import { useTheme } from "../../theme";
 import { OverflowMenuButton } from "../Common/OverflowMenuButton";
 import { useI18n } from "../../i18n";
+import "./index.scss";
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -51,6 +50,12 @@ interface McpServerFormValues {
   name: string;
   command: string;
   args: string;
+}
+
+interface ParsedMcpServerInput {
+  name?: string;
+  command?: string;
+  args: string[];
 }
 
 type TestingState = Record<string, boolean>;
@@ -79,7 +84,6 @@ function localizeGroup(group: string, lang: "zh" | "en") {
 }
 
 export default function Tools() {
-  const { colors } = useTheme();
   const { lang, t } = useI18n();
   const [messageApi, messageContext] = message.useMessage();
   const [tools, setTools] = useState<ToolItem[]>([]);
@@ -133,36 +137,70 @@ export default function Tools() {
     toolsCount: (count: number) => lang === "zh" ? `${count} \u4e2a\u5de5\u5177` : `${count} tools`,
   }), [lang]);
 
-  const cardStyle: CSSProperties = useMemo(
-    () => ({
-      background: colors.bgSecondary,
-      border: `1px solid ${colors.border}`,
-      borderRadius: 14,
-      padding: "0 16px",
-      overflow: "hidden",
-      boxShadow: colors.bgPrimary === "#0e1726" ? "0 10px 30px rgba(0, 0, 0, 0.2)" : "0 10px 24px rgba(15, 23, 42, 0.06)",
-    }),
-    [colors],
-  );
+  const normalizeJsonInput = (raw: string) =>
+    raw.replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/g, " ").trim();
 
-  const subtlePanelStyle: CSSProperties = useMemo(
-    () => ({
-      background: `linear-gradient(135deg, ${colors.bgSecondary} 0%, ${colors.bgTertiary} 100%)`,
-      border: `1px solid ${colors.border}`,
-      borderRadius: 16,
-      padding: 16,
-    }),
-    [colors],
-  );
-
-  const parseArgsInput = (raw: string) => {
-    const trimmed = raw.trim();
-    if (!trimmed) return [];
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (!Array.isArray(parsed)) {
+  const parseArgsArray = (rawArgs: unknown) => {
+    if (!Array.isArray(rawArgs)) {
       throw new Error(ui.argsMustBeArray);
     }
-    return parsed.map((item) => String(item));
+    return rawArgs.map((item) => String(item));
+  };
+
+  const parseMcpConfigObject = (parsed: unknown): ParsedMcpServerInput | null => {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    const root = parsed as Record<string, unknown>;
+    const mcpServers = root.mcpServers;
+    if (mcpServers && typeof mcpServers === "object" && !Array.isArray(mcpServers)) {
+      const [firstServer] = Object.entries(mcpServers as Record<string, unknown>);
+      if (!firstServer) {
+        return null;
+      }
+
+      const [name, serverConfig] = firstServer;
+      if (!serverConfig || typeof serverConfig !== "object" || Array.isArray(serverConfig)) {
+        return null;
+      }
+
+      const config = serverConfig as Record<string, unknown>;
+      return {
+        name,
+        command: typeof config.command === "string" ? config.command : undefined,
+        args: parseArgsArray(config.args ?? []),
+      };
+    }
+
+    if ("command" in root || "args" in root) {
+      return {
+        name: typeof root.name === "string" ? root.name : undefined,
+        command: typeof root.command === "string" ? root.command : undefined,
+        args: parseArgsArray(root.args ?? []),
+      };
+    }
+
+    return null;
+  };
+
+  const parseMcpServerInput = (values: McpServerFormValues): ParsedMcpServerInput => {
+    const trimmed = normalizeJsonInput(values.args);
+    if (!trimmed) {
+      throw new Error(ui.argsRequired);
+    }
+    const parsed = JSON.parse(trimmed) as unknown;
+
+    const fullConfig = parseMcpConfigObject(parsed);
+    if (fullConfig) {
+      return fullConfig;
+    }
+
+    return {
+      name: values.name.trim(),
+      command: values.command.trim(),
+      args: parseArgsArray(parsed),
+    };
   };
 
   const getStatusMeta = (status?: McpServerStatus["status"]) => {
@@ -226,13 +264,36 @@ export default function Tools() {
   };
 
   const saveMcpServer = async () => {
-    const values = await mcpForm.validateFields();
-    let args: string[];
+    const rawValues = mcpForm.getFieldsValue();
+    const values: McpServerFormValues = {
+      name: rawValues.name ?? "",
+      command: rawValues.command ?? "",
+      args: rawValues.args ?? "",
+    };
+    let parsedInput: ParsedMcpServerInput;
 
     try {
-      args = parseArgsInput(values.args);
+      parsedInput = parseMcpServerInput(values);
     } catch (error) {
       void messageApi.error(error instanceof Error ? error.message : ui.argsMustBeArray);
+      return;
+    }
+
+    const nextServer = {
+      name: parsedInput.name?.trim() || values.name.trim(),
+      command: parsedInput.command?.trim() || values.command.trim(),
+      args: parsedInput.args,
+    };
+
+    const fieldErrors: Array<{ name: keyof McpServerFormValues; errors: string[] }> = [];
+    if (!nextServer.name) {
+      fieldErrors.push({ name: "name", errors: [ui.serviceNameRequired] });
+    }
+    if (!nextServer.command) {
+      fieldErrors.push({ name: "command", errors: [ui.commandRequired] });
+    }
+    if (fieldErrors.length > 0) {
+      mcpForm.setFields(fieldErrors);
       return;
     }
 
@@ -242,11 +303,7 @@ export default function Tools() {
         command: server.command,
         args: server.args,
       })),
-      {
-        name: values.name.trim(),
-        command: values.command.trim(),
-        args,
-      },
+      nextServer,
     ];
 
     await persistServers(next);
@@ -304,20 +361,20 @@ export default function Tools() {
   const errorCount = mcpServers.filter((server) => server.runtimeStatus?.status === "error").length;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: colors.bgPrimary, color: colors.textPrimary }}>
-      <div style={{ flexShrink: 0, padding: "24px 24px 0 24px" }}>
+    <div className="tools-panel">
+      <div className="tools-panel__header">
       {messageContext}
-      <div style={{ marginBottom: 18 }}>
-        <Title level={4} style={{ color: colors.textPrimary, marginBottom: 6 }}>
+      <div className="tools-panel__intro">
+        <Title level={4} className="tools-panel__title">
           {t("tools")}
         </Title>
-        <Text style={{ color: colors.textMuted }}>{ui.subtitle}</Text>
+        <Text className="tools-panel__subtitle">{ui.subtitle}</Text>
       </div>
       </div>
-      <div style={{ flex: 1, overflow: "auto", padding: "0 24px 24px 24px", minHeight: 0 }}>
+      <div className="tools-panel__body">
       <Tabs
         renderTabBar={(props, DefaultTabBar) => (
-          <div style={{ position: "sticky", top: 0, zIndex: 10, background: colors.bgPrimary, paddingTop: 8 }}>
+          <div className="tools-panel__sticky-tabs">
             <DefaultTabBar {...props} />
           </div>
         )}
@@ -326,28 +383,28 @@ export default function Tools() {
             key: "builtins",
             label: ui.builtinTools,
             children: loading ? (
-              <div style={{ padding: 48, textAlign: "center" }}>
+              <div className="tools-panel__loading">
                 <Spin />
               </div>
             ) : (
-              <div style={cardStyle}>
+              <div className="tools-panel__card">
                 {builtinGroups.length === 0 ? (
-                  <div style={{ padding: "18px 0" }}>
-                    <Text style={{ color: colors.textMuted }}>{ui.noBuiltinTools}</Text>
+                  <div className="tools-panel__empty">
+                    <Text className="tools-panel__empty-text">{ui.noBuiltinTools}</Text>
                   </div>
                 ) : (
                   builtinGroups.map((group, index) => (
                     <div key={group}>
-                      {index > 0 && <Divider style={{ borderColor: colors.border, margin: 0 }} />}
+                      {index > 0 && <Divider className="tools-panel__divider" />}
                       <List
                         dataSource={tools.filter((tool) => tool.group === group)}
                         renderItem={(tool) => (
                           <List.Item
-                            style={{ borderColor: colors.border, paddingBlock: 14 }}
+                            className="tools-panel__list-item"
                             actions={[
                               <OverflowMenuButton
                                 key="more"
-                                color={colors.textSecondary}
+                                color="var(--nexo-text-secondary)"
                                 items={[{ key: "toggle", label: tool.enabled ? t("disable") : t("enable") }]}
                                 onItemClick={(key) => {
                                   if (key === "toggle") {
@@ -358,18 +415,18 @@ export default function Tools() {
                             ]}
                           >
                             <List.Item.Meta
-                              avatar={<ThunderboltOutlined style={{ color: colors.textSecondary, fontSize: 18, marginTop: 4 }} />}
+                              avatar={<ThunderboltOutlined className="tools-panel__tool-icon" />}
                               title={(
                                 <Space size={8} wrap>
-                                  <span style={{ color: colors.textPrimary, fontWeight: 600 }}>{tool.label || tool.name}</span>
+                                  <span className="tools-panel__tool-name">{tool.label || tool.name}</span>
                                   {tool.label && tool.label !== tool.name ? (
-                                    <Text style={{ color: colors.textMuted }}>{tool.name}</Text>
+                                    <Text className="tools-panel__tool-id">{tool.name}</Text>
                                   ) : null}
                                   <Tag color="blue">{localizeGroup(tool.group, lang)}</Tag>
                                   <Tag color={tool.enabled ? "green" : "default"}>{tool.enabled ? t("enabled") : t("disabled")}</Tag>
                                 </Space>
                               )}
-                              description={<Text style={{ color: colors.textSecondary }}>{tool.description}</Text>}
+                              description={<Text className="tools-panel__tool-desc">{tool.description}</Text>}
                             />
                           </List.Item>
                         )}
@@ -385,27 +442,27 @@ export default function Tools() {
             label: ui.mcpServices,
             children: (
               <>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginBottom: 16 }}>
-                  <div style={subtlePanelStyle}>
-                    <Text style={{ color: colors.textMuted, display: "block", marginBottom: 8 }}>{ui.configuredServices}</Text>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: colors.textPrimary }}>{mcpServers.length}</div>
+                <div className="tools-panel__stats-grid">
+                  <div className="tools-panel__stat-panel">
+                    <Text className="tools-panel__stat-label">{ui.configuredServices}</Text>
+                    <div className="tools-panel__stat-value">{mcpServers.length}</div>
                   </div>
-                  <div style={subtlePanelStyle}>
-                    <Text style={{ color: colors.textMuted, display: "block", marginBottom: 8 }}>{ui.connected}</Text>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: "#22c55e" }}>{connectedCount}</div>
+                  <div className="tools-panel__stat-panel">
+                    <Text className="tools-panel__stat-label">{ui.connected}</Text>
+                    <div className="tools-panel__stat-value tools-panel__stat-value--success">{connectedCount}</div>
                   </div>
-                  <div style={subtlePanelStyle}>
-                    <Text style={{ color: colors.textMuted, display: "block", marginBottom: 8 }}>{ui.discoveredTools}</Text>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: colors.textPrimary }}>{mcpTools.length}</div>
+                  <div className="tools-panel__stat-panel">
+                    <Text className="tools-panel__stat-label">{ui.discoveredTools}</Text>
+                    <div className="tools-panel__stat-value">{mcpTools.length}</div>
                   </div>
-                  <div style={subtlePanelStyle}>
-                    <Text style={{ color: colors.textMuted, display: "block", marginBottom: 8 }}>{ui.issues}</Text>
-                    <div style={{ fontSize: 28, fontWeight: 700, color: errorCount > 0 ? "#ef4444" : colors.textPrimary }}>{errorCount}</div>
+                  <div className="tools-panel__stat-panel">
+                    <Text className="tools-panel__stat-label">{ui.issues}</Text>
+                    <div className={`tools-panel__stat-value${errorCount > 0 ? " tools-panel__stat-value--error" : ""}`}>{errorCount}</div>
                   </div>
                 </div>
 
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, marginBottom: 16 }}>
-                  <Alert type="info" showIcon message={ui.infoMessage} style={{ flex: 1 }} />
+                <div className="tools-panel__toolbar-row">
+                  <Alert type="info" showIcon message={ui.infoMessage} className="tools-panel__info-alert" />
                   <Space>
                     <Button icon={<SyncOutlined />} onClick={() => void loadAll()} loading={loading}>
                       {t("refresh")}
@@ -416,7 +473,7 @@ export default function Tools() {
                   </Space>
                 </div>
 
-                <div style={cardStyle}>
+                <div className="tools-panel__card">
                   <List
                     locale={{ emptyText: ui.noServices }}
                     dataSource={mcpServers}
@@ -432,7 +489,7 @@ export default function Tools() {
 
                       return (
                         <List.Item
-                          style={{ borderColor: colors.border, paddingBlock: 16 }}
+                          className="tools-panel__list-item tools-panel__list-item--server"
                           actions={[
                             <Button
                               key="test"
@@ -445,7 +502,7 @@ export default function Tools() {
                             </Button>,
                             <OverflowMenuButton
                               key="more"
-                              color={colors.textSecondary}
+                              color="var(--nexo-text-secondary)"
                               items={[{ key: "delete", label: t("delete"), danger: true }]}
                               onItemClick={(key) => {
                                 if (key === "delete") {
@@ -456,10 +513,10 @@ export default function Tools() {
                           ]}
                         >
                           <List.Item.Meta
-                            avatar={<GlobalOutlined style={{ color: colors.textSecondary, fontSize: 18, marginTop: 4 }} />}
+                            avatar={<GlobalOutlined className="tools-panel__tool-icon" />}
                             title={(
                               <Space size={8} wrap>
-                                <span style={{ color: colors.textPrimary, fontWeight: 600 }}>{server.name}</span>
+                                <span className="tools-panel__tool-name">{server.name}</span>
                                 <Tag color={statusMeta.color} icon={statusMeta.icon}>
                                   {statusMeta.label}
                                 </Tag>
@@ -467,9 +524,9 @@ export default function Tools() {
                               </Space>
                             )}
                             description={(
-                              <Space direction="vertical" size={8} style={{ width: "100%" }}>
-                                <Paragraph style={{ color: colors.textSecondary, marginBottom: 0 }}>
-                                  <Text style={{ color: colors.textMuted }}>{ui.startupCommand}</Text>{" "}
+                              <Space direction="vertical" size={8} className="tools-panel__server-meta">
+                                <Paragraph className="tools-panel__server-desc">
+                                  <Text className="tools-panel__command-label">{ui.startupCommand}</Text>{" "}
                                   {server.command} {server.args.length > 0 ? JSON.stringify(server.args) : ""}
                                 </Paragraph>
                                 {status?.error ? (
@@ -481,7 +538,7 @@ export default function Tools() {
                                 ) : null}
                                 {visibleToolNames.length > 0 ? (
                                   <div>
-                                    <Text style={{ color: colors.textMuted, display: "block", marginBottom: 6 }}>{ui.discoveredTools}</Text>
+                                    <Text className="tools-panel__discovered-label">{ui.discoveredTools}</Text>
                                     <Space size={[6, 6]} wrap>
                                       {visibleToolNames.map((toolName) => (
                                         <Tag key={`${server.name}-${toolName}`} color="default">
@@ -491,7 +548,7 @@ export default function Tools() {
                                     </Space>
                                   </div>
                                 ) : (
-                                  <Text style={{ color: colors.textMuted }}>{ui.noToolsFound}</Text>
+                                  <Text className="tools-panel__no-tools">{ui.noToolsFound}</Text>
                                 )}
                               </Space>
                             )}
@@ -540,7 +597,7 @@ export default function Tools() {
               <Space size={6}>
                 <span>{ui.commandArgsJson}</span>
                 <Tooltip title='["@modelcontextprotocol/server-filesystem", "D:/company/nexoAgent"]'>
-                  <InfoCircleOutlined style={{ color: colors.textMuted }} />
+                  <InfoCircleOutlined className="tools-panel__tooltip-icon" />
                 </Tooltip>
               </Space>
             )}

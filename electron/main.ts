@@ -19,7 +19,12 @@ import type {
   AgentSettings,
   RuntimeInfo
 } from "../src/shared/types";
-import { isPreservedApiKeyInput, normalizeAiRequestTimeoutMs } from "../src/shared/settings";
+import {
+  DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
+  isPreservedApiKeyInput,
+  normalizeAiRequestTimeoutMs,
+  normalizePlannerExecutorRoutingSettings,
+} from "../src/shared/settings";
 import type { DesktopThemeMode } from "../src/shared/desktop";
 import type { TaskExecutionResult } from "./server/tasks";
 
@@ -51,6 +56,7 @@ const defaultSettings: AgentSettings = {
   shellCommandTimeoutMs: 0,
   aiRequestTimeoutMs: 0,
   planningMode: "balanced",
+  ...DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
   thinkingEnabled: true,
   thinkingEffort: "high",
   circuitBreakerEnabled: true,
@@ -102,13 +108,13 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerId,
     settings.providerName,
   );
-  return {
+  return normalizePlannerExecutorRoutingSettings({
     ...settings,
     providerId,
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
     aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
-  };
+  });
 }
 
 // 启动时预加载 API Key，并在每次保存设置后刷新

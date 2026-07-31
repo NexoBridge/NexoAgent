@@ -32,6 +32,8 @@ The system SHALL pass tool outputs through the normal chat/model path without ap
 - **AND** the run SHALL stop with `stopReason="context_overflow"` before sending another model request
 - **AND** the runtime SHALL NOT synthesize a partial preview and continue as though the complete output were available to the model
 
+## ADDED Requirements
+
 ### Requirement: HTTP text payload intake
 The system SHALL accept chat-sized plain text payloads up to a configurable request-body limit and report request-body overflow as structured JSON.
 

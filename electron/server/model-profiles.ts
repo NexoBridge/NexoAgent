@@ -37,7 +37,6 @@ const CAPABILITY_KEYWORDS: Array<[ModelCapability, RegExp]> = [
   ["embedding", /\b(embed|embedding|text-embedding|bge|gte|e5|m3e|jina|voyage)\b/i],
 ];
 const EMBEDDING_EXCLUSION_PATTERN = /\b(rerank|reranker)\b/i;
-
 function uniqueCapabilities(items: ModelCapability[]) {
   return MODEL_CAPABILITIES.filter((capability) => items.includes(capability));
 }

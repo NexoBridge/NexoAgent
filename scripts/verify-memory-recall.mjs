@@ -69,11 +69,12 @@ Options:
   --model=text-embedding-3-small
 
 Examples:
-  npm run verify:memory-recall
-  npm run verify:memory-recall -- --keep
-  npm run verify:memory-recall -- --total=1000 --queries=120
-  npm run verify:memory-recall -- --isolated --k=10
-  npm run verify:memory-recall -- --api-base=https://api.openai.com/v1 --model=text-embedding-3-small
+  npm run build:electron
+  node scripts/verify-memory-recall.mjs
+  node scripts/verify-memory-recall.mjs --keep
+  node scripts/verify-memory-recall.mjs --total=1000 --queries=120
+  node scripts/verify-memory-recall.mjs --isolated --k=10
+  node scripts/verify-memory-recall.mjs --api-base=https://api.openai.com/v1 --model=text-embedding-3-small
 `);
 }
 

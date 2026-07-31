@@ -14,6 +14,7 @@ Nexo Agent 是一个本地优先的 AI Agent 桌面应用和 Web 控制台。它
 
 - 多会话聊天：支持流式回复、会话持久化、中断、工具调用轨迹和历史管理。
 - 多模型编排：通过 LangChain 对接 OpenAI-compatible、Anthropic-compatible 和自定义模型配置。
+- 大模型规划，小模型执行：Primary 模型可负责规划和检查，配置的小模型负责执行当前回合。
 - 精简内置工具：支持命令行、模型子调用、定时任务、记忆检索、脚本记忆写入和浏览器操作。
 - AI 浏览器：内置共享 Electron 浏览器会话，支持网页查看、网页应用操作、截图、DOM-first 目标解析、CDP 输入事件和高权限运行时脚本。
 - 浏览器脚本短期缓存：`scriptCache` 用于临时抓包、请求重放和调试样本，和长期 `script` 记忆分离。
@@ -49,27 +50,6 @@ npm run dev:electron
 - Electron 桌面窗口
 - 本地 Express 后端和 Web 控制台：`http://localhost:9898`
 
-### 只启动 Web 开发服务
-
-```bash
-npm run dev:web
-```
-
-Vite 会监听 `http://localhost:8106`，并把 `/api` 和 `/uploads` 代理到 `http://localhost:9898`。如果只运行 `dev:web`，需要确保后端已经启动。
-
-### 运行构建后的 Web 控制台
-
-```bash
-npm run build
-npm run serve:web-console
-```
-
-默认地址：
-
-```text
-http://localhost:9898
-```
-
 ## 配置
 
 首次启动后，在 Settings 中配置模型 Profile。
@@ -92,6 +72,16 @@ http://localhost:9898
 | Memory / Knowledge Toggles | 是否启用记忆检索和本地知识注入 |
 
 没有配置模型 API Key 时，应用仍可打开，但完整 Agent 能力需要可用的 provider profile。
+
+### 大模型规划，小模型执行
+
+Settings 中可以启用 **大模型规划，小模型执行**。启用后，Primary 模型负责 planner 和 verifier，配置的小模型 Profile 负责 executor，也就是实际执行当前 assistant 回合。
+
+- 简单请求可以跳过 planner，直接交给 executor 回答。
+- 复杂、工具较多或意图不明确的请求会先由 planner 生成精简执行 brief，再交给 executor。
+- verifier 会检查 executor 的回答质量，必要时由 Primary 模型修订最终回复。
+- planner、executor、verifier 可以使用不同 provider，例如 Primary 使用 GPT/OpenAI-compatible，小模型使用 Claude/Anthropic-compatible。
+- 调用模型前会做 provider 消息格式规范化：第一条 system prompt 保持稳定，便于 GPT prompt cache 复用前缀；后续动态上下文会作为普通上下文消息传递，避免 Claude 或严格 OpenAI-compatible 网关因为后置 system 拒绝请求。
 
 ## 内置工具
 
@@ -281,24 +271,8 @@ nexoAgent/
 
 | 命令 | 说明 |
 | --- | --- |
-| `npm run dev:web` | 启动 Vite Web 开发服务 |
 | `npm run dev:electron` | 启动完整 Electron 开发环境 |
-| `npm run build:web` | 类型检查并构建 React 前端 |
-| `npm run build:electron` | 编译 Electron main/preload/server 代码 |
-| `npm run build` | 构建前端和 Electron 代码 |
-| `npm run serve:web-console` | 运行构建后的本地 Web 控制台 |
-| `npm run preview` | 预览 Vite 构建产物 |
-| `npm run typecheck` | 执行前端和 Electron TypeScript 检查 |
-| `npm run verify:context-management` | 验证滚动上下文压缩 |
-| `npm run verify:tool-output-bounds` | 验证大工具输出摘要和 raw-output 引用 |
-| `npm run verify:browser-action-run` | 验证浏览器动作运行时 |
-| `npm run verify:provider-embeddings` | 验证 provider embedding 配置 |
-| `npm run verify:memory-recall` | 验证记忆检索 |
-| `npm run verify:multimodal-models` | 验证多模态模型路由 |
-| `npm run package` | 构建图标、构建应用并通过 electron-builder 打包 |
-| `npm run package:win` | 打包 Windows 产物 |
-| `npm run package:mac` | 打包 macOS 产物 |
-| `npm run package:linux` | 打包 Linux 产物 |
+| `npm run build:electron` | 构建图标、检查 TypeScript、构建前端和 Electron 代码，并通过 electron-builder 打包 |
 
 打包产物输出到：
 

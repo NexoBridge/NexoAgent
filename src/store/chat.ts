@@ -8,12 +8,18 @@ import type {
   ConversationSurface,
   KnowledgeSourceHit,
   MessageBlock as SharedMessageBlock,
+  ModelRoutingMetadata,
   ModelProfile,
   ToolOutputStats,
   ToolRawOutputRef,
 } from "../shared/types";
 import { apiDelete, apiGet, apiPatch, apiPost, getRuntimeApiBase, setRuntimeApiBase, subscribeStream } from "../services/api";
-import { normalizeAiRequestTimeoutMs, sanitizeApiKeyForSave } from "../shared/settings";
+import {
+  DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
+  normalizeAiRequestTimeoutMs,
+  normalizePlannerExecutorRoutingSettings,
+  sanitizeApiKeyForSave,
+} from "../shared/settings";
 import type { DesktopApi } from "../shared/desktop";
 import {
   getDefaultServiceProviderName,
@@ -119,6 +125,7 @@ const defaultSettings: AgentSettings = {
   shellCommandTimeoutMs: 0,
   aiRequestTimeoutMs: 0,
   planningMode: "balanced",
+  ...DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
   thinkingEnabled: true,
   thinkingEffort: "high",
   circuitBreakerEnabled: true,
@@ -142,13 +149,13 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerId,
     settings.providerName,
   );
-  return {
+  return normalizePlannerExecutorRoutingSettings({
     ...settings,
     providerId,
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
     aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
-  };
+  });
 }
 
 function getDesktopApi(): DesktopApi | null {
@@ -429,6 +436,21 @@ export const useChatStore = create<ChatStore>((set, get) => {
           return;
         }
 
+        if (event.type === "status") {
+          flushPendingTokens();
+          const content = String(event.content ?? "").trim();
+          if (!content) return;
+          const tone = event.tone === "warning" || event.tone === "error" ? event.tone : "info";
+          const notice: SharedMessageBlock = { type: "notice", content, tone };
+          set((state) => ({
+            messageBlocks: {
+              ...state.messageBlocks,
+              [serverTurnId]: [...(state.messageBlocks[serverTurnId] ?? []), notice],
+            },
+          }));
+          return;
+        }
+
         if (event.type === "tool_call") {
           flushPendingTokens();
           const toolCall: ToolCallEvent = {
@@ -502,6 +524,9 @@ export const useChatStore = create<ChatStore>((set, get) => {
           const responseKnowledgeSources = Array.isArray(event.knowledgeSources)
             ? (event.knowledgeSources as KnowledgeSourceHit[])
             : undefined;
+          const responseRouting = event.routing && typeof event.routing === "object"
+            ? (event.routing as ModelRoutingMetadata)
+            : undefined;
           set((state) => ({
             streaming: false,
             cancelStream: () => {},
@@ -520,9 +545,11 @@ export const useChatStore = create<ChatStore>((set, get) => {
                     attachments: responseAttachments.length ? responseAttachments : message.attachments,
                     meta: {
                       ...(message.meta ?? {}),
+                      ...((event as any).usage ? { usage: (event as any).usage as NonNullable<ChatMessage["meta"]>["usage"] } : {}),
                       ...(responseToolCalls ? { toolCalls: responseToolCalls } : {}),
                       ...(responseMessageBlocks ? { messageBlocks: responseMessageBlocks } : {}),
                       ...(responseKnowledgeSources ? { knowledgeSources: responseKnowledgeSources } : {}),
+                      ...(responseRouting ? { routing: responseRouting } : {}),
                     },
                   }
                 : message

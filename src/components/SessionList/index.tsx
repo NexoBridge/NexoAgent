@@ -5,6 +5,7 @@ import { OverflowMenuButton } from "../Common/OverflowMenuButton";
 import { useChatStore, type SessionMeta } from "../../store/chat";
 import { useTheme } from "../../theme";
 import { useI18n } from "../../i18n";
+import "./index.scss";
 
 const { Text } = Typography;
 
@@ -62,29 +63,8 @@ const SessionItem: React.FC<{ session: SessionMeta; active: boolean }> = ({ sess
 
   return (
     <div
-      className="session-row"
+      className={`session-list__row${active ? " session-list__row--active" : ""}`}
       onClick={() => !editing && void selectSession(session.id)}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "8px 10px",
-        borderRadius: 8,
-        cursor: "pointer",
-        marginBottom: 2,
-        background: active ? colors.bgTertiary : "transparent",
-        transition: "background 0.15s",
-      }}
-      onMouseEnter={(event) => {
-        if (!active) {
-          event.currentTarget.style.background = colors.hoverBg;
-        }
-      }}
-      onMouseLeave={(event) => {
-        if (!active) {
-          event.currentTarget.style.background = "transparent";
-        }
-      }}
     >
       {editing ? (
         <>
@@ -94,21 +74,16 @@ const SessionItem: React.FC<{ session: SessionMeta; active: boolean }> = ({ sess
             onChange={(event) => setTitle(event.target.value)}
             onPressEnter={confirmRename}
             autoFocus
-            style={{
-              flex: 1,
-              background: colors.bgPrimary,
-              color: colors.textPrimary,
-              border: `1px solid ${colors.borderStrong}`,
-            }}
+            className="session-list__rename-input"
           />
-          <Button size="small" type="text" icon={<CheckOutlined />} onClick={confirmRename} style={{ color: colors.textMuted }} />
+          <Button size="small" type="text" icon={<CheckOutlined />} onClick={confirmRename} className="session-list__confirm-btn" />
         </>
       ) : (
         <>
-          <Text ellipsis style={{ flex: 1, color: active ? colors.textPrimary : colors.textMuted, fontSize: 13 }}>
+          <Text ellipsis className={`session-list__title${active ? " session-list__title--active" : ""}`}>
             {formatSessionTitle(session.title, t("newChat"), t("tasks"))}
           </Text>
-          <div style={{ display: "flex", gap: 2, opacity: 1 }} className="session-actions">
+          <div className="session-list__actions">
             <OverflowMenuButton
               color={colors.textSecondary}
               items={[
@@ -131,32 +106,18 @@ interface SessionListProps {
 
 export const SessionList: React.FC<SessionListProps> = ({ collapsed, onToggleWidth }) => {
   const { sessions, activeSessionId, newSession } = useChatStore();
-  const { colors } = useTheme();
   const { t } = useI18n();
 
   const widthTooltip = collapsed ? t("expandHistory") : t("collapseHistory");
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      <div
-        style={{
-          padding: collapsed ? "12px 10px" : "12px 10px 8px",
-          display: "flex",
-          gap: 8,
-          flexDirection: collapsed ? "column" : "row",
-        }}
-      >
+    <div className="session-list">
+      <div className={`session-list__toolbar${collapsed ? " session-list__toolbar--collapsed" : ""}`}>
         {!collapsed && (
           <Button
             icon={<PlusOutlined />}
             onClick={() => void newSession()}
-            style={{
-              flex: 1,
-              background: colors.bgTertiary,
-              color: colors.textMuted,
-              border: `1px solid ${colors.borderStrong}`,
-              borderRadius: 8,
-            }}
+            className="session-list__new-btn"
           >
             {t("newChat")}
           </Button>
@@ -164,20 +125,13 @@ export const SessionList: React.FC<SessionListProps> = ({ collapsed, onToggleWid
         <Tooltip title={widthTooltip}>
           <Button
             onClick={onToggleWidth}
-            style={{
-              width: collapsed ? "100%" : 40,
-              flexShrink: 0,
-              background: colors.bgTertiary,
-              color: colors.textMuted,
-              border: `1px solid ${colors.borderStrong}`,
-              borderRadius: 8,
-            }}
+            className={`session-list__toggle-btn ${collapsed ? "session-list__toggle-btn--collapsed" : "session-list__toggle-btn--expanded"}`}
             icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
           />
         </Tooltip>
       </div>
       {!collapsed && (
-        <div style={{ flex: 1, overflowY: "auto", padding: "0 6px" }}>
+        <div className="session-list__items">
           {sessions.map((session) => (
             <SessionItem key={session.id} session={session} active={session.id === activeSessionId} />
           ))}

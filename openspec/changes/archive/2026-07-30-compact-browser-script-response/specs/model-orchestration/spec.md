@@ -1,4 +1,4 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: Browser script orchestration uses script-owned results
 The orchestrator SHALL treat `browser_action.action="script"` as script-output-only and avoid assuming that full page state is present in each script result.

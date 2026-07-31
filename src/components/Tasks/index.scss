@@ -1,0 +1,44 @@
+.tasks-panel {
+  padding: 24px;
+  background: var(--nexo-bg-primary);
+  min-height: 100%;
+  color: var(--nexo-text-primary);
+
+  &__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+
+  &__title {
+    color: var(--nexo-text-primary);
+    margin: 0;
+  }
+
+  &__table-wrap {
+    background: var(--nexo-bg-secondary);
+    border: 1px solid var(--nexo-border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  &__cron {
+    font-family: Consolas, Monaco, monospace;
+    background: var(--nexo-code-bg);
+    color: var(--nexo-text-primary);
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  &__last-run {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  &__last-error {
+    color: #cf1322;
+    font-size: 12px;
+  }
+}

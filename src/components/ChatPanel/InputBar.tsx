@@ -2,9 +2,9 @@ import React, { useEffect, useRef, useState } from "react";
 import { Button, Input, Tag, Tooltip } from "antd";
 import { CloseOutlined, FileOutlined, PaperClipOutlined, SendOutlined, StopOutlined } from "@ant-design/icons";
 import { getApiBase } from "../../services/api";
-import { useTheme } from "../../theme";
 import { useI18n } from "../../i18n";
 import type { Attachment } from "../../shared/types";
+import "./InputBar.scss";
 
 interface Props {
   onSend: (content: string, attachments: Attachment[]) => void;
@@ -32,7 +32,6 @@ export const InputBar: React.FC<Props> = ({
   const [value, setValue] = useState("");
   const ref = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { colors } = useTheme();
   const { t } = useI18n();
 
   useEffect(() => {
@@ -91,45 +90,20 @@ export const InputBar: React.FC<Props> = ({
     /^https?:\/\//i.test(attachment.url) ? attachment.url : `${getApiBase()}${attachment.url}`
   );
 
-  const controlStyle: React.CSSProperties = {
-    borderRadius: 12,
-    background: colors.bgTertiary,
-    color: colors.textPrimary,
-    border: `1px solid ${colors.borderStrong}`,
-  };
-
   return (
-    <div style={{ padding: "12px 24px 20px", borderTop: `1px solid ${colors.border}`, background: colors.bgSecondary }}>
+    <div className="input-bar">
       {blockedMessage ? (
-        <div
-          style={{
-            marginBottom: 10,
-            padding: "10px 12px",
-            borderRadius: 12,
-            background: colors.bgTertiary,
-            border: `1px solid ${colors.border}`,
-            color: colors.textMuted,
-            fontSize: 12,
-          }}
-        >
+        <div className="input-bar__blocked">
           {blockedMessage}
         </div>
       ) : null}
       {attachments.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }}>
+        <div className="input-bar__attachments">
           {attachments.map((attachment, index) => (
             <Tag
               key={`${attachment.url}-${index}`}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 4,
-                padding: "2px 6px",
-                background: colors.bgTertiary,
-                border: `1px solid ${colors.borderStrong}`,
-                color: colors.textPrimary,
-              }}
-              closeIcon={<CloseOutlined style={{ color: colors.textMuted }} />}
+              className="input-bar__attachment-tag"
+              closeIcon={<CloseOutlined className="input-bar__attachment-close" />}
               closable
               onClose={() => onAttachmentsChange(attachments.filter((_, currentIndex) => currentIndex !== index))}
             >
@@ -138,7 +112,7 @@ export const InputBar: React.FC<Props> = ({
                   <img
                     src={resolveAttachmentPreviewUrl(attachment)}
                     alt={attachment.name}
-                    style={{ width: 24, height: 24, objectFit: "cover", borderRadius: 2 }}
+                    className="input-bar__attachment-thumb"
                   />
                 )
                 : <FileOutlined />}
@@ -148,12 +122,12 @@ export const InputBar: React.FC<Props> = ({
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+      <div className="input-bar__row">
         <input
           ref={fileInputRef}
           type="file"
           multiple
-          style={{ display: "none" }}
+          className="input-bar__file-input"
           onChange={handleFileChange}
         />
         <Tooltip title={t("attachFile")}>
@@ -161,7 +135,7 @@ export const InputBar: React.FC<Props> = ({
             icon={<PaperClipOutlined />}
             onClick={() => fileInputRef.current?.click()}
             disabled={disabled}
-            style={{ ...controlStyle, height: 40, width: 48, flexShrink: 0, color: colors.textMuted }}
+            className="input-bar__control input-bar__attach-btn"
           />
         </Tooltip>
         <Input.TextArea
@@ -178,7 +152,7 @@ export const InputBar: React.FC<Props> = ({
           placeholder={blockedMessage || t("typeMessage")}
           autoSize={{ minRows: 1, maxRows: 6 }}
           disabled={disabled && !onCancel}
-          style={{ ...controlStyle, resize: "none" }}
+          className="input-bar__control input-bar__textarea"
         />
         {disabled && onCancel ? (
           <Tooltip title={t("stopGeneration")}>
@@ -186,7 +160,7 @@ export const InputBar: React.FC<Props> = ({
               danger
               icon={<StopOutlined />}
               onClick={() => { onCancel(); }}
-              style={{ borderRadius: 12, height: 40, width: 48, flexShrink: 0 }}
+              className="input-bar__action-btn"
             />
           </Tooltip>
         ) : (
@@ -195,7 +169,7 @@ export const InputBar: React.FC<Props> = ({
             icon={<SendOutlined />}
             onClick={submit}
             disabled={disabled || (!value.trim() && attachments.length === 0)}
-            style={{ borderRadius: 12, height: 40, width: 48, flexShrink: 0, background: colors.accent, border: "none" }}
+            className="input-bar__action-btn input-bar__send-btn"
           />
         )}
       </div>

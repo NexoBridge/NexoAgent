@@ -4,11 +4,33 @@ import type { AgentSettings } from "./types";
 export const SAVED_API_KEY_MASK = "***";
 export const AI_REQUEST_TIMEOUT_DISABLED_MS = 0;
 export const AI_REQUEST_TIMEOUT_MAX_MS = 2_147_483_647;
+export const DEFAULT_PLANNER_EXECUTOR_QUALITY_THRESHOLD = 0.72;
+
+export const DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS: Pick<
+  AgentSettings,
+  | "plannerExecutorRoutingEnabled"
+  | "executorProfileId"
+> = {
+  plannerExecutorRoutingEnabled: false,
+  executorProfileId: "",
+};
 
 export function normalizeAiRequestTimeoutMs(value: unknown) {
   const num = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   if (!Number.isFinite(num) || num <= 0) return AI_REQUEST_TIMEOUT_DISABLED_MS;
   return Math.max(1, Math.min(AI_REQUEST_TIMEOUT_MAX_MS, Math.floor(num)));
+}
+
+function normalizeProfileId(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+export function normalizePlannerExecutorRoutingSettings<T extends Partial<AgentSettings>>(settings: T): T {
+  return {
+    ...settings,
+    plannerExecutorRoutingEnabled: settings.plannerExecutorRoutingEnabled === true,
+    executorProfileId: normalizeProfileId(settings.executorProfileId),
+  };
 }
 
 export function maskApiKeyForDisplay(settings: AgentSettings): AgentSettings {

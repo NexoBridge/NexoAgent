@@ -38,15 +38,12 @@ Code is not done until it has been verified. After every code change:
 
 For this Nexo Agent project, prefer these commands:
 
-- Frontend/UI or `src/` only: `npm run build:web`, or `npm run typecheck` for type-only edits.
-- Electron/server, tools, memory, routes, or `electron/`: `npm run build:electron`.
-- Shared types, bundled metadata, skills/tools definitions, or cross-cutting changes: `npm run typecheck`.
-- Context management behavior: `npm run verify:context-management`.
-- Provider embedding or memory embedding behavior: `npm run verify:provider-embeddings`.
-- Multimodal/model capability behavior: `npm run verify:multimodal-models`.
+- Frontend/UI, Electron/server, shared types, bundled metadata, skills/tools definitions, or cross-cutting changes: `npm run typecheck`.
+- Runtime behavior that needs compiled output: `npm run build`.
+- Planner/executor routing behavior: `npm run verify`.
 - Packaging/build pipeline behavior: `npm run build`; run OS package commands only when the user asks for distributables.
 
-Do not use long-running dev server commands (`npm run dev`, `npm run dev:web`, `npm run dev:electron`) as verification because they do not exit. Use build, typecheck, or verify commands instead.
+Do not use the long-running dev command (`npm run dev`) as verification because it does not exit. Use build, typecheck, or verify commands instead.
 
 When a change edits only Markdown, docs, or a skill file, verify by checking the file content, frontmatter, JSON/YAML syntax if present, and any loader expectations. Run a compile step too if the docs or skill change affects bundled runtime metadata.
 

@@ -27,8 +27,8 @@ import {
   type ProviderId,
   type ThinkingEffort,
 } from "../../shared/types";
-import { useTheme } from "../../theme";
 import { apiDelete, apiGet, apiPost } from "../../services/api";
+import "./index.scss";
 import { sanitizeApiKeyForSave, SAVED_API_KEY_MASK } from "../../shared/settings";
 import { OverflowMenuButton } from "../Common/OverflowMenuButton";
 import { useI18n } from "../../i18n";
@@ -90,6 +90,14 @@ function buildCapabilityLabels(lang: "zh" | "en"): Record<ModelCapability, strin
   };
 }
 
+function profileCanRunAsExecutor(profile: ModelProfile) {
+  return Boolean(
+    profile.enabled
+    && !profile.isPrimary
+    && (profile.capabilities?.includes("chat") || profile.capabilities?.includes("orchestration")),
+  );
+}
+
 function buildUi(lang: "zh" | "en") {
   return {
     pageTitle: lang === "zh" ? "\u8bbe\u7f6e" : "Settings",
@@ -119,6 +127,17 @@ function buildUi(lang: "zh" | "en") {
     planningFast: lang === "zh" ? "\u5feb\u901f" : "Fast",
     planningBalanced: lang === "zh" ? "\u5e73\u8861" : "Balanced",
     planningDeep: lang === "zh" ? "\u6df1\u5ea6" : "Deep",
+    plannerExecutorRouting: lang === "zh" ? "\u5927\u6a21\u578b\u89c4\u5212\uff0c\u5c0f\u6a21\u578b\u6267\u884c" : "Big Model Plans, Small Model Runs",
+    plannerExecutorRoutingTip: lang === "zh"
+      ? "\u5f00\u542f\u540e\uff0c\u5927\u6a21\u578b\u8d1f\u8d23\u9636\u6bb5\u6027\u89c4\u5212\u548c\u7edf\u7b79\uff0c\u8bbe\u7f6e\u4e2d\u9009\u62e9\u7684\u5c0f\u6a21\u578b\u8d1f\u8d23\u6570\u636e\u5206\u6790\u548c\u6267\u884c\u3002"
+      : "When this is on, the big model handles staged planning and orchestration, while the small model selected in Settings handles data analysis and execution.",
+    executorModel: lang === "zh" ? "\u5c0f\u6a21\u578b\u6267\u884c\u5668" : "Small Model Executor",
+    executorModelTip: lang === "zh"
+      ? "\u53ea\u4f1a\u4f7f\u7528\u8fd9\u91cc\u9009\u4e2d\u7684\u6a21\u578b\uff0c\u4e0d\u4f1a\u81ea\u52a8\u731c\u6d4b\u5176\u4ed6 Profile\u3002"
+      : "Only the selected profile is used as executor; other profiles are not auto-picked.",
+    executorModelPlaceholder: lang === "zh" ? "\u9009\u62e9\u4e00\u4e2a\u5df2\u542f\u7528\u7684 Chat \u6a21\u578b" : "Select an enabled chat model",
+    executorModelRequired: lang === "zh" ? "\u5f00\u542f\u540e\u8bf7\u9009\u62e9\u5c0f\u6a21\u578b\u6267\u884c\u5668" : "Select a small model executor when routing is enabled.",
+    noExecutorProfiles: lang === "zh" ? "\u6ca1\u6709\u53ef\u7528\u7684\u6267\u884c\u6a21\u578b" : "No executor model profiles available",
     saveApplied: lang === "zh" ? "\u8bbe\u7f6e\u5df2\u4fdd\u5b58\uff0c\u4e0b\u4e00\u6761\u6d88\u606f\u4f1a\u7acb\u5373\u751f\u6548\u3002" : "Settings saved. The next message will use the updated configuration.",
     modelEmpty: lang === "zh" ? "\u8fd8\u6ca1\u6709\u6a21\u578b\u914d\u7f6e" : "No model profiles yet.",
     savedApiKey: lang === "zh" ? "\u5df2\u4fdd\u5b58 API Key" : "Saved API key",
@@ -147,9 +166,6 @@ function buildUi(lang: "zh" | "en") {
     protocol: lang === "zh" ? "\u534f\u8bae" : "Protocol",
     protocolRequired: lang === "zh" ? "\u8bf7\u9009\u62e9\u534f\u8bae" : "Please select a protocol.",
     serviceProvider: lang === "zh" ? "API \u670d\u52a1\u5546" : "API Service Provider",
-    serviceProviderHint: lang === "zh"
-      ? "\u7528\u4e8e\u533a\u5206\u540c\u4e00\u534f\u8bae\u4e0b\u7684\u4e0d\u540c\u670d\u52a1\u5546\uff0c\u4f8b\u5982 DeepSeek\u3001OpenRouter \u6216 Xiaomi Mimo\u3002"
-      : "Use this to distinguish providers on the same protocol, such as DeepSeek, OpenRouter, or Xiaomi Mimo.",
     serviceProviderPlaceholder: lang === "zh" ? "\u8bf7\u9009\u62e9 API \u670d\u52a1\u5546" : "Select an API service provider",
     apiBase: "API Base",
     apiKey: "API Key",
@@ -227,11 +243,9 @@ const ApiKeyField: React.FC<{
   value?: string;
   onChange?: (value: string) => void;
   hasApiKey: boolean;
-  inputStyle: React.CSSProperties;
-  mutedColor: string;
   placeholder: string;
   replaceText: string;
-}> = ({ value, onChange, hasApiKey, inputStyle, mutedColor, placeholder, replaceText }) => {
+}> = ({ value, onChange, hasApiKey, placeholder, replaceText }) => {
   const [editing, setEditing] = useState(!hasApiKey);
 
   useEffect(() => {
@@ -244,7 +258,7 @@ const ApiKeyField: React.FC<{
   return (
     <div>
       <Input
-        style={inputStyle}
+        className="settings-page__input"
         value={displayValue}
         readOnly={masked}
         placeholder={masked ? undefined : placeholder}
@@ -254,7 +268,7 @@ const ApiKeyField: React.FC<{
         <Button
           type="link"
           size="small"
-          style={{ padding: 0, height: "auto", marginTop: 4, color: mutedColor }}
+          className="settings-page__api-key-replace"
           onClick={() => {
             setEditing(true);
             onChange?.("");
@@ -269,7 +283,6 @@ const ApiKeyField: React.FC<{
 
 export const Settings: React.FC = () => {
   const { settings, loadSettings, saveSettings, modelProfiles: profiles, loadModelProfiles } = useChatStore();
-  const { colors } = useTheme();
   const { lang, t } = useI18n();
   const ui = useMemo(() => buildUi(lang), [lang]);
   const capabilityLabels = useMemo(() => buildCapabilityLabels(lang), [lang]);
@@ -287,6 +300,7 @@ export const Settings: React.FC = () => {
   const watchedProviderName = Form.useWatch("providerName", profileForm) as string | undefined;
   const watchedApiBase = Form.useWatch("apiBase", profileForm) as string | undefined;
   const watchedApiKey = Form.useWatch("apiKey", profileForm) as string | undefined;
+  const routingEnabled = Form.useWatch("plannerExecutorRoutingEnabled", form) === true;
 
   const normalizedWatchedProviderId = normalizeProviderId(watchedProviderId);
   const allowsEmptyProfileApiKey = providerConnectionAllowsEmptyApiKey({
@@ -305,7 +319,15 @@ export const Settings: React.FC = () => {
     () => MODEL_CAPABILITIES.map((value) => ({ value, label: capabilityLabels[value] })),
     [capabilityLabels],
   );
-
+  const executorProfileOptions = useMemo(
+    () => profiles
+      .filter(profileCanRunAsExecutor)
+      .map((profile) => ({
+        value: profile.id,
+        label: `${profile.name} / ${profile.model}`,
+      })),
+    [profiles],
+  );
   const serviceProviderOptions = useMemo(() => {
     const baseOptions = getServiceProviderOptions(normalizedWatchedProviderId, lang);
     const currentName = normalizeServiceProviderName(
@@ -342,14 +364,7 @@ export const Settings: React.FC = () => {
     });
   }, [loadModelProfiles]);
 
-  const inputStyle: React.CSSProperties = {
-    background: colors.bgTertiary,
-    color: colors.textPrimary,
-    border: `1px solid ${colors.borderStrong}`,
-    borderRadius: 8,
-  };
-
-  const label = (text: string) => <span style={{ color: colors.textMuted }}>{text}</span>;
+  const label = (text: string) => <span className="settings-page__label">{text}</span>;
 
   const onSave = async (values: AgentSettings) => {
     await saveSettings(sanitizeApiKeyForSave({ ...settings, ...values }));
@@ -511,25 +526,6 @@ export const Settings: React.FC = () => {
     label: model.ownedBy ? `${model.label} | ${model.ownedBy}` : model.label,
   }));
 
-  const profileModalGridStyle: React.CSSProperties = {
-    display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-    columnGap: 16,
-    alignItems: "start",
-  };
-  const profileModalStackStyle: React.CSSProperties = {
-    display: "grid",
-    gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-    columnGap: 16,
-    alignItems: "start",
-  };
-  const profileModalItemStyle: React.CSSProperties = {
-    marginBottom: 14,
-  };
-  const profileModalFullRowStyle: React.CSSProperties = {
-    gridColumn: "1 / -1",
-  };
-
   const applyDiscoveredModel = (modelId: string) => {
     const model = discoveredModels.find((item) => item.id === modelId);
     if (!model) return;
@@ -556,25 +552,14 @@ export const Settings: React.FC = () => {
   }, [profileModalOpen, watchedProviderId, watchedApiBase, watchedApiKey, watchedProviderName, editingProfile?.id, editingProfile?.hasApiKey, allowsEmptyProfileApiKey]);
 
   return (
-    <div
-      style={{
-        height: "100%",
-        minHeight: 0,
-        overflowY: "auto",
-        overflowX: "hidden",
-        padding: "28px 32px",
-        maxWidth: 1100,
-        color: colors.textPrimary,
-        boxSizing: "border-box",
-      }}
-    >
+    <div className="settings-page">
       {ctx}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 16, marginBottom: 16 }}>
+      <div className="settings-page__header">
         <div>
-          <Title level={4} style={{ color: colors.textPrimary, marginBottom: 6 }}>
+          <Title level={4} className="settings-page__page-title">
             {ui.pageTitle}
           </Title>
-          <Text style={{ color: colors.textMuted }}>{ui.pageSubtitle}</Text>
+          <Text className="settings-page__subtitle">{ui.pageSubtitle}</Text>
         </div>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreateProfile}>
           {ui.createModel}
@@ -588,13 +573,13 @@ export const Settings: React.FC = () => {
         onFinish={(values) => void onSave(values as AgentSettings)}
         initialValues={{ ...settings, fileAccessRoots: settings.fileAccessRoots ?? [] }}
       >
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
+        <div className="settings-page__form-grid">
           <div>
             <Form.Item label={label(ui.workspacePath)} name="workspacePath" tooltip={ui.workspacePathTip}>
-              <Input style={inputStyle} placeholder={"D:\\company"} />
+              <Input className="settings-page__input" placeholder={"D:\\company"} />
             </Form.Item>
             <Form.Item label={label(ui.fileAccessRoots)} name="fileAccessRoots" tooltip={ui.fileAccessRootsTip}>
-              <Select mode="tags" open={false} style={{ width: "100%" }} placeholder={"D:\\company\\shared"} tokenSeparators={[","]} />
+              <Select mode="tags" open={false} className="settings-page__full-width" placeholder={"D:\\company\\shared"} tokenSeparators={[","]} />
             </Form.Item>
             <Form.Item label={label(ui.enableMemory)} name="enableMemory" valuePropName="checked">
               <Switch />
@@ -605,7 +590,7 @@ export const Settings: React.FC = () => {
           </div>
           <div>
             <Form.Item label={label(ui.temperature)} name="temperature">
-              <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />
+              <InputNumber min={0} max={2} step={0.1} className="settings-page__full-width" />
             </Form.Item>
             <Form.Item label={label(ui.enableContextCompaction)} name="enableContextCompaction" valuePropName="checked">
               <Switch />
@@ -620,11 +605,11 @@ export const Settings: React.FC = () => {
                 return Number.isFinite(num) && num > 0 ? Math.floor(num * 1000) : 0;
               }}
             >
-              <InputNumber min={0} step={60} style={{ width: "100%" }} />
+              <InputNumber min={0} step={60} className="settings-page__full-width" />
             </Form.Item>
             <Form.Item label={label(ui.planningMode)} name="planningMode">
               <Select
-                style={{ width: "100%" }}
+                className="settings-page__full-width"
                 options={[
                   { value: "fast", label: ui.planningFast },
                   { value: "balanced", label: ui.planningBalanced },
@@ -635,15 +620,53 @@ export const Settings: React.FC = () => {
           </div>
         </div>
 
-        <Divider style={{ borderColor: colors.border, margin: "16px 0" }} />
-        <Button htmlType="submit" type="primary" style={{ background: colors.accent, border: "none", borderRadius: 8 }}>
+        <div className="settings-page__routing-panel">
+          <div className="settings-page__routing-header">
+            <div>
+              <div className="settings-page__routing-title">{ui.plannerExecutorRouting}</div>
+              <Text className="settings-page__text-muted">{ui.plannerExecutorRoutingTip}</Text>
+            </div>
+            <Form.Item name="plannerExecutorRoutingEnabled" valuePropName="checked" noStyle>
+              <Switch />
+            </Form.Item>
+          </div>
+          <div className="settings-page__routing-grid">
+            <Form.Item
+              label={label(ui.executorModel)}
+              name="executorProfileId"
+              tooltip={ui.executorModelTip}
+              rules={[
+                ({ getFieldValue }) => ({
+                  validator: (_, value) => {
+                    if (getFieldValue("plannerExecutorRoutingEnabled") && !value) {
+                      return Promise.reject(new Error(ui.executorModelRequired));
+                    }
+                    return Promise.resolve();
+                  },
+                }),
+              ]}
+            >
+              <Select
+                allowClear
+                disabled={!routingEnabled}
+                className="settings-page__full-width"
+                placeholder={ui.executorModelPlaceholder}
+                options={executorProfileOptions}
+                notFoundContent={ui.noExecutorProfiles}
+              />
+            </Form.Item>
+          </div>
+        </div>
+
+        <Divider className="settings-page__divider settings-page__divider--form" />
+        <Button htmlType="submit" type="primary" className="settings-page__submit-btn">
           {t("saveSettings")}
         </Button>
       </Form>
 
-      <Divider style={{ borderColor: colors.border, margin: "24px 0" }} />
+      <Divider className="settings-page__divider settings-page__divider--section" />
 
-      <div style={{ fontSize: 14, fontWeight: 600, color: colors.textPrimary, marginBottom: 12 }}>{ui.modelSection}</div>
+      <div className="settings-page__section-title">{ui.modelSection}</div>
       <List
         locale={{ emptyText: ui.modelEmpty }}
         dataSource={profiles}
@@ -653,24 +676,17 @@ export const Settings: React.FC = () => {
 
           return (
             <List.Item
-              style={{
-                borderColor: colors.border,
-                padding: "16px 18px",
-                marginBottom: 12,
-                borderRadius: 16,
-                background: colors.bgSecondary,
-                boxShadow: `inset 0 0 0 1px ${colors.border}`,
-              }}
+              className="settings-page__profile-item"
               actions={[
                 <OverflowMenuButton
                   key="more"
-                  color={colors.accent}
+                  color="var(--nexo-accent)"
                   tooltip={ui.actionsTooltip}
                   label={ui.actionsLabel}
                   size="middle"
                   variant="outlined"
-                  backgroundColor={colors.bgPrimary}
-                  borderColor={colors.accent}
+                  backgroundColor="var(--nexo-bg-primary)"
+                  borderColor="var(--nexo-accent)"
                   items={[
                     {
                       key: "primary",
@@ -713,7 +729,7 @@ export const Settings: React.FC = () => {
               <List.Item.Meta
                 title={(
                   <Space size={8} wrap>
-                    <span style={{ color: colors.textPrimary, fontWeight: 600 }}>{profile.name}</span>
+                    <span className="settings-page__profile-name">{profile.name}</span>
                     {profile.isPrimary ? <Tag color="blue">{ui.primary}</Tag> : null}
                     <Tag color={profile.enabled ? "green" : "default"}>{profile.enabled ? t("enabled") : t("disabled")}</Tag>
                     <Tag color="cyan">{getServiceProviderLabel(profile, lang, ui.unknownProvider)}</Tag>
@@ -723,8 +739,8 @@ export const Settings: React.FC = () => {
                   </Space>
                 )}
                 description={(
-                  <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                    <Text style={{ color: colors.textSecondary }}>{profile.model}</Text>
+                  <Space direction="vertical" size={6} className="settings-page__profile-meta">
+                    <Text className="settings-page__text-secondary">{profile.model}</Text>
                     <Space wrap size={4}>
                       {(profile.capabilities ?? []).map((capability) => (
                         <Tag key={capability} color={CAPABILITY_COLORS[capability]}>
@@ -732,20 +748,20 @@ export const Settings: React.FC = () => {
                         </Tag>
                       ))}
                     </Space>
-                    <Text style={{ color: colors.textSecondary }}>{profile.apiBase}</Text>
+                    <Text className="settings-page__text-secondary">{profile.apiBase}</Text>
                     <Space wrap size={8}>
-                      <Text style={{ color: colors.textSecondary }}>{ui.contextWindow} {formatTokenCount(profile.contextWindowTokens)}</Text>
-                      <Text style={{ color: colors.textSecondary }}>{ui.reservedOutput} {formatTokenCount(profile.reservedOutputTokens)}</Text>
-                      <Text style={{ color: colors.textSecondary }}>{ui.compactLimit} {formatTokenCount(profile.autoCompactTokenLimit)}</Text>
+                      <Text className="settings-page__text-secondary">{ui.contextWindow} {formatTokenCount(profile.contextWindowTokens)}</Text>
+                      <Text className="settings-page__text-secondary">{ui.reservedOutput} {formatTokenCount(profile.reservedOutputTokens)}</Text>
+                      <Text className="settings-page__text-secondary">{ui.compactLimit} {formatTokenCount(profile.autoCompactTokenLimit)}</Text>
                     </Space>
                     <Space wrap size={8}>
-                      <Text style={{ color: colors.textSecondary }}>{ui.thinking} {profile.thinkingEnabled === false ? ui.thinkingOff : ui.thinkingOn}</Text>
-                      <Text style={{ color: colors.textSecondary }}>{ui.thinkingEffort} {profile.thinkingEffort === "max" ? ui.thinkingMax : ui.thinkingHigh}</Text>
+                      <Text className="settings-page__text-secondary">{ui.thinking} {profile.thinkingEnabled === false ? ui.thinkingOff : ui.thinkingOn}</Text>
+                      <Text className="settings-page__text-secondary">{ui.thinkingEffort} {profile.thinkingEffort === "max" ? ui.thinkingMax : ui.thinkingHigh}</Text>
                     </Space>
                     {profile.contextWindowSourceDetail ? (
-                      <Text style={{ color: colors.textMuted, fontSize: 12 }}>{profile.contextWindowSourceDetail}</Text>
+                      <Text className="settings-page__text-muted">{profile.contextWindowSourceDetail}</Text>
                     ) : null}
-                    {profile.description ? <Text style={{ color: colors.textSecondary }}>{profile.description}</Text> : null}
+                    {profile.description ? <Text className="settings-page__text-secondary">{profile.description}</Text> : null}
                   </Space>
                 )}
               />
@@ -768,11 +784,11 @@ export const Settings: React.FC = () => {
         width={900}
       >
         <Form form={profileForm} layout="vertical">
-          <div style={profileModalGridStyle}>
-            <Form.Item name="name" label={ui.name} rules={[{ required: true, message: ui.nameRequired }]} style={profileModalItemStyle}>
+          <div className="settings-page__modal-grid">
+            <Form.Item name="name" label={ui.name} rules={[{ required: true, message: ui.nameRequired }]} className="settings-page__modal-item">
               <Input />
             </Form.Item>
-            <Form.Item name="providerId" label={ui.protocol} rules={[{ required: true, message: ui.protocolRequired }]} style={profileModalItemStyle}>
+            <Form.Item name="providerId" label={ui.protocol} rules={[{ required: true, message: ui.protocolRequired }]} className="settings-page__modal-item">
               <Select
                 options={providerOptions}
                 onChange={(nextProviderId) => {
@@ -800,8 +816,7 @@ export const Settings: React.FC = () => {
             <Form.Item
               name="providerName"
               label={ui.serviceProvider}
-              extra={ui.serviceProviderHint}
-              style={profileModalItemStyle}
+              className="settings-page__modal-item"
             >
               <Select
                 showSearch
@@ -819,7 +834,7 @@ export const Settings: React.FC = () => {
                 }}
               />
             </Form.Item>
-            <Form.Item name="apiBase" label={ui.apiBase} style={profileModalItemStyle}>
+            <Form.Item name="apiBase" label={ui.apiBase} className="settings-page__modal-item">
               <Input
                 placeholder={getServiceProviderDefaultApiBase(watchedProviderName, normalizedWatchedProviderId) || (watchedProviderId ? getProviderDefaultApiBase(watchedProviderId) : "https://api.example.com/v1")}
                 onBlur={(event) => {
@@ -832,11 +847,9 @@ export const Settings: React.FC = () => {
                 }}
               />
             </Form.Item>
-            <Form.Item name="apiKey" label={editingProfile?.hasApiKey ? ui.apiKeyKeep : ui.apiKey} style={profileModalItemStyle}>
+            <Form.Item name="apiKey" label={editingProfile?.hasApiKey ? ui.apiKeyKeep : ui.apiKey} className="settings-page__modal-item">
               <ApiKeyField
                 hasApiKey={Boolean(editingProfile?.hasApiKey)}
-                inputStyle={inputStyle}
-                mutedColor={colors.textMuted}
                 placeholder="sk-..."
                 replaceText={ui.replaceApiKey}
               />
@@ -844,7 +857,7 @@ export const Settings: React.FC = () => {
             <Form.Item
               name="model"
               label={(
-                <Space style={{ width: "100%", justifyContent: "space-between" }}>
+                <Space className="settings-page__model-label-row">
                   <span>{ui.model}</span>
                   <Button type="link" icon={<ReloadOutlined />} loading={discovering} onClick={() => void discoverProfileModels()}>
                     {ui.fetchModels}
@@ -852,7 +865,7 @@ export const Settings: React.FC = () => {
                 </Space>
               )}
               rules={[{ required: true, message: ui.modelRequired }]}
-              style={profileModalItemStyle}
+              className="settings-page__modal-item"
             >
               <AutoComplete
                 options={modelOptions}
@@ -875,34 +888,25 @@ export const Settings: React.FC = () => {
               />
             </Form.Item>
           </div>
-          <div style={profileModalGridStyle}>
-            <Form.Item name="capabilities" label={ui.capabilities} rules={[{ required: true, message: ui.capabilitiesRequired }]} style={profileModalItemStyle}>
-              <Checkbox.Group options={capabilityOptions} style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }} />
+          <div className="settings-page__modal-grid">
+            <Form.Item name="capabilities" label={ui.capabilities} rules={[{ required: true, message: ui.capabilitiesRequired }]} className="settings-page__modal-item">
+              <Checkbox.Group options={capabilityOptions} className="settings-page__capabilities-grid" />
             </Form.Item>
-            <div style={profileModalStackStyle}>
-              <Form.Item name="isPrimary" label={ui.primaryModel} valuePropName="checked" style={profileModalItemStyle}>
+            <div className="settings-page__modal-stack">
+              <Form.Item name="isPrimary" label={ui.primaryModel} valuePropName="checked" className="settings-page__modal-item">
                 <Switch />
               </Form.Item>
-              <Form.Item name="enabled" label={ui.enabledField} valuePropName="checked" style={profileModalItemStyle}>
+              <Form.Item name="enabled" label={ui.enabledField} valuePropName="checked" className="settings-page__modal-item">
                 <Switch />
               </Form.Item>
-              <Form.Item name="temperature" label={ui.temperature} style={{ ...profileModalItemStyle, ...profileModalFullRowStyle }}>
-                <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />
+              <Form.Item name="temperature" label={ui.temperature} className="settings-page__modal-item settings-page__modal-item--full-row">
+                <InputNumber min={0} max={2} step={0.1} className="settings-page__full-width" />
               </Form.Item>
-              <div
-                style={{
-                  ...profileModalFullRowStyle,
-                  marginBottom: 14,
-                  padding: "12px 14px",
-                  borderRadius: 8,
-                  border: `1px solid ${colors.borderStrong}`,
-                  background: colors.bgTertiary,
-                }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 10 }}>
+              <div className="settings-page__thinking-panel">
+                <div className="settings-page__thinking-header">
                   <div>
-                    <div style={{ color: colors.textPrimary, fontWeight: 600 }}>{ui.thinkingHelpTitle}</div>
-                    <div style={{ color: colors.textMuted, fontSize: 12, marginTop: 4 }}>
+                    <div className="settings-page__thinking-title">{ui.thinkingHelpTitle}</div>
+                    <div className="settings-page__thinking-desc">
                       {ui.thinkingHelpText}
                     </div>
                   </div>
@@ -912,7 +916,7 @@ export const Settings: React.FC = () => {
                 </div>
                 <Form.Item noStyle shouldUpdate={(prev, next) => prev.thinkingEnabled !== next.thinkingEnabled}>
                   {({ getFieldValue }) => (
-                    <Form.Item name="thinkingEffort" label={ui.thinkingEffort} style={{ marginBottom: 0 }}>
+                    <Form.Item name="thinkingEffort" label={ui.thinkingEffort} className="settings-page__thinking-effort-item">
                       <Select
                         disabled={getFieldValue("thinkingEnabled") === false}
                         options={thinkingEffortOptions}
@@ -923,7 +927,7 @@ export const Settings: React.FC = () => {
               </div>
             </div>
           </div>
-          <Form.Item name="description" label={ui.description} style={profileModalItemStyle}>
+          <Form.Item name="description" label={ui.description} className="settings-page__modal-item">
             <Input.TextArea rows={2} />
           </Form.Item>
         </Form>

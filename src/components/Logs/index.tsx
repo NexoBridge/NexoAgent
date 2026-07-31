@@ -3,7 +3,7 @@ import { Button, Select, Space, Tag } from "antd";
 import { PauseCircleOutlined, PlayCircleOutlined, DeleteOutlined } from "@ant-design/icons";
 import { apiGet, getApiBase } from "../../services/api";
 import { useI18n } from "../../i18n";
-import { useTheme } from "../../theme";
+import "./index.scss";
 
 type LogDateItem = {
   date: string;
@@ -28,7 +28,6 @@ function parseLogEventData(data: string) {
 }
 
 export default function Logs() {
-  const { colors } = useTheme();
   const { lang, t } = useI18n();
   const [lines, setLines] = useState<string[]>([]);
   const [logDates, setLogDates] = useState<LogDateItem[]>([]);
@@ -103,20 +102,10 @@ export default function Logs() {
   ];
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", color: colors.textPrimary }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
-          padding: "20px 24px 12px",
-          borderBottom: `1px solid ${colors.border}`,
-          background: colors.bgPrimary,
-        }}
-      >
+    <div className="logs-panel">
+      <div className="logs-panel__toolbar">
         <Space align="center" size={12}>
-          <span style={{ fontWeight: 600, fontSize: 18, color: colors.textPrimary }}>{ui.title}</span>
+          <span className="logs-panel__title">{ui.title}</span>
           <Tag color={paused ? "gold" : selectedIsHistory ? "blue" : "green"}>
             {paused ? ui.paused : selectedIsHistory ? ui.history : ui.live}
           </Tag>
@@ -126,7 +115,7 @@ export default function Logs() {
             aria-label={ui.date}
             value={selectedDate}
             options={dateOptions}
-            style={{ width: 160 }}
+            className="logs-panel__date-select"
             onDropdownVisibleChange={(open) => {
               if (open) loadLogDates();
             }}
@@ -143,18 +132,9 @@ export default function Logs() {
           </Button>
         </Space>
       </div>
-      <div
-        style={{
-          flex: 1,
-          background: colors.bgSecondary,
-          fontFamily: "Consolas, Monaco, monospace",
-          fontSize: 12,
-          overflowY: "auto",
-          padding: 16,
-        }}
-      >
+      <div className="logs-panel__content">
         {lines.map((line, index) => (
-          <div key={`${index}-${line.slice(0, 12)}`} style={{ color: getColor(line), whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
+          <div key={`${index}-${line.slice(0, 12)}`} className="logs-panel__line" style={{ color: getColor(line) }}>
             {line}
           </div>
         ))}

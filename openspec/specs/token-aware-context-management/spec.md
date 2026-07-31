@@ -84,33 +84,36 @@ The system SHALL preserve the difference between tool-backed facts and unverifie
 - **THEN** the compaction summary SHALL preserve the relevant result, error, attempted action, and remaining task state needed for the next model call
 
 ### Requirement: Shared budget across auxiliary context
-The system SHALL budget memories, knowledge, attachments, and tool outputs against the same model input allowance used for conversation history.
+The system SHALL preserve complete current-session messages, text attachments, and tool outputs in the assembled runtime context until the active model input budget is exceeded. It SHALL NOT silently trim lower-priority auxiliary context as a substitute for reporting overflow.
+
+#### Scenario: Auxiliary context fits the active model budget
+- **WHEN** current-session transcript text, recalled memory, knowledge notes, text attachments, and tool outputs fit within the active model input budget
+- **THEN** the runtime SHALL include those sections without application-level character truncation
 
 #### Scenario: Auxiliary context would exceed budget
-- **WHEN** injected memories, attachments, knowledge, or tool outputs would push the prompt over budget
-- **THEN** the runtime SHALL trim or compact lower-priority auxiliary context before sending the request
+- **WHEN** the complete assembled prompt would exceed the active model input budget
+- **THEN** the runtime SHALL stop before sending the model request
+- **AND** it SHALL return `stopReason="context_overflow"` with estimated prompt tokens and budget details
+- **AND** it SHALL NOT silently drop recent messages, attachment text, or tool output content to make the request fit
 
-#### Scenario: Tool output is large
-- **WHEN** a tool result is larger than the allowed retained prompt budget
-- **THEN** the runtime SHALL keep a bounded representation of that tool output in prompt context
+#### Scenario: Automatic compaction is enabled
+- **WHEN** automatic conversation compaction summarizes earlier turns
+- **THEN** the compaction summary SHALL be treated as a summary mechanism, not as silent truncation of the latest raw context
+- **AND** if the compacted prompt still exceeds the active model input budget, the runtime SHALL return `context_overflow`
 
 ### Requirement: Out-of-band storage for oversized tool outputs
-The system SHALL keep oversized tool outputs out of the default model context while preserving a retrievable raw reference.
+The system SHALL pass tool outputs through the normal chat/model path without application-level truncation. Out-of-band storage MAY still be used by specific tools or user-facing artifacts, but the default tool-output normalization path SHALL NOT replace oversized output with a summary, preview, or raw reference.
 
-#### Scenario: Tool output exceeds inline budget
-- **WHEN** a tool result exceeds the configured inline character or token budget
-- **THEN** the runtime SHALL store the complete raw output out-of-band when it is within the raw-output storage limit
-- **AND** the model context SHALL receive only a compact summary, short preview, raw reference, and size/truncation metadata
+#### Scenario: Tool output is large but fits the model budget
+- **WHEN** a tool result is large and the resulting prompt remains within the active model input budget
+- **THEN** the runtime SHALL send the complete tool result to the UI event stream and to subsequent model context
+- **AND** `outputStats.truncated` SHALL be `false`
 
-#### Scenario: Tool output exceeds raw storage budget
-- **WHEN** a tool result exceeds the configured raw-output storage budget
-- **THEN** the runtime SHALL store a bounded head/tail sample and statistics instead of the complete payload
-- **AND** the model context SHALL state that the raw output itself was too large to retain fully
-
-#### Scenario: Compacting a conversation with raw output references
-- **WHEN** conversation compaction summarizes earlier tool calls that used raw output references
-- **THEN** the compaction summary SHALL preserve the reference, summary, and important diagnostics
-- **AND** it SHALL NOT inline the complete raw output into the rolling session summary
+#### Scenario: Tool output makes the next model call too large
+- **WHEN** a complete tool result would make the next model call exceed the active model input budget
+- **THEN** the runtime SHALL preserve the complete tool result in the tool trace
+- **AND** the run SHALL stop with `stopReason="context_overflow"` before sending another model request
+- **AND** the runtime SHALL NOT synthesize a partial preview and continue as though the complete output were available to the model
 
 ### Requirement: Lazy raw tool output retrieval
 The system SHALL allow raw tool output to be retrieved by reference without sending it through the default chat message stream.
@@ -124,3 +127,27 @@ The system SHALL allow raw tool output to be retrieved by reference without send
 - **WHEN** the assistant needs the complete raw output for a later step
 - **THEN** it SHALL explicitly request or invoke a supported retrieval path for the raw reference
 - **AND** it SHALL not assume the complete raw output is already present in prompt context
+
+### Requirement: HTTP text payload intake
+The system SHALL accept chat-sized plain text payloads up to a configurable request-body limit and report request-body overflow as structured JSON.
+
+#### Scenario: Large plain-text chat payload is within the configured body limit
+- **WHEN** a user sends a large plain-text message whose request body is within `NEXO_REQUEST_BODY_LIMIT`
+- **THEN** the server SHALL accept and store the complete message content
+
+#### Scenario: Request body exceeds the configured limit
+- **WHEN** a chat or text API request body exceeds the configured Express body limit
+- **THEN** the server SHALL return HTTP `413`
+- **AND** the response body SHALL be JSON that includes the active request body limit
+
+### Requirement: Current-session recall query fidelity
+The system SHALL build current-session recall/search query text from the full available current-session transcript instead of selecting only a latest character window.
+
+#### Scenario: Current session contains long user messages
+- **WHEN** the runtime prepares current-session context for memory or knowledge recall
+- **THEN** it SHALL include the full formatted conversation transcript available in the session
+- **AND** individual message bodies SHALL NOT be shortened by a fixed character cap
+
+#### Scenario: Large current-session transcript exceeds model context
+- **WHEN** the complete current-session transcript contributes to a prompt that exceeds the active model budget
+- **THEN** the model request path SHALL fail with `context_overflow` instead of silently selecting only recent content

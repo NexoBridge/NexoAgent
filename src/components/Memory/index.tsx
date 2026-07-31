@@ -4,8 +4,8 @@ import { ClearOutlined, ReloadOutlined, SearchOutlined } from "@ant-design/icons
 import dayjs, { type Dayjs } from "dayjs";
 import { apiGet, apiDelete, apiPost } from "../../services/api";
 import { useI18n } from "../../i18n";
-import { useTheme } from "../../theme";
 import { OverflowMenuButton } from "../Common/OverflowMenuButton";
+import "./index.scss";
 
 const { Text } = Typography;
 
@@ -29,7 +29,6 @@ function dayToKey(day: Dayjs | null) {
 }
 
 export const MemoryPanel: React.FC = () => {
-  const { colors } = useTheme();
   const { lang, t } = useI18n();
   const [kind, setKind] = useState<MemoryKind>("daily");
   const [day, setDay] = useState<Dayjs | null>(null);
@@ -163,9 +162,9 @@ export const MemoryPanel: React.FC = () => {
   }, [entries]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", color: colors.textPrimary }}>
-      <div style={{ padding: "24px 32px 0 32px", maxWidth: 980, flexShrink: 0, width: "100%", alignSelf: "center" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
+    <div className="memory-panel">
+      <div className="memory-panel__header">
+      <div className="memory-panel__toolbar">
         <Space size={8} wrap>
           <DatePicker value={day} onChange={setDay} allowClear format="YYYY-MM-DD" placeholder={ui.allDates} />
           <Input.Search
@@ -175,7 +174,7 @@ export const MemoryPanel: React.FC = () => {
             placeholder={ui.searchMemory}
             loading={searching}
             enterButton={<SearchOutlined />}
-            style={{ width: 260 }}
+            className="memory-panel__search"
           />
           {kind === "dream" && dayKey && (
             <Button icon={<ReloadOutlined />} loading={regenerating} onClick={() => void regenerateDream()}>
@@ -197,10 +196,10 @@ export const MemoryPanel: React.FC = () => {
         )}
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-        <span style={{ fontSize: 18, fontWeight: 600, color: colors.textPrimary }}>
+      <div className="memory-panel__title-row">
+        <span className="memory-panel__title">
           {meta.label}
-          <Tag color={meta.color} style={{ marginLeft: 8, fontSize: 12 }}>
+          <Tag color={meta.color} className="memory-panel__count-tag">
             {entries.length}
           </Tag>
         </span>
@@ -209,42 +208,33 @@ export const MemoryPanel: React.FC = () => {
 
       <Tabs activeKey={kind} onChange={(key) => setKind(key as MemoryKind)} items={memoryTabs} />
 
-      <Text style={{ color: colors.textSecondary, fontSize: 13, display: "block", marginBottom: 16 }}>
+      <Text className="memory-panel__description">
         {meta.description}
       </Text>
       </div>
-      <div style={{ flex: 1, overflow: "auto", padding: "0 32px 24px 32px", maxWidth: 980, width: "100%", alignSelf: "center" }}>
+      <div className="memory-panel__body">
 
       {entries.length === 0 && !loading ? (
-        <Empty description={<span style={{ color: colors.textSecondary }}>{ui.noMemory}</span>} />
+        <Empty description={<span className="memory-panel__empty">{ui.noMemory}</span>} />
       ) : (
         <div>
           {loading ? (
             <List loading />
           ) : groupedEntries.map(([groupDay, groupItems]) => (
-            <div key={groupDay} style={{ marginBottom: 18 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  marginBottom: 6,
-                  paddingBottom: 6,
-                  borderBottom: `1px solid ${colors.border}`,
-                }}
-              >
+            <div key={groupDay} className="memory-panel__group">
+              <div className="memory-panel__group-header">
                 <Tag color="default">{dayjs(groupDay, "YYYYMMDD").format("YYYY-MM-DD")}</Tag>
-                <Text style={{ color: colors.textSecondary, fontSize: 12 }}>{t("itemCount", { count: groupItems.length })}</Text>
+                <Text className="memory-panel__group-count">{t("itemCount", { count: groupItems.length })}</Text>
               </div>
               <List
                 dataSource={groupItems}
                 renderItem={(item) => (
                   <List.Item
-                    style={{ borderBottom: `1px solid ${colors.border}`, padding: "12px 0" }}
+                    className="memory-panel__list-item"
                     actions={[
                       <OverflowMenuButton
                         key="more"
-                        color={colors.textMuted}
+                        color="var(--nexo-text-muted)"
                         items={[{ key: "delete", label: t("delete"), danger: true }]}
                         onItemClick={(key) => {
                           if (key === "delete") confirmDelete(item);
@@ -252,15 +242,15 @@ export const MemoryPanel: React.FC = () => {
                       />,
                     ]}
                   >
-                    <Space direction="vertical" size={4} style={{ flex: 1 }}>
+                    <Space direction="vertical" size={4} className="memory-panel__item-content">
                       <Space size={6} wrap>
                         <Tag color={kindMeta[item.kind].color}>{kindMeta[item.kind].label}</Tag>
                         <Tag color="default">{item.dayKey}</Tag>
                         {item.key && <Tag color="default">{item.key}</Tag>}
                         {item.scope && <Tag color="geekblue">{item.scope}</Tag>}
                       </Space>
-                      <Text style={{ color: colors.textPrimary }}>{item.content}</Text>
-                      <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+                      <Text className="memory-panel__item-text">{item.content}</Text>
+                      <Text className="memory-panel__item-meta">
                         {new Date(item.updatedAt || item.createdAt).toLocaleString()}
                       </Text>
                     </Space>

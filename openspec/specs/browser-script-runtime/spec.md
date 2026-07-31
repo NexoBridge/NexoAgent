@@ -143,22 +143,56 @@ TBD - created by archiving change add-browser-script-runtime. Update Purpose aft
 - **AND** 系统不得因为并发脚本执行破坏共享浏览器会话的一致性
 
 ### Requirement: Bounded script action return payloads
-系统 SHALL 对 `browser_action.action="script"` 的返回值执行专门的大输出保护，避免脚本返回的大对象直接进入模型上下文或默认 UI 消息流。
+The system SHALL NOT apply application-level character truncation to `browser_action.action="script"` results, script cache values, inspect fallbacks, or replay response bodies. Script authors MAY intentionally return summaries or cache keys, but the runtime SHALL preserve the value it receives unless serialization itself fails.
 
-#### Scenario: 脚本返回抓包形态大结果
-- **WHEN** `action="script"` 返回请求捕获、网络日志或 replay 样本等抓包形态数据
-- **THEN** 运行时 SHALL 优先将结构化样本写入 `scriptCache`
-- **AND** 工具返回给模型的内容 SHALL 包含缓存 key、样本数量、URL/method/status 摘要、TTL 和清理建议
-- **AND** 工具返回 SHALL NOT 默认内联完整抓包日志
+#### Scenario: Script returns a serializable large value
+- **WHEN** `browser_action.action="script"` returns a large JSON-serializable value
+- **THEN** the browser runtime SHALL return the complete serialized value in the script result
+- **AND** it SHALL NOT replace that value with a fixed-length text preview
 
-#### Scenario: 脚本返回非抓包大对象
-- **WHEN** `action="script"` 返回非抓包形态但超过内联预算的对象
-- **THEN** 运行时 SHALL 将原始返回值写入临时 raw tool output artifact
-- **AND** 工具返回给模型的内容 SHALL 包含可操作摘要、短 preview、raw 引用和大小统计
+#### Scenario: Script returns an unserializable value
+- **WHEN** a script result cannot be JSON-serialized
+- **THEN** the browser runtime SHALL return an inspect-format representation
+- **AND** the inspect fallback SHALL use unlimited string and array lengths at the application level
 
-#### Scenario: 脚本显式请求内联输出但超过硬限制
-- **WHEN** 脚本或工具参数请求返回完整原文
-- **AND** 结果超过硬性安全限制
-- **THEN** 运行时 SHALL 仍然使用摘要和 raw 引用
-- **AND** 返回元数据 SHALL 说明由于大小限制无法内联完整输出
+#### Scenario: Script cache stores a large value
+- **WHEN** script cache stores a JSON-serializable large value
+- **THEN** the cache entry SHALL preserve the complete JSON value
+- **AND** the cache summary SHALL NOT mark the entry as truncated due to a fixed character cap
+
+#### Scenario: Cached request replay returns a large response body
+- **WHEN** `scriptCache.replay` receives a large response body
+- **THEN** the replay result SHALL include the complete response body returned by `response.text()`
+- **AND** the result SHALL NOT include a `bodyTruncated` flag produced by application-level truncation
+
+### Requirement: Script response returns only script-owned output
+The system SHALL return only `ok` plus the script execution payload for `browser_action.action="script"` so script results are not buried under repeated page snapshots.
+
+#### Scenario: Script response omits repeated page snapshot
+- **WHEN** Agent calls `browser_action` with `action="script"`
+- **THEN** the tool output SHALL include `ok` and the script result, script cache report, script error, or timeout metadata when present
+- **AND** the response SHALL NOT inline the full page `elements`, readable page `text`, browser `history`, or resolver state
+- **AND** the response SHALL NOT inline URL/title/loading/navigation metadata unless the script itself returns those values
+- **AND** the response SHALL NOT require or expose any parameter that makes the script action return full page state
+
+#### Scenario: Full page state requires snapshot
+- **WHEN** Agent needs DOM elements, readable page text, browser history, or resolver state after a script call
+- **THEN** the Agent SHALL fetch that state through a separate `browser_action.action="snapshot"` call
+
+#### Scenario: Internal state remains fresh after script response
+- **WHEN** a script changes the current page or DOM state
+- **THEN** the browser runtime SHALL refresh its internal post-script snapshot before returning
+- **AND** subsequent `snapshot`, `resolve`, `click`, `type`, or screenshot actions SHALL operate on the same updated browser session
+
+### Requirement: Script output overflow is handled by the agent context budget
+The browser runtime SHALL return complete script-owned output, and the agent runtime SHALL decide whether the next model call can include that output.
+
+#### Scenario: Complete script output fits the next model call
+- **WHEN** a script result is complete and the next prompt remains within the active model input budget
+- **THEN** the agent SHALL include the complete script result in the next model call
+
+#### Scenario: Complete script output exceeds the next model call
+- **WHEN** a complete script result would cause the next prompt to exceed the active model input budget
+- **THEN** the agent SHALL stop with `stopReason="context_overflow"`
+- **AND** it SHALL report the budget details rather than asking the browser runtime to truncate the script result
 

@@ -3,7 +3,7 @@ import { Alert, Button, Input, Switch, Tag, message } from "antd";
 import { CopyOutlined, GlobalOutlined } from "@ant-design/icons";
 import { apiGet, apiPost } from "../../services/api";
 import { useI18n } from "../../i18n";
-import { useTheme } from "../../theme";
+import "./index.scss";
 
 type ChannelId = "web" | "feishu" | "dingtalk" | "wecom" | "wechat";
 
@@ -38,7 +38,7 @@ function buildChannels(lang: "zh" | "en"): ChannelDef[] {
       id: "web",
       name: zh ? "Web \u63a7\u5236\u53f0" : "Web Console",
       desc: zh ? "\u5f53\u524d\u9875\u9762\u8bbf\u95ee\u5730\u5740" : "Current page address",
-      icon: <GlobalOutlined style={{ fontSize: 22, color: "#38bdf8" }} />,
+      icon: <GlobalOutlined className="channels-panel__icon--web" />,
       fields: [],
       alwaysEnabled: true,
     },
@@ -46,7 +46,7 @@ function buildChannels(lang: "zh" | "en"): ChannelDef[] {
       id: "feishu",
       name: zh ? "\u98de\u4e66" : "Feishu",
       desc: zh ? "\u63a5\u5165\u98de\u4e66\u673a\u5668\u4eba\u4e8b\u4ef6\u56de\u8c03" : "Receive Feishu bot callbacks",
-      icon: <span style={{ fontSize: 22 }}>\u98de</span>,
+      icon: <span className="channels-panel__icon-char">\u98de</span>,
       fields: [
         { key: "app_id", label: "App ID" },
         { key: "app_secret", label: "App Secret", secret: true },
@@ -60,7 +60,7 @@ function buildChannels(lang: "zh" | "en"): ChannelDef[] {
       id: "dingtalk",
       name: zh ? "\u9489\u9489" : "DingTalk",
       desc: zh ? "\u63a5\u5165\u9489\u9489 Outgoing \u56de\u8c03" : "Receive DingTalk outgoing callbacks",
-      icon: <span style={{ fontSize: 22 }}>\u9489</span>,
+      icon: <span className="channels-panel__icon-char">\u9489</span>,
       fields: [
         { key: "agent_id", label: "Agent ID" },
         { key: "app_key", label: "App Key" },
@@ -74,7 +74,7 @@ function buildChannels(lang: "zh" | "en"): ChannelDef[] {
       id: "wecom",
       name: zh ? "\u4f01\u4e1a\u5fae\u4fe1" : "WeCom",
       desc: zh ? "\u63a5\u5165\u4f01\u4e1a\u5fae\u4fe1\u56de\u8c03" : "Receive WeCom callbacks",
-      icon: <span style={{ fontSize: 22 }}>\u4f01</span>,
+      icon: <span className="channels-panel__icon-char">\u4f01</span>,
       fields: [
         { key: "corp_id", label: "Corp ID" },
         { key: "agent_secret", label: "Agent Secret", secret: true },
@@ -90,7 +90,7 @@ function buildChannels(lang: "zh" | "en"): ChannelDef[] {
       id: "wechat",
       name: zh ? "\u5fae\u4fe1\u516c\u4f17\u53f7" : "WeChat Official Account",
       desc: zh ? "\u63a5\u5165\u5fae\u4fe1\u516c\u4f17\u53f7\u6d88\u606f\u56de\u8c03" : "Receive WeChat official account callbacks",
-      icon: <span style={{ fontSize: 22 }}>\u5fae</span>,
+      icon: <span className="channels-panel__icon-char">\u5fae</span>,
       fields: [
         { key: "app_id", label: "App ID" },
         { key: "app_secret", label: "App Secret", secret: true },
@@ -104,7 +104,6 @@ function buildChannels(lang: "zh" | "en"): ChannelDef[] {
 }
 
 function ChannelCard({ channel, config, onSaved, lang }: { channel: ChannelDef; config?: ChannelConfig; onSaved: (config: ChannelConfig) => void; lang: "zh" | "en" }) {
-  const { colors } = useTheme();
   const { t } = useI18n();
   const [enabled, setEnabled] = useState(Boolean(channel.alwaysEnabled || config?.enabled));
   const [values, setValues] = useState<Record<string, string>>(config?.values ?? {});
@@ -117,25 +116,6 @@ function ChannelCard({ channel, config, onSaved, lang }: { channel: ChannelDef; 
   }, [channel.alwaysEnabled, config]);
 
   const callback = channel.id === "web" ? window.location.href : config?.callbackUrl || "";
-
-  const cardStyle: React.CSSProperties = {
-    background: colors.bgSecondary,
-    border: `1px solid ${colors.border}`,
-    borderRadius: 10,
-    padding: "20px 24px",
-  };
-
-  const inputStyle: React.CSSProperties = {
-    background: colors.bgPrimary,
-    borderColor: colors.borderStrong,
-    color: colors.textPrimary,
-  };
-
-  const labelStyle: React.CSSProperties = {
-    color: colors.textSecondary,
-    fontSize: 12,
-    marginBottom: 4,
-  };
 
   const runtimeStatus = channel.id === "web"
     ? (lang === "zh" ? "\u5df2\u63a5\u5165" : "Connected")
@@ -165,14 +145,14 @@ function ChannelCard({ channel, config, onSaved, lang }: { channel: ChannelDef; 
   };
 
   return (
-    <div style={cardStyle}>
+    <div className="channels-panel__card">
       {contextHolder}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div className="channels-panel__card-header">
+        <div className="channels-panel__card-info">
           {channel.icon}
           <div>
-            <div style={{ color: colors.textPrimary, fontWeight: 600 }}>{channel.name}</div>
-            <div style={{ color: colors.textSecondary, fontSize: 12 }}>{channel.desc}</div>
+            <div className="channels-panel__card-name">{channel.name}</div>
+            <div className="channels-panel__card-desc">{channel.desc}</div>
           </div>
           <Tag color="green">{runtimeStatus}</Tag>
         </div>
@@ -183,15 +163,15 @@ function ChannelCard({ channel, config, onSaved, lang }: { channel: ChannelDef; 
         />
       </div>
 
-      <div style={{ marginTop: 16 }}>
-        <div style={labelStyle}>{callbackLabel}</div>
+      <div className="channels-panel__callback">
+        <div className="channels-panel__label">{callbackLabel}</div>
         <Input
           readOnly
           value={callback}
-          style={inputStyle}
+          className="channels-panel__input"
           suffix={
             <CopyOutlined
-              style={{ color: colors.textMuted, cursor: "pointer" }}
+              className="channels-panel__copy-icon"
               onClick={() => void copy(callback)}
             />
           }
@@ -199,18 +179,18 @@ function ChannelCard({ channel, config, onSaved, lang }: { channel: ChannelDef; 
       </div>
 
       {channel.note && (
-        <Alert type="info" showIcon message={channel.note} style={{ marginTop: 12 }} />
+        <Alert type="info" showIcon message={channel.note} className="channels-panel__note" />
       )}
 
       {enabled && channel.fields.length > 0 && (
-        <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div className="channels-panel__fields">
           {channel.fields.map((field) => {
             const InputControl = field.secret ? Input.Password : Input;
             return (
               <div key={field.key}>
-                <div style={labelStyle}>{field.label}</div>
+                <div className="channels-panel__label">{field.label}</div>
                 <InputControl
-                  style={inputStyle}
+                  className="channels-panel__input"
                   placeholder={field.label}
                   value={values[field.key] ?? ""}
                   onChange={(event) => setValues((current) => ({ ...current, [field.key]: event.target.value }))}
@@ -218,7 +198,7 @@ function ChannelCard({ channel, config, onSaved, lang }: { channel: ChannelDef; 
               </div>
             );
           })}
-          <Button type="primary" loading={saving} onClick={() => void handleSave()} style={{ alignSelf: "flex-end", marginTop: 4 }}>
+          <Button type="primary" loading={saving} onClick={() => void handleSave()} className="channels-panel__save-btn">
             {t("save")}
           </Button>
         </div>
@@ -228,7 +208,6 @@ function ChannelCard({ channel, config, onSaved, lang }: { channel: ChannelDef; 
 }
 
 export const Channels: React.FC = () => {
-  const { colors } = useTheme();
   const { lang } = useI18n();
   const [configs, setConfigs] = useState<Record<string, ChannelConfig>>({});
 
@@ -245,11 +224,11 @@ export const Channels: React.FC = () => {
   const cards = useMemo(() => buildChannels(lang), [lang]);
 
   return (
-    <div style={{ padding: "28px 32px", color: colors.textPrimary, background: colors.bgPrimary, minHeight: "100%" }}>
-      <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 24 }}>
+    <div className="channels-panel">
+      <div className="channels-panel__title">
         {lang === "zh" ? "\u6e20\u9053\u7ba1\u7406" : "Channel Management"}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(420px, 1fr))", gap: 20 }}>
+      <div className="channels-panel__grid">
         {cards.map((channel) => (
           <ChannelCard key={channel.id} channel={channel} config={configs[channel.id]} onSaved={updateConfig} lang={lang} />
         ))}

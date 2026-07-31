@@ -1,0 +1,83 @@
+.input-bar {
+  padding: 12px 24px 20px;
+  border-top: 1px solid var(--nexo-border);
+  background: var(--nexo-bg-secondary);
+
+  &__blocked {
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    background: var(--nexo-bg-tertiary);
+    border: 1px solid var(--nexo-border);
+    color: var(--nexo-text-muted);
+    font-size: 12px;
+  }
+
+  &__attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  &__attachment-tag {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    background: var(--nexo-bg-tertiary);
+    border: 1px solid var(--nexo-border-strong);
+    color: var(--nexo-text-primary);
+  }
+
+  &__attachment-thumb {
+    width: 24px;
+    height: 24px;
+    object-fit: cover;
+    border-radius: 2px;
+  }
+
+  &__attachment-close {
+    color: var(--nexo-text-muted);
+  }
+
+  &__row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  &__file-input {
+    display: none;
+  }
+
+  &__control {
+    border-radius: 12px;
+    background: var(--nexo-bg-tertiary);
+    color: var(--nexo-text-primary);
+    border: 1px solid var(--nexo-border-strong);
+  }
+
+  &__attach-btn {
+    height: 40px;
+    width: 48px;
+    flex-shrink: 0;
+    color: var(--nexo-text-muted);
+  }
+
+  &__textarea {
+    resize: none;
+  }
+
+  &__action-btn {
+    border-radius: 12px;
+    height: 40px;
+    width: 48px;
+    flex-shrink: 0;
+  }
+
+  &__send-btn {
+    background: var(--nexo-accent);
+    border: none;
+  }
+}

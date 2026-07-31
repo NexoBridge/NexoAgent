@@ -2,16 +2,16 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
-import { Avatar, Button, Popconfirm, Tag, Tooltip } from "antd";
+import { Avatar, Button, Modal, Popconfirm, Tag, Tooltip } from "antd";
 import { BookOutlined, DownOutlined, DownloadOutlined, FileOutlined, RightOutlined, RobotOutlined, SoundOutlined, UndoOutlined, UserOutlined } from "@ant-design/icons";
-import type { Attachment, ChatMessage, KnowledgeSourceHit, KnowledgeSourceMethod } from "../../shared/types";
+import type { Attachment, ChatMessage, KnowledgeSourceHit, KnowledgeSourceMethod, ModelRoutingMetadata } from "../../shared/types";
 import { ToolCallItem } from "./ToolCallSteps";
 import type { ToolCallEvent } from "./ToolCallSteps";
 import type { MessageBlock } from "../../store/chat";
 import { getApiBase } from "../../services/api";
-import { useTheme, type ThemeColors } from "../../theme";
 import { useI18n } from "../../i18n";
 import "highlight.js/styles/github-dark.css";
+import "./MessageBubble.scss";
 
 interface Props {
   message: ChatMessage;
@@ -40,31 +40,27 @@ function stripDsmlArtifacts(content: string) {
   return visibleText.replace(DSML_ANY_TAG_RE, "");
 }
 
-function buildMarkdownComponents(colors: ThemeColors) {
+function buildMarkdownComponents() {
   return {
     pre: ({ children }: { children?: React.ReactNode }) => (
-      <pre style={{ margin: "8px 0", borderRadius: 8, overflow: "auto", background: colors.codeBg, padding: "12px" }}>
-        {children}
-      </pre>
+      <pre className="message-bubble__markdown-pre">{children}</pre>
     ),
     code: ({ children, className }: { children?: React.ReactNode; className?: string }) =>
       className ? (
         <code className={className}>{children}</code>
       ) : (
-        <code style={{ background: colors.codeBg, padding: "1px 5px", borderRadius: 4, fontSize: "0.9em" }}>
-          {children}
-        </code>
+        <code className="message-bubble__markdown-inline-code">{children}</code>
       ),
-    p: ({ children }: { children?: React.ReactNode }) => <p style={{ margin: "4px 0" }}>{children}</p>,
+    p: ({ children }: { children?: React.ReactNode }) => <p className="message-bubble__markdown-p">{children}</p>,
   };
 }
 
-const MarkdownText: React.FC<{ content: string; streaming?: boolean; colors: ThemeColors }> = ({ content, streaming, colors }) => {
-  const components = useMemo(() => buildMarkdownComponents(colors), [colors]);
+const MarkdownText: React.FC<{ content: string; streaming?: boolean }> = ({ content, streaming }) => {
+  const components = useMemo(() => buildMarkdownComponents(), []);
   return streaming ? (
-    <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.7 }}>
+    <span className="message-bubble__stream-text">
       {content}
-      <span style={{ color: "#38bdf8", animation: "blink 1s step-end infinite" }}>{STREAM_CURSOR}</span>
+      <span className="message-bubble__stream-cursor">{STREAM_CURSOR}</span>
     </span>
   ) : (
     <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={components}>
@@ -73,20 +69,11 @@ const MarkdownText: React.FC<{ content: string; streaming?: boolean; colors: The
   );
 };
 
-const NoticeBlock: React.FC<{ content: string; tone?: "info" | "warning" | "error"; colors: ThemeColors }> = ({ content, tone = "info", colors }) => {
-  const accent = tone === "error" ? "#ef4444" : tone === "warning" ? "#f59e0b" : "#3b82f6";
+const NoticeBlock: React.FC<{ content: string; tone?: "info" | "warning" | "error" }> = ({ content, tone = "info" }) => {
+  const toneClass = tone === "error" ? "message-bubble__notice--error" : tone === "warning" ? "message-bubble__notice--warning" : "";
   return (
-    <div
-      style={{
-        borderLeft: `3px solid ${accent}`,
-        background: colors.bgTertiary,
-        borderRadius: 8,
-        padding: "8px 10px",
-        margin: "6px 0 10px",
-        color: colors.textSecondary,
-      }}
-    >
-      <MarkdownText content={content} colors={colors} />
+    <div className={`message-bubble__notice ${toneClass}`.trim()}>
+      <MarkdownText content={content} />
     </div>
   );
 };
@@ -113,46 +100,23 @@ function formatKnowledgeChunk(source: KnowledgeSourceHit, t: ReturnType<typeof u
 
 const KnowledgeSourcesBlock: React.FC<{
   sources: KnowledgeSourceHit[];
-  colors: ThemeColors;
   t: ReturnType<typeof useI18n>["t"];
   onOpenSource?: (path: string) => void;
-}> = ({ sources, colors, t, onOpenSource }) => {
+}> = ({ sources, t, onOpenSource }) => {
   const [expanded, setExpanded] = useState(false);
   return (
-    <div
-      style={{
-        marginTop: 8,
-        border: `1px solid ${colors.border}`,
-        borderRadius: 8,
-        background: colors.bgTertiary,
-        color: colors.textMuted,
-        fontSize: 12,
-        overflow: "hidden",
-      }}
-    >
+    <div className="message-bubble__knowledge">
       <button
         type="button"
         onClick={() => setExpanded((current) => !current)}
-        style={{
-          width: "100%",
-          minHeight: 34,
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          padding: "7px 9px",
-          border: 0,
-          background: "transparent",
-          color: colors.textSecondary,
-          cursor: "pointer",
-          textAlign: "left",
-        }}
+        className="message-bubble__knowledge-toggle"
       >
         {expanded ? <DownOutlined /> : <RightOutlined />}
         <BookOutlined />
         <span>{t("knowledgeSources")} ({sources.length})</span>
       </button>
       {expanded ? (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 9px 9px 9px" }}>
+        <div className="message-bubble__knowledge-tags">
           {sources.map((source, index) => {
             const chunk = formatKnowledgeChunk(source, t);
             const label = [source.rel, formatKnowledgeMethod(source.method, t), chunk].filter(Boolean).join(" · ");
@@ -161,27 +125,76 @@ const KnowledgeSourcesBlock: React.FC<{
                 <button
                   type="button"
                   onClick={() => onOpenSource?.(source.rel)}
-                  style={{
-                    maxWidth: 420,
-                    display: "inline-flex",
-                    alignItems: "center",
-                    minHeight: 24,
-                    padding: "2px 8px",
-                    border: `1px solid ${colors.borderStrong}`,
-                    borderRadius: 6,
-                    background: colors.bgSecondary,
-                    color: colors.textSecondary,
-                    cursor: onOpenSource ? "pointer" : "default",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
+                  className={`message-bubble__knowledge-tag${onOpenSource ? "" : " message-bubble__knowledge-tag--static"}`}
                 >
                   {label}
                 </button>
               </Tooltip>
             );
           })}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+function formatRoutingUsage(step: ModelRoutingMetadata["steps"][number]) {
+  const usage = step.usage;
+  if (!usage) return "";
+  const total = usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0));
+  return total ? `${total} tokens` : "";
+}
+
+const RoutingTraceBlock: React.FC<{ routing: ModelRoutingMetadata }> = ({ routing }) => {
+  const [expanded, setExpanded] = useState(false);
+  const roles = routing.steps.map((step) => step.role).filter((role, index, items) => items.indexOf(role) === index);
+  return (
+    <div className="message-bubble__routing">
+      <button
+        type="button"
+        onClick={() => setExpanded((current) => !current)}
+        className="message-bubble__routing-toggle"
+      >
+        {expanded ? <DownOutlined /> : <RightOutlined />}
+        <RobotOutlined />
+        <span>{routing.routeClass ?? "route"}</span>
+        {routing.executionMode ? <Tag>{routing.executionMode}</Tag> : null}
+        {roles.length ? <Tag>{roles.join(" -> ")}</Tag> : null}
+        {routing.loopIterations ? <Tag color="blue">loop {routing.loopIterations}</Tag> : null}
+        {routing.replanTriggered ? <Tag color="purple">replanned</Tag> : null}
+        {routing.checkTriggered ? <Tag color="gold">checked</Tag> : null}
+        {typeof routing.qualityScore === "number" ? <Tag color={routing.qualityScore >= (routing.qualityThreshold ?? 0) ? "green" : "orange"}>{routing.qualityScore.toFixed(2)}</Tag> : null}
+      </button>
+      {expanded ? (
+        <div className="message-bubble__routing-steps">
+          {routing.steps.map((step, index) => {
+            const usage = formatRoutingUsage(step);
+            return (
+              <div key={`${step.role}-${step.status}-${index}`} className="message-bubble__routing-step">
+                <Tag color={step.status === "failed" ? "red" : step.status === "completed" ? "green" : step.status === "skipped" ? "default" : "blue"}>
+                  {step.role}
+                </Tag>
+                <span>{step.status}</span>
+                {step.iteration ? <span>loop {step.iteration}</span> : null}
+                {step.profileName || step.model ? <span>{[step.profileName, step.model].filter(Boolean).join(" / ")}</span> : null}
+                {step.replanReason ? <span>{step.replanReason}</span> : null}
+                {step.reason ? <span>{step.reason}</span> : null}
+                {usage ? <span>{usage}</span> : null}
+              </div>
+            );
+          })}
+          {routing.replanReasons?.length ? (
+            <div className="message-bubble__routing-step">
+              <Tag color="purple">replan</Tag>
+              <span>{routing.replanReasons.join(", ")}</span>
+            </div>
+          ) : null}
+          {routing.checkReasons?.length ? (
+            <div className="message-bubble__routing-step">
+              <Tag color="orange">check</Tag>
+              <span>{routing.checkReasons.join(", ")}</span>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -217,24 +230,18 @@ function buildAttachmentDownloadHref(apiBase: string, attachment: Pick<Attachmen
 function AttachmentActions({
   href,
   downloadHref,
-  colors,
   t,
 }: {
   href: string;
   downloadHref: string;
-  colors: ThemeColors;
   t: ReturnType<typeof useI18n>["t"];
 }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6 }}>
-      <a href={href} target="_blank" rel="noreferrer" style={{ color: colors.textMuted, fontSize: 12 }}>
+    <div className="message-bubble__attachment-actions">
+      <a href={href} target="_blank" rel="noreferrer" className="message-bubble__attachment-link">
         {t("openAttachment")}
       </a>
-      <a
-        href={downloadHref}
-        download
-        style={{ color: colors.textMuted, fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4 }}
-      >
+      <a href={downloadHref} download className="message-bubble__attachment-link">
         <DownloadOutlined />
         {t("downloadAttachment")}
       </a>
@@ -245,73 +252,54 @@ function AttachmentActions({
 function AttachmentCard({
   attachment,
   apiBase,
-  colors,
   t,
+  onPreview,
 }: {
   attachment: Attachment;
   apiBase: string;
-  colors: ThemeColors;
   t: ReturnType<typeof useI18n>["t"];
+  onPreview?: (attachment: Attachment) => void;
 }) {
   const href = buildAttachmentHref(apiBase, attachment);
   const downloadHref = buildAttachmentDownloadHref(apiBase, attachment);
 
   if (attachment.type === "image") {
     return (
-      <div style={{ marginBottom: 8 }}>
+      <div className="message-bubble__attachment">
         <img
           src={href}
           alt={attachment.name}
-          style={{ maxWidth: 280, borderRadius: 8, display: "block", cursor: "pointer", border: `1px solid ${colors.border}` }}
-          onClick={() => window.open(href)}
+          className="message-bubble__attachment-image"
+          onClick={() => onPreview?.(attachment)}
         />
-        <AttachmentActions href={href} downloadHref={downloadHref} colors={colors} t={t} />
+        <AttachmentActions href={href} downloadHref={downloadHref} t={t} />
       </div>
     );
   }
 
   if (attachment.type === "audio") {
     return (
-      <div
-        style={{
-          background: colors.bgTertiary,
-          border: `1px solid ${colors.borderStrong}`,
-          padding: 8,
-          borderRadius: 8,
-          marginBottom: 8,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, color: colors.textMuted }}>
+      <div className="message-bubble__attachment-card">
+        <div className="message-bubble__attachment-meta">
           <SoundOutlined />
-          <a href={href} target="_blank" rel="noreferrer" style={{ color: colors.textMuted }}>
+          <a href={href} target="_blank" rel="noreferrer" className="message-bubble__attachment-link">
             {attachment.name}
           </a>
         </div>
-        <audio controls src={href} style={{ width: "100%" }} />
-        <AttachmentActions href={href} downloadHref={downloadHref} colors={colors} t={t} />
+        <audio controls src={href} className="message-bubble__attachment-audio" />
+        <AttachmentActions href={href} downloadHref={downloadHref} t={t} />
       </div>
     );
   }
 
   return (
-    <div
-      style={{
-        background: colors.bgTertiary,
-        border: `1px solid ${colors.borderStrong}`,
-        padding: 8,
-        borderRadius: 8,
-        marginBottom: 8,
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-      }}
-    >
-      <FileOutlined style={{ color: colors.textMuted }} />
+    <div className="message-bubble__attachment-card message-bubble__attachment-card--row">
+      <FileOutlined className="message-bubble__attachment-link" />
       <div>
-        <a href={href} target="_blank" rel="noreferrer" style={{ color: colors.textMuted }}>
+        <a href={href} target="_blank" rel="noreferrer" className="message-bubble__attachment-link">
           {attachment.name}
         </a>
-        <AttachmentActions href={href} downloadHref={downloadHref} colors={colors} t={t} />
+        <AttachmentActions href={href} downloadHref={downloadHref} t={t} />
       </div>
     </div>
   );
@@ -333,8 +321,8 @@ function getMessageStatusMeta(status: ChatMessage["status"], t: ReturnType<typeo
 }
 
 const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls, blocks, undoable, onUndo, onOpenKnowledgeSource }) => {
-  const { colors } = useTheme();
   const { t } = useI18n();
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
   const isUser = message.role === "user";
   const effectiveToolCalls = (toolCalls ?? message.meta?.toolCalls ?? []) as ToolCallEvent[];
   const effectiveBlocks = blocks ?? message.meta?.messageBlocks;
@@ -343,6 +331,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
   const apiBase = getApiBase();
   const safeContent = useMemo(() => (!isUser ? stripDsmlArtifacts(message.content) : message.content), [isUser, message.content]);
   const knowledgeSources = !isUser ? message.meta?.knowledgeSources ?? [] : [];
+  const routing = !isUser ? message.meta?.routing : undefined;
   const normalizedAttachments = useMemo(() => {
     const explicit = message.attachments ?? [];
     if (isUser) return explicit;
@@ -363,44 +352,32 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
   const statusMeta = !isUser ? getMessageStatusMeta(message.status, t) : null;
   const isUndone = message.status === "undone";
 
+  const bubbleClass = [
+    "message-bubble__bubble",
+    isUser ? "message-bubble__bubble--user" : "",
+    isUndone ? "message-bubble__bubble--undone" : "",
+  ].filter(Boolean).join(" ");
+
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 10,
-        flexDirection: isUser ? "row-reverse" : "row",
-        marginBottom: 16,
-        alignItems: "flex-start",
-      }}
-    >
+    <div className={`message-bubble ${isUser ? "message-bubble--user" : "message-bubble--assistant"}`}>
       <Avatar
         icon={isUser ? <UserOutlined /> : <RobotOutlined />}
-        style={{ background: isUser ? colors.bubbleUser : colors.assistantAvatar, flexShrink: 0, marginTop: 2 }}
+        className="message-bubble__avatar"
         size={32}
       />
-      <div style={{ maxWidth: "80%", minWidth: 0 }}>
+      <div className="message-bubble__content">
         {normalizedAttachments.map((attachment, index) => (
           <AttachmentCard
             key={`${attachment.url}-${index}`}
             attachment={attachment}
             apiBase={apiBase}
-            colors={colors}
             t={t}
+            onPreview={(nextAttachment) => setPreviewAttachment(nextAttachment)}
           />
         ))}
-        <div
-          style={{
-            background: isUndone ? colors.bgTertiary : (isUser ? colors.bubbleUser : colors.bubbleAssistant),
-            color: isUndone ? colors.textMuted : (isUser ? "#ffffff" : colors.textPrimary),
-            border: isUser ? "none" : `1px solid ${isUndone ? colors.borderStrong : colors.border}`,
-            borderRadius: isUser ? "16px 4px 16px 16px" : "4px 16px 16px 16px",
-            padding: "10px 14px",
-            wordBreak: "break-word",
-            opacity: isUndone ? 0.72 : 1,
-          }}
-        >
+        <div className={bubbleClass}>
           {isUser ? (
-            <span style={{ whiteSpace: "pre-wrap" }}>{message.content}</span>
+            <span className="message-bubble__user-text">{message.content}</span>
           ) : hasBlocks && effectiveBlocks ? (
             <>
               {effectiveBlocks.map((block, index) => {
@@ -411,7 +388,6 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
                       key={`text-${index}`}
                       content={stripDsmlArtifacts(block.content)}
                       streaming={streaming && isLast}
-                      colors={colors}
                     />
                   );
                 }
@@ -421,7 +397,6 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
                       key={`notice-${index}`}
                       content={stripDsmlArtifacts(block.content)}
                       tone={block.tone}
-                      colors={colors}
                     />
                   );
                 }
@@ -429,20 +404,46 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
                 return call ? <ToolCallItem key={block.id} call={call} /> : null;
               })}
               {streaming && effectiveBlocks.length > 0 && effectiveBlocks[effectiveBlocks.length - 1].type === "tool" ? (
-                <span style={{ color: "#38bdf8", animation: "blink 1s step-end infinite" }}>{STREAM_CURSOR}</span>
+                <span className="message-bubble__stream-cursor">{STREAM_CURSOR}</span>
               ) : null}
             </>
           ) : (
-            <MarkdownText content={safeContent} streaming={streaming} colors={colors} />
+            <MarkdownText content={safeContent} streaming={streaming} />
           )}
         </div>
         {knowledgeSources.length ? (
-          <KnowledgeSourcesBlock sources={knowledgeSources} colors={colors} t={t} onOpenSource={onOpenKnowledgeSource} />
+          <KnowledgeSourcesBlock sources={knowledgeSources} t={t} onOpenSource={onOpenKnowledgeSource} />
         ) : null}
-        <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {routing?.enabled ? <RoutingTraceBlock routing={routing} /> : null}
+        <Modal
+          open={Boolean(previewAttachment)}
+          title={previewAttachment?.name ?? ""}
+          onCancel={() => setPreviewAttachment(null)}
+          footer={null}
+          centered
+          destroyOnClose
+          width="min(92vw, 980px)"
+          className="message-bubble__preview-modal"
+        >
+          {previewAttachment ? (
+            <div className="message-bubble__preview">
+              <img
+                src={buildAttachmentHref(apiBase, previewAttachment)}
+                alt={previewAttachment.name}
+                className="message-bubble__preview-image"
+              />
+              <AttachmentActions
+                href={buildAttachmentHref(apiBase, previewAttachment)}
+                downloadHref={buildAttachmentDownloadHref(apiBase, previewAttachment)}
+                t={t}
+              />
+            </div>
+          ) : null}
+        </Modal>
+        <div className="message-bubble__footer">
           {statusMeta ? <Tag color={statusMeta.color}>{statusMeta.label}</Tag> : null}
           {!isUser && isUndone && message.meta?.undoneMessage ? (
-            <span style={{ color: colors.textMuted, fontSize: 12 }}>
+            <span className="message-bubble__undone-note">
               {message.meta.undoneMessage === "This turn was undone and its file changes were restored."
                 ? t("undoneMessage")
                 : message.meta.undoneMessage}
@@ -461,7 +462,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
                   size="small"
                   type="text"
                   icon={<UndoOutlined />}
-                  style={{ color: colors.textMuted, paddingInline: 6 }}
+                  className="message-bubble__undo-btn"
                 >
                   {t("undo")}
                 </Button>

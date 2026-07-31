@@ -13,8 +13,8 @@ import { ReloadOutlined, ThunderboltOutlined } from "@ant-design/icons";
 import type { SkillDefinition } from "../../shared/types";
 import { apiDelete, apiGet, apiPost } from "../../services/api";
 import { useI18n } from "../../i18n";
-import { useTheme } from "../../theme";
 import { OverflowMenuButton } from "../Common/OverflowMenuButton";
+import "./index.scss";
 
 const { Title, Text, Paragraph } = Typography;
 
@@ -29,20 +29,9 @@ function sourceLabel(skill: SkillItem) {
 }
 
 export default function Skills() {
-  const { colors } = useTheme();
   const { t } = useI18n();
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(false);
-
-  const sectionStyle = useMemo<React.CSSProperties>(
-    () => ({
-      background: colors.bgSecondary,
-      border: `1px solid ${colors.border}`,
-      borderRadius: 8,
-      padding: 20,
-    }),
-    [colors],
-  );
 
   const loadAll = async () => {
     setLoading(true);
@@ -95,11 +84,11 @@ export default function Skills() {
         dataSource={items}
         renderItem={(skill) => (
           <List.Item
-            style={{ borderColor: colors.border, paddingInline: 0 }}
+            className="skills-panel__list-item"
             actions={[
               <OverflowMenuButton
                 key="more"
-                color={colors.textSecondary}
+                color="var(--nexo-text-secondary)"
                 items={[
                   { key: "toggle", label: skill.enabled ? t("disabled") : t("enabled") },
                   ...(skill.source !== "built-in"
@@ -119,10 +108,10 @@ export default function Skills() {
             ]}
           >
             <List.Item.Meta
-              avatar={<ThunderboltOutlined style={{ color: colors.accent, fontSize: 18, marginTop: 4 }} />}
+              avatar={<ThunderboltOutlined className="skills-panel__skill-icon" />}
               title={(
                 <Space size={8} wrap>
-                  <span style={{ color: colors.textPrimary, fontWeight: 600 }}>{skill.name}</span>
+                  <span className="skills-panel__skill-name">{skill.name}</span>
                   <Tag color={skill.enabled ? "green" : "default"}>{skill.enabled ? t("enabled") : t("disabled")}</Tag>
                   <Tag color="blue">{skill.category}</Tag>
                   <Tag color={skill.source === "built-in" ? "gold" : skill.source === "marketplace" ? "purple" : "cyan"}>
@@ -133,15 +122,15 @@ export default function Skills() {
                 </Space>
               )}
               description={(
-                <Space direction="vertical" size={4} style={{ display: "flex" }}>
-                  <Text style={{ color: colors.textPrimary }}>{skill.description}</Text>
+                <Space direction="vertical" size={4} className="skills-panel__skill-meta">
+                  <Text className="skills-panel__skill-desc">{skill.description}</Text>
                   {skill.path && (
-                    <Paragraph style={{ color: colors.textMuted, marginBottom: 0 }} ellipsis={{ rows: 1 }}>
+                    <Paragraph className="skills-panel__skill-path" ellipsis={{ rows: 1 }}>
                       {skill.path}
                     </Paragraph>
                   )}
                   <Paragraph
-                    style={{ color: colors.textMuted, marginBottom: 0 }}
+                    className="skills-panel__skill-instruction"
                     ellipsis={{ rows: 2, expandable: true, symbol: "More" }}
                   >
                     {skill.instruction}
@@ -169,14 +158,14 @@ export default function Skills() {
   );
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", background: colors.bgPrimary, color: colors.textPrimary }}>
-      <div style={{ flexShrink: 0, padding: "24px 24px 0 24px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 20 }}>
+    <div className="skills-panel">
+      <div className="skills-panel__header">
+      <div className="skills-panel__title-row">
         <div>
-          <Title level={4} style={{ color: colors.textPrimary, margin: 0 }}>
+          <Title level={4} className="skills-panel__title">
             {t("skills")}
           </Title>
-          <Text style={{ color: colors.textMuted }}>
+          <Text className="skills-panel__subtitle">
             {t("skillsSubtitle")}
           </Text>
         </div>
@@ -185,22 +174,22 @@ export default function Skills() {
         </Button>
       </div>
 
-      <Space wrap size={12} style={{ marginBottom: 20 }}>
-        <div style={{ minWidth: 140, padding: "12px 14px", borderRadius: 8, background: colors.bgSecondary, border: `1px solid ${colors.border}` }}>
-          <Text style={{ color: colors.textMuted }}>{t("loaded")}</Text>
-          <div style={{ fontSize: 24, fontWeight: 700, color: colors.textPrimary }}>{summary.total}</div>
+      <Space wrap size={12} className="skills-panel__summary">
+        <div className="skills-panel__stat">
+          <Text className="skills-panel__stat-label">{t("loaded")}</Text>
+          <div className="skills-panel__stat-value">{summary.total}</div>
         </div>
-        <div style={{ minWidth: 140, padding: "12px 14px", borderRadius: 8, background: colors.bgSecondary, border: `1px solid ${colors.border}` }}>
-          <Text style={{ color: colors.textMuted }}>{t("enabled")}</Text>
-          <div style={{ fontSize: 24, fontWeight: 700, color: colors.textPrimary }}>{summary.enabled}</div>
+        <div className="skills-panel__stat">
+          <Text className="skills-panel__stat-label">{t("enabled")}</Text>
+          <div className="skills-panel__stat-value">{summary.enabled}</div>
         </div>
-        <div style={{ minWidth: 140, padding: "12px 14px", borderRadius: 8, background: colors.bgSecondary, border: `1px solid ${colors.border}` }}>
-          <Text style={{ color: colors.textMuted }}>{t("managed")}</Text>
-          <div style={{ fontSize: 24, fontWeight: 700, color: colors.textPrimary }}>{summary.managed}</div>
+        <div className="skills-panel__stat">
+          <Text className="skills-panel__stat-label">{t("managed")}</Text>
+          <div className="skills-panel__stat-value">{summary.managed}</div>
         </div>
       </Space>
 
-      <Space direction="vertical" size={16} style={{ display: "flex" }}>
+      <Space direction="vertical" size={16} className="skills-panel__alert-wrap">
         <Alert
           type="info"
           showIcon
@@ -208,24 +197,24 @@ export default function Skills() {
         />
       </Space>
       </div>
-      <div style={{ flex: 1, overflow: "auto", padding: "0 24px 24px 24px", minHeight: 0 }}>
+      <div className="skills-panel__body">
 
-        <div style={sectionStyle}>
-          <Title level={5} style={{ color: colors.textPrimary, marginTop: 0 }}>
+        <div className="skills-panel__section">
+          <Title level={5} className="skills-panel__section-title">
             {t("managedSkills")}
           </Title>
           {renderSkillList(managedSkills, t("noManagedSkills"))}
         </div>
 
-        <div style={sectionStyle}>
-          <Title level={5} style={{ color: colors.textPrimary, marginTop: 0 }}>
+        <div className="skills-panel__section">
+          <Title level={5} className="skills-panel__section-title">
             {t("workspaceDiscoveries")}
           </Title>
           {renderSkillList(discoveredSkills, t("noDiscoveredSkills"))}
         </div>
 
-        <div style={sectionStyle}>
-          <Title level={5} style={{ color: colors.textPrimary, marginTop: 0 }}>
+        <div className="skills-panel__section">
+          <Title level={5} className="skills-panel__section-title">
             {t("builtInPresets")}
           </Title>
           {renderSkillList(builtInSkills, t("noBuiltInSkills"))}

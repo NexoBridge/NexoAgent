@@ -11,8 +11,8 @@ import {
 } from "@ant-design/icons";
 import { SessionList } from "../SessionList";
 import { ChatPanel } from "../ChatPanel";
-import { useTheme } from "../../theme";
 import type { BrowserActionRequest, BrowserElementPickResult, BrowserState } from "../../shared/types";
+import "./index.scss";
 
 const MIN_CONVERSATION_WIDTH = 620;
 const MAX_CONVERSATION_WIDTH = 1040;
@@ -46,7 +46,6 @@ function formatPickedElement(result: BrowserElementPickResult) {
 }
 
 export default function BrowserWorkbench() {
-  const { colors } = useTheme();
   const desktopApi = window.nexoDesktop;
   const [browserState, setBrowserState] = useState<BrowserState | null>(null);
   const [url, setUrl] = useState("https://");
@@ -196,40 +195,26 @@ export default function BrowserWorkbench() {
     setResizing(true);
   };
 
-  const zoomLabel = `${Math.round((browserState?.zoomFactor ?? 1) * 100)}%`;
   const sessionHistoryWidth = sessionHistoryCollapsed ? COLLAPSED_SESSION_HISTORY_WIDTH : SESSION_HISTORY_WIDTH;
 
   return (
     <div
       id="browser-workbench-shell"
+      className="browser-workbench"
       style={{
         display: "grid",
         gridTemplateColumns: `minmax(0, 1fr) ${CONTROL_RAIL_WIDTH}px ${conversationWidth}px`,
-        height: "100%",
-        minHeight: 0,
-        background: colors.bgPrimary,
-        position: "relative",
-        overflow: "hidden",
       }}
     >
-      <div style={{ display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              padding: 12,
-              background: colors.bgSecondary,
-              borderBottom: `1px solid ${colors.border}`,
-            }}
-          >
+      <div className="browser-workbench__browser-column">
+          <div className="browser-workbench__toolbar">
             <Input
               value={url}
               onChange={(event) => setUrl(event.target.value)}
               onPressEnter={() => void runAction({ action: "navigate", url })}
-              prefix={<LinkOutlined style={{ color: colors.textMuted }} />}
+              prefix={<LinkOutlined className="browser-workbench__url-prefix" />}
               disabled={busy}
-              style={{ flex: 1, minWidth: 0 }}
+              className="browser-workbench__url-input"
             />
             <Tooltip title="Back">
               <Button
@@ -265,39 +250,17 @@ export default function BrowserWorkbench() {
           <div
             ref={browserPaneRef}
             id="browser-workbench-view"
-            style={{
-              flex: 1,
-              minHeight: 0,
-              background: colors.bgSecondary,
-              overflow: "hidden",
-              position: "relative",
-            }}
+            className="browser-workbench__view"
           />
         </div>
 
       <div
         onMouseDown={startResize}
-        style={{
-          position: "relative",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          cursor: "col-resize",
-          background: resizing ? colors.accent : colors.border,
-          transition: resizing ? "none" : "background 0.15s ease",
-        }}
+        className={`browser-workbench__resize-rail${resizing ? " browser-workbench__resize-rail--active" : ""}`}
       >
         <div
           data-browser-zoom-controls
-          style={{
-            display: "grid",
-            gap: 6,
-            padding: 4,
-            borderRadius: 999,
-            background: colors.bgSecondary,
-            border: `1px solid ${colors.borderStrong}`,
-            boxShadow: "0 10px 28px rgba(15, 23, 42, 0.18)",
-          }}
+          className="browser-workbench__zoom-controls"
         >
           <Tooltip title="Zoom out" placement="left">
             <Button
@@ -305,7 +268,7 @@ export default function BrowserWorkbench() {
               type="text"
               icon={<ZoomOutOutlined />}
               onClick={() => void setBrowserZoom("out")}
-              style={{ width: 28, height: 28, color: colors.textMuted }}
+              className="browser-workbench__zoom-btn"
             />
           </Tooltip>
           <Tooltip title="Zoom in" placement="left">
@@ -314,29 +277,26 @@ export default function BrowserWorkbench() {
               type="text"
               icon={<ZoomInOutlined />}
               onClick={() => void setBrowserZoom("in")}
-              style={{ width: 28, height: 28, color: colors.textMuted }}
+              className="browser-workbench__zoom-btn"
             />
           </Tooltip>
         </div>
       </div>
 
       <div
+        className="browser-workbench__conversation"
         style={{
           display: "grid",
           gridTemplateColumns: `${sessionHistoryWidth}px minmax(0, 1fr)`,
-          minWidth: 0,
-          minHeight: 0,
-          borderLeft: `1px solid ${colors.border}`,
-          background: colors.bgSecondary,
         }}
       >
-        <div style={{ minWidth: 0, minHeight: 0, borderRight: `1px solid ${colors.border}`, overflow: "hidden" }}>
+        <div className="browser-workbench__session-pane">
           <SessionList
             collapsed={sessionHistoryCollapsed}
             onToggleWidth={() => setSessionHistoryCollapsed((current) => !current)}
           />
         </div>
-        <div style={{ minWidth: 0, minHeight: 0 }}>
+        <div className="browser-workbench__chat-pane">
           <ChatPanel surface="browser" externalFillValue={elementFillValue} />
         </div>
       </div>

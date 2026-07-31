@@ -14,6 +14,7 @@ This repository is an active product and agent-runtime workspace. Some surfaces 
 
 - Multi-session chat with streaming responses, persisted conversation history, interruption support, and tool-call traces.
 - OpenAI-compatible and Anthropic-compatible model orchestration through LangChain.
+- Planner/executor routing: the primary model can plan and verify while a configured smaller model executes the turn.
 - Built-in tools for shell commands, model sub-calls, scheduled tasks, persistent memory recall, script memory storage, and shared browser operation.
 - AI Browser: a shared Electron browser session for interactive web work, screenshots, DOM-first target resolution, CDP input events, and high-privilege runtime scripts.
 - Short-lived browser script cache for temporary capture/replay samples, separate from durable script memory.
@@ -49,27 +50,6 @@ This starts:
 - Electron desktop window
 - Local Express backend and web console at `http://localhost:9898`
 
-### Start Only the Web Dev Server
-
-```bash
-npm run dev:web
-```
-
-The Vite server listens on `http://localhost:8106` and proxies `/api` and `/uploads` to `http://localhost:9898`. If you run only `dev:web`, make sure the backend is already running.
-
-### Serve the Built Web Console
-
-```bash
-npm run build
-npm run serve:web-console
-```
-
-Default URL:
-
-```text
-http://localhost:9898
-```
-
 ## Configuration
 
 Open Settings after first launch and configure a model profile.
@@ -92,6 +72,16 @@ Common settings:
 | Memory / Knowledge Toggles | Enable or disable recall and local knowledge injection |
 
 Without a configured model API key, the app can still open, but full agent behavior requires a working provider profile.
+
+### Planner / Executor Routing
+
+Settings can enable **Big Model Plans, Small Model Runs**. In this mode, the primary model is used as the planner and verifier, while the selected executor profile runs the main assistant turn.
+
+- Simple requests can skip the planner and go directly to the executor.
+- Complex, tool-heavy, or ambiguous requests can receive a compact planner brief before execution.
+- The verifier can check low-quality executor answers and revise the final response when needed.
+- Planner, executor, and verifier profiles may use different providers, such as a GPT/OpenAI-compatible primary model with a Claude/Anthropic-compatible executor.
+- Provider message formatting is normalized before model calls: the leading system prompt stays stable for GPT prompt-cache prefix reuse, while later application context is passed as ordinary context messages so strict Claude/OpenAI-compatible transports do not reject the request.
 
 ## Built-In Tools
 
@@ -281,24 +271,8 @@ nexoAgent/
 
 | Command | Description |
 | --- | --- |
-| `npm run dev:web` | Start the Vite web dev server |
 | `npm run dev:electron` | Start the full Electron development environment |
-| `npm run build:web` | Type-check and build the React frontend |
-| `npm run build:electron` | Compile Electron main/preload/server code |
-| `npm run build` | Build frontend and Electron code |
-| `npm run serve:web-console` | Serve the built local web console |
-| `npm run preview` | Preview the Vite build output |
-| `npm run typecheck` | Run TypeScript checks for frontend and Electron projects |
-| `npm run verify:context-management` | Verify rolling context compaction behavior |
-| `npm run verify:tool-output-bounds` | Verify large tool-output summarization and raw-output references |
-| `npm run verify:browser-action-run` | Verify browser action runtime behavior |
-| `npm run verify:provider-embeddings` | Verify provider embedding configuration |
-| `npm run verify:memory-recall` | Verify memory recall behavior |
-| `npm run verify:multimodal-models` | Verify multimodal model routing |
-| `npm run package` | Build icons, build the app, and package with electron-builder |
-| `npm run package:win` | Package Windows artifacts |
-| `npm run package:mac` | Package macOS artifacts |
-| `npm run package:linux` | Package Linux artifacts |
+| `npm run build:electron` | Build icons, check TypeScript, build frontend/Electron code, and package with electron-builder |
 
 Packaged artifacts are written to:
 

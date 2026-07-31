@@ -1,0 +1,50 @@
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
+
+  &__onboarding {
+    flex: 1;
+    min-height: 0;
+  }
+
+  &__drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    pointer-events: none;
+    background: rgba(8, 15, 26, 0.78);
+  }
+
+  &--light &__drop-overlay {
+    background: rgba(248, 250, 252, 0.82);
+  }
+
+  &__drop-card {
+    min-width: 280px;
+    max-width: 520px;
+    padding: 28px 32px;
+    border-radius: 20px;
+    border: 2px dashed var(--nexo-accent);
+    background: var(--nexo-bg-secondary);
+    color: var(--nexo-text-primary);
+    text-align: center;
+    box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22);
+  }
+
+  &__drop-title {
+    font-size: 18px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+
+  &__drop-subtitle {
+    font-size: 13px;
+    color: var(--nexo-text-muted);
+  }
+}

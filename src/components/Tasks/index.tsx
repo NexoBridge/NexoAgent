@@ -4,9 +4,9 @@ import { PlusOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import { apiGet, apiPost, apiDelete, apiPatch } from "../../services/api";
 import { useI18n } from "../../i18n";
-import { useTheme } from "../../theme";
 import { OverflowMenuButton } from "../Common/OverflowMenuButton";
 import type { TurnCompletionStatus } from "../../shared/types";
+import "./index.scss";
 
 interface Task {
   id: string;
@@ -35,7 +35,6 @@ interface TasksProps {
 }
 
 export default function Tasks({ onOpenTaskSession }: TasksProps) {
-  const { colors } = useTheme();
   const { lang, t } = useI18n();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(false);
@@ -204,15 +203,7 @@ export default function Tasks({ onOpenTaskSession }: TasksProps) {
       dataIndex: "cron",
       key: "cron",
       render: (value: string) => (
-        <code
-          style={{
-            fontFamily: "Consolas, Monaco, monospace",
-            background: colors.codeBg,
-            color: colors.textPrimary,
-            padding: "2px 6px",
-            borderRadius: 4,
-          }}
-        >
+        <code className="tasks-panel__cron">
           {value}
         </code>
       ),
@@ -243,10 +234,10 @@ export default function Tasks({ onOpenTaskSession }: TasksProps) {
       title: ui.lastRun,
       key: "lastRun",
       render: (_value: unknown, record: Task) => (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <div className="tasks-panel__last-run">
           <span>{record.lastRun ? dayjs(record.lastRun).format("YYYY-MM-DD HH:mm:ss") : "-"}</span>
           {record.lastError ? (
-            <span style={{ color: "#cf1322", fontSize: 12 }}>
+            <span className="tasks-panel__last-error">
               {record.lastError.length > 60 ? `${record.lastError.slice(0, 57)}...` : record.lastError}
             </span>
           ) : null}
@@ -258,11 +249,11 @@ export default function Tasks({ onOpenTaskSession }: TasksProps) {
       key: "actions",
       render: (_: unknown, record: Task) => (
         <OverflowMenuButton
-          color={colors.textSecondary}
+          color="var(--nexo-text-secondary)"
           label={lang === "zh" ? "\u64cd\u4f5c" : "Actions"}
           variant="outlined"
-          backgroundColor={colors.bgTertiary}
-          borderColor={colors.borderStrong}
+          backgroundColor="var(--nexo-bg-tertiary)"
+          borderColor="var(--nexo-border-strong)"
           items={[
             { key: "run", label: runningTaskId === record.id ? ui.runningTask : ui.runNow, disabled: runningTaskId === record.id },
             { key: "edit", label: t("edit"), disabled: runningTaskId === record.id },
@@ -287,15 +278,15 @@ export default function Tasks({ onOpenTaskSession }: TasksProps) {
   ];
 
   return (
-    <div style={{ padding: 24, background: colors.bgPrimary, minHeight: "100%", color: colors.textPrimary }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h2 style={{ color: colors.textPrimary, margin: 0 }}>{ui.title}</h2>
+    <div className="tasks-panel">
+      <div className="tasks-panel__header">
+        <h2 className="tasks-panel__title">{ui.title}</h2>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
           {ui.createTask}
         </Button>
       </div>
 
-      <div style={{ background: colors.bgSecondary, border: `1px solid ${colors.border}`, borderRadius: 12, overflow: "hidden" }}>
+      <div className="tasks-panel__table-wrap">
         <Table dataSource={tasks} columns={columns} rowKey="id" loading={loading} pagination={{ pageSize: 10 }} />
       </div>
 

@@ -1,0 +1,90 @@
+.browser-workbench {
+  height: 100%;
+  min-height: 0;
+  background: var(--nexo-bg-primary);
+  position: relative;
+  overflow: hidden;
+
+  &__browser-column {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  &__toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px;
+    background: var(--nexo-bg-secondary);
+    border-bottom: 1px solid var(--nexo-border);
+  }
+
+  &__url-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__url-prefix {
+    color: var(--nexo-text-muted);
+  }
+
+  &__view {
+    flex: 1;
+    min-height: 0;
+    background: var(--nexo-bg-secondary);
+    overflow: hidden;
+    position: relative;
+  }
+
+  &__resize-rail {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: col-resize;
+    background: var(--nexo-border);
+    transition: background 0.15s ease;
+
+    &--active {
+      background: var(--nexo-accent);
+      transition: none;
+    }
+  }
+
+  &__zoom-controls {
+    display: grid;
+    gap: 6px;
+    padding: 4px;
+    border-radius: 999px;
+    background: var(--nexo-bg-secondary);
+    border: 1px solid var(--nexo-border-strong);
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.18);
+  }
+
+  &__zoom-btn {
+    width: 28px;
+    height: 28px;
+    color: var(--nexo-text-muted);
+  }
+
+  &__conversation {
+    min-width: 0;
+    min-height: 0;
+    border-left: 1px solid var(--nexo-border);
+    background: var(--nexo-bg-secondary);
+  }
+
+  &__session-pane {
+    min-width: 0;
+    min-height: 0;
+    border-right: 1px solid var(--nexo-border);
+    overflow: hidden;
+  }
+
+  &__chat-pane {
+    min-width: 0;
+    min-height: 0;
+  }
+}

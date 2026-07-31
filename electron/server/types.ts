@@ -1,6 +1,7 @@
 ﻿import type { AgentSettings, ChatMessage, ModelCapability, TurnCompletionStatus } from "../../src/shared/types";
 
 import type { KnowledgeSourceHit, MessageBlock, ToolCallTrace, ToolOutputStats, ToolRawOutputRef } from "../../src/shared/types";
+import type { ModelRoutingMetadata } from "../../src/shared/types";
 
 export type TurnStopReason =
   | "completed"
@@ -12,6 +13,7 @@ export type TurnStopReason =
 
 export type StreamEvent =
   | { type: "token"; content: string }
+  | { type: "status"; content: string; tone?: "info" | "warning" | "error" }
   | { type: "tool_call"; id: string; name: string; input: unknown }
   | {
       type: "tool_result";
@@ -34,6 +36,7 @@ export type StreamEvent =
       toolCalls?: ToolCallTrace[];
       messageBlocks?: MessageBlock[];
       knowledgeSources?: KnowledgeSourceHit[];
+      routing?: ModelRoutingMetadata;
       circuitBreaker?: {
         reason: string;
         detail: string;
@@ -68,6 +71,8 @@ export interface ToolExecutionContext {
   apiBase: string;
   requestId?: string;
   capabilitySummary?: Record<ModelCapability, string[]>;
+  defaultModelProfileId?: string;
+  defaultModelRole?: string;
 }
 
 export interface ToolDef {
