@@ -1,5 +1,6 @@
 import type {
   AgentSettings,
+  AgentSettingsSaveInput,
   BrowserActionRequest,
   BrowserActionResponse,
   BrowserBounds,
@@ -9,11 +10,13 @@ import type {
 } from "./types";
 
 export type DesktopThemeMode = "dark" | "light";
+export const DESKTOP_AUTHORITY_HEADER = "x-nexo-desktop-authority";
 
 export interface DesktopApi {
   getRuntimeInfo: () => Promise<RuntimeInfo>;
   loadSettings: () => Promise<AgentSettings>;
-  saveSettings: (settings: AgentSettings) => Promise<AgentSettings>;
+  saveSettings: (settings: AgentSettingsSaveInput) => Promise<AgentSettings>;
+  getDesktopAuthorityToken?: () => Promise<string>;
   openExternal: (url: string) => Promise<void>;
   setThemeMode?: (mode: DesktopThemeMode) => Promise<void>;
   minimizeWindow?: () => Promise<void>;

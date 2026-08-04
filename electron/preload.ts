@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AgentSettings,
+  AgentSettingsSaveInput,
   BrowserActionRequest,
   BrowserActionResponse,
   BrowserBounds,
@@ -13,8 +14,9 @@ import type { DesktopApi, DesktopThemeMode } from "../src/shared/desktop";
 const desktopApi: DesktopApi = {
   getRuntimeInfo: (): Promise<RuntimeInfo> => ipcRenderer.invoke("runtime:info"),
   loadSettings: (): Promise<AgentSettings> => ipcRenderer.invoke("settings:load"),
-  saveSettings: (settings: AgentSettings): Promise<AgentSettings> =>
+  saveSettings: (settings: AgentSettingsSaveInput): Promise<AgentSettings> =>
     ipcRenderer.invoke("settings:save", settings),
+  getDesktopAuthorityToken: (): Promise<string> => ipcRenderer.invoke("desktop-authority:get-token"),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke("shell:openExternal", url),
   setThemeMode: (mode: DesktopThemeMode): Promise<void> => ipcRenderer.invoke("theme:set", mode),
   minimizeWindow: (): Promise<void> => ipcRenderer.invoke("window:minimize"),

@@ -1,7 +1,9 @@
-import type { AgentSettings } from "../../src/shared/types";
+import type { AgentSettings, AgentSettingsSaveInput, WebSafeModeSettings } from "../../src/shared/types";
 import {
+  DEFAULT_WEB_SAFE_MODE_SETTINGS,
   DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
   isPreservedApiKeyInput,
+  normalizeAgentWebSafeModeSettings,
   normalizeAiRequestTimeoutMs,
   normalizePlannerExecutorRoutingSettings,
 } from "../../src/shared/settings";
@@ -12,6 +14,7 @@ import {
   normalizeProviderId,
   normalizeServiceProviderName,
 } from "../../src/shared/providers";
+import { applyWebSafeModeSettingsUpdate } from "./web-safe-mode-auth";
 
 let webSettings: Partial<AgentSettings> = {};
 
@@ -22,13 +25,13 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerId,
     settings.providerName,
   );
-  return normalizePlannerExecutorRoutingSettings({
+  return normalizeAgentWebSafeModeSettings(normalizePlannerExecutorRoutingSettings({
     ...settings,
     providerId,
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
     aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
-  });
+  }));
 }
 
 export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
@@ -64,6 +67,7 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   webHost: "0.0.0.0",
   webPort: 9898,
   webPassword: "",
+  webSafeMode: DEFAULT_WEB_SAFE_MODE_SETTINGS,
   channels: { web: true, desktop: true, feishu: false, dingtalk: false, wechat: false, wecom: false },
 };
 
@@ -71,9 +75,20 @@ export function getWebSettings() {
   return webSettings;
 }
 
-export function mergeWebSettings(overrides: Partial<AgentSettings>) {
-  const { apiKey, hasApiKey, ...rest } = overrides;
-  webSettings = normalizeSettingsShape({ ...DEFAULT_AGENT_SETTINGS, ...webSettings, ...rest });
+export function mergeWebSettings(overrides: Partial<AgentSettingsSaveInput>) {
+  const { apiKey, hasApiKey, webSafeMode, webSafeModePassword, ...rest } = overrides;
+  const current = buildRuntimeSettings();
+  const nextWebSafeMode = applyWebSafeModeSettingsUpdate(
+    current.webSafeMode,
+    webSafeMode,
+    webSafeModePassword,
+  );
+  webSettings = normalizeSettingsShape({
+    ...DEFAULT_AGENT_SETTINGS,
+    ...webSettings,
+    ...rest,
+    webSafeMode: nextWebSafeMode,
+  });
   if (hasApiKey !== undefined) {
     webSettings.hasApiKey = hasApiKey;
   }
@@ -83,9 +98,25 @@ export function mergeWebSettings(overrides: Partial<AgentSettings>) {
   }
 }
 
+export function setWebSafeModeState(webSafeMode: WebSafeModeSettings) {
+  webSettings = normalizeSettingsShape({
+    ...DEFAULT_AGENT_SETTINGS,
+    ...webSettings,
+    webSafeMode,
+  });
+}
+
 /** Apply settings to the in-process backend cache (disk + HTTP routes share this). */
 export function applyAgentSettings(overrides: Partial<AgentSettings>) {
-  mergeWebSettings(overrides);
+  const { apiKey, hasApiKey, ...rest } = overrides;
+  webSettings = normalizeSettingsShape({ ...DEFAULT_AGENT_SETTINGS, ...webSettings, ...rest });
+  if (hasApiKey !== undefined) {
+    webSettings.hasApiKey = hasApiKey;
+  }
+  if (!isPreservedApiKeyInput(apiKey)) {
+    webSettings.apiKey = apiKey!.trim();
+    webSettings.hasApiKey = Boolean(webSettings.apiKey);
+  }
 }
 
 export function buildRuntimeSettings(overrides: Partial<AgentSettings> = {}): AgentSettings {

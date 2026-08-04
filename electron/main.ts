@@ -3,8 +3,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import http from "node:http";
 import net from "node:net";
+import { randomBytes } from "node:crypto";
 import { createExpressApp } from "./server/index";
 import { applyAgentSettings } from "./server/settings";
+import { applyWebSafeModeSettingsUpdate } from "./server/web-safe-mode-auth";
 import { DATA_DIR, SETTINGS_FILE } from "./server/config";
 import { cleanupOldSnapshots } from "./server/snapshot";
 import { browserManager } from "./server/browser-manager";
@@ -17,13 +19,17 @@ import {
 } from "../src/shared/providers";
 import type {
   AgentSettings,
+  AgentSettingsSaveInput,
   RuntimeInfo
 } from "../src/shared/types";
 import {
+  DEFAULT_WEB_SAFE_MODE_SETTINGS,
   DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
   isPreservedApiKeyInput,
+  normalizeAgentWebSafeModeSettings,
   normalizeAiRequestTimeoutMs,
   normalizePlannerExecutorRoutingSettings,
+  sanitizeSettingsForClient,
 } from "../src/shared/settings";
 import type { DesktopThemeMode } from "../src/shared/desktop";
 import type { TaskExecutionResult } from "./server/tasks";
@@ -70,6 +76,7 @@ const defaultSettings: AgentSettings = {
   webHost: "127.0.0.1",
   webPort: 9898,
   webPassword: "",
+  webSafeMode: DEFAULT_WEB_SAFE_MODE_SETTINGS,
   channels: {
     web: true,
     desktop: true,
@@ -83,6 +90,7 @@ const defaultSettings: AgentSettings = {
 let mainWindow: BrowserWindow | null = null;
 let httpServer: http.Server | null = null;
 let webServerPort = 9898;
+const desktopAuthorityToken = randomBytes(32).toString("hex");
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const TOGGLE_DEVTOOLS_SHORTCUT = process.platform === "darwin" ? "Command+Alt+L" : "Control+Alt+L";
 const DESKTOP_THEME_BACKGROUNDS: Record<DesktopThemeMode, string> = {
@@ -108,13 +116,13 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerId,
     settings.providerName,
   );
-  return normalizePlannerExecutorRoutingSettings({
+  return normalizeAgentWebSafeModeSettings(normalizePlannerExecutorRoutingSettings({
     ...settings,
     providerId,
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
     aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
-  });
+  }));
 }
 
 // 启动时预加载 API Key，并在每次保存设置后刷新
@@ -160,15 +168,6 @@ async function syncServerSettingsFromDisk() {
     ...normalized,
     apiKey,
     hasApiKey: Boolean(apiKey),
-  });
-}
-
-function pushSettingsToBackend(settings: AgentSettings, apiKey = "") {
-  const normalized = normalizeSettingsShape(settings);
-  applyAgentSettings({
-    ...normalized,
-    apiKey,
-    hasApiKey: Boolean(apiKey) || normalized.hasApiKey,
   });
 }
 
@@ -240,6 +239,8 @@ async function startHttpServer() {
   await refreshCachedApiKey();
   await syncServerSettingsFromDisk();
   const expressApp = createExpressApp(() => cachedApiKey, {
+    desktopAuthorityToken,
+    persistAgentSettings: persistSettingsPatchFromServer,
     onTaskFinished: (result, meta) => {
       if (meta.origin === "scheduler") {
         showTaskFinishedNotification(result);
@@ -331,51 +332,86 @@ function encryptApiKey(apiKey: string) {
 
   if (safeStorage.isEncryptionAvailable()) {
     return {
-      encryptedApiKey: safeStorage.encryptString(cleanKey).toString("base64")
+      encryptedApiKey: safeStorage.encryptString(cleanKey).toString("base64"),
+      plainApiKey: undefined,
     };
   }
 
-  return { plainApiKey: cleanKey };
+  return { encryptedApiKey: undefined, plainApiKey: cleanKey };
 }
 
-async function loadSettings(): Promise<AgentSettings> {
+async function loadFullSettingsFromDisk() {
   const stored = await readStoredSettings();
   const apiKey = decryptApiKey(stored);
   const normalized = stored ? normalizeSettingsShape(stored) : null;
-
-  return {
+  const settings: AgentSettings = {
     ...defaultSettings,
     ...(normalized ?? {}),
     apiKey: "",
     hasApiKey: Boolean(apiKey)
   };
+
+  return { settings, stored, apiKey };
 }
 
-async function saveSettings(settings: AgentSettings): Promise<AgentSettings> {
-  const existing = await loadSettings();
-  const mergedInput = normalizeSettingsShape({ ...existing, ...settings });
-  const existingStored = await readStoredSettings();
+async function writeSettingsToDisk(settings: AgentSettings, existingStored: StoredSettings | null, secret: Partial<StoredSettings>) {
   const { apiKey, hasApiKey, ...settingsForDisk } = {
     ...defaultSettings,
-    ...mergedInput,
+    ...settings,
   };
+  const { hasPassword, ...webSafeModeForDisk } = settingsForDisk.webSafeMode;
+  const stored: StoredSettings = {
+    ...settingsForDisk,
+    webSafeMode: webSafeModeForDisk,
+    encryptedApiKey: existingStored?.encryptedApiKey,
+    plainApiKey: existingStored?.plainApiKey,
+    ...secret,
+  };
+
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  await fs.writeFile(settingsPath(), JSON.stringify(stored, null, 2), "utf8");
+}
+
+async function loadSettings(): Promise<AgentSettings> {
+  const { settings } = await loadFullSettingsFromDisk();
+  return sanitizeSettingsForClient(settings, "desktop");
+}
+
+async function saveSettings(settings: AgentSettingsSaveInput): Promise<AgentSettings> {
+  const { settings: existing, stored: existingStored } = await loadFullSettingsFromDisk();
+  const { webSafeModePassword, ...settingsWithoutTransient } = settings;
+  const nextWebSafeMode = applyWebSafeModeSettingsUpdate(
+    existing.webSafeMode,
+    settings.webSafeMode,
+    webSafeModePassword,
+  );
+  const mergedInput = normalizeSettingsShape({
+    ...existing,
+    ...settingsWithoutTransient,
+    webSafeMode: nextWebSafeMode,
+  }) as AgentSettings;
   const secret =
-    !isPreservedApiKeyInput(apiKey)
-      ? encryptApiKey(apiKey)
+    !isPreservedApiKeyInput(settings.apiKey)
+      ? encryptApiKey(settings.apiKey)
       : {
           encryptedApiKey: existingStored?.encryptedApiKey,
           plainApiKey: existingStored?.plainApiKey
         };
 
-  const stored: StoredSettings = {
-    ...settingsForDisk,
-    ...secret
-  };
-
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(settingsPath(), JSON.stringify(stored, null, 2), "utf8");
-
+  await writeSettingsToDisk(mergedInput, existingStored, secret);
   return loadSettings();
+}
+
+async function persistSettingsPatchFromServer(patch: Partial<AgentSettings>) {
+  const { settings: existing, stored: existingStored } = await loadFullSettingsFromDisk();
+  const merged = normalizeSettingsShape({
+    ...existing,
+    ...patch,
+  }) as AgentSettings;
+  await writeSettingsToDisk(merged, existingStored, {
+    encryptedApiKey: existingStored?.encryptedApiKey,
+    plainApiKey: existingStored?.plainApiKey,
+  });
 }
 
 function createWindow() {
@@ -511,6 +547,7 @@ ipcMain.handle("runtime:info", (): RuntimeInfo => ({
   userDataPath: DATA_DIR,
   webBaseUrl: getDesktopAppUrl(),
 }));
+ipcMain.handle("desktop-authority:get-token", () => desktopAuthorityToken);
 ipcMain.handle("browser:open-workbench", async () => {
   await browserManager.openWorkbench();
 });
@@ -526,10 +563,10 @@ ipcMain.handle("browser:action", async (_event, request) => browserManager.execu
 ipcMain.handle("browser:pick-element", async () => browserManager.pickElement());
 
 ipcMain.handle("settings:load", loadSettings);
-ipcMain.handle("settings:save", async (_event, settings: AgentSettings) => {
+ipcMain.handle("settings:save", async (_event, settings: AgentSettingsSaveInput) => {
   const result = await saveSettings(settings);
   await refreshCachedApiKey();
-  pushSettingsToBackend(result, cachedApiKey);
+  await syncServerSettingsFromDisk();
   return result;
 });
 ipcMain.handle("theme:set", async (_event, mode: DesktopThemeMode) => {

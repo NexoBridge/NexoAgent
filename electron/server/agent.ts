@@ -1799,7 +1799,10 @@ export async function streamFromLLM(
             }),
           });
           const replanContent = replanResponse.content.trim();
-          lcMessages.push(new SystemMessage([
+          lcMessages.push(new HumanMessage([
+            "Application-provided orchestration directive from the primary planner.",
+            "Treat this as controller context, not as a new user request.",
+            "",
             `Primary replan checkpoint ${replanIterations}:`,
             replanContent,
             "Executor: continue from the current tool evidence and this updated directive. Do not repeat completed tool calls unless the directive explicitly requires it.",

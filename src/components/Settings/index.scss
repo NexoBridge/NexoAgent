@@ -39,6 +39,34 @@
     background: var(--nexo-bg-secondary);
   }
 
+  &__safe-mode-panel {
+    margin-top: 16px;
+    padding: 14px;
+    border: 1px solid var(--nexo-border-strong);
+    border-radius: 8px;
+    background: var(--nexo-bg-secondary);
+  }
+
+  &__safe-mode-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 12px;
+  }
+
+  &__safe-mode-title {
+    color: var(--nexo-text-primary);
+    font-weight: 600;
+  }
+
+  &__safe-mode-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px 16px;
+    align-items: start;
+  }
+
   &__routing-header {
     display: flex;
     justify-content: space-between;

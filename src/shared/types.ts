@@ -151,7 +151,23 @@ export interface AgentSettings extends ModelContextBudget {
   webHost: string;
   webPort: number;
   webPassword: string;
+  webSafeMode: WebSafeModeSettings;
   channels: Record<ChannelKey, boolean>;
+}
+
+export interface WebSafeModeSettings {
+  enabled: boolean;
+  accountName: string;
+  passwordVerifier: string;
+  passwordSalt: string;
+  retryLimit: number;
+  failedAttempts: number;
+  lockedAt?: string;
+  hasPassword?: boolean;
+}
+
+export interface AgentSettingsSaveInput extends AgentSettings {
+  webSafeModePassword?: string;
 }
 
 export interface RuntimeInfo {

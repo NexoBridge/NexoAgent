@@ -21,13 +21,14 @@ import { useChatStore } from "../../store/chat";
 import {
   MODEL_CAPABILITIES,
   type AgentSettings,
+  type AgentSettingsSaveInput,
   type DiscoveredModel,
   type ModelCapability,
   type ModelProfile,
   type ProviderId,
   type ThinkingEffort,
 } from "../../shared/types";
-import { apiDelete, apiGet, apiPost } from "../../services/api";
+import { apiDelete, apiGet, apiPost, isElectron } from "../../services/api";
 import "./index.scss";
 import { sanitizeApiKeyForSave, SAVED_API_KEY_MASK } from "../../shared/settings";
 import { OverflowMenuButton } from "../Common/OverflowMenuButton";
@@ -138,6 +139,19 @@ function buildUi(lang: "zh" | "en") {
     executorModelPlaceholder: lang === "zh" ? "\u9009\u62e9\u4e00\u4e2a\u5df2\u542f\u7528\u7684 Chat \u6a21\u578b" : "Select an enabled chat model",
     executorModelRequired: lang === "zh" ? "\u5f00\u542f\u540e\u8bf7\u9009\u62e9\u5c0f\u6a21\u578b\u6267\u884c\u5668" : "Select a small model executor when routing is enabled.",
     noExecutorProfiles: lang === "zh" ? "\u6ca1\u6709\u53ef\u7528\u7684\u6267\u884c\u6a21\u578b" : "No executor model profiles available",
+    webSafeModeSection: lang === "zh" ? "Web \u5b89\u5168\u6a21\u5f0f" : "Web Safe Mode",
+    webSafeModeEnabled: lang === "zh" ? "\u542f\u7528 Web \u5b89\u5168\u6a21\u5f0f" : "Enable Web Safe Mode",
+    webSafeModeAccount: lang === "zh" ? "Web \u8d26\u6237" : "Web Account",
+    webSafeModePassword: lang === "zh" ? "Web \u5bc6\u7801" : "Web Password",
+    webSafeModePasswordPlaceholder: lang === "zh" ? "\u7559\u7a7a\u4fdd\u7559\u5df2\u4fdd\u5b58\u7684\u5bc6\u7801" : "Leave blank to keep the saved password",
+    webSafeModeRetryLimit: lang === "zh" ? "\u5bc6\u7801\u91cd\u8bd5\u4e0a\u9650" : "Password Retry Limit",
+    webSafeModeLocked: lang === "zh" ? "\u5df2\u9501\u5b9a" : "Locked",
+    webSafeModeUnlocked: lang === "zh" ? "\u672a\u9501\u5b9a" : "Unlocked",
+    webSafeModeUnlock: lang === "zh" ? "\u89e3\u9501" : "Unlock",
+    webSafeModeUnlockSuccess: lang === "zh" ? "\u5df2\u89e3\u9501 Web \u8d26\u6237" : "Web account unlocked.",
+    webSafeModeUnlockFailed: lang === "zh" ? "\u89e3\u9501 Web \u8d26\u6237\u5931\u8d25" : "Failed to unlock web account.",
+    webSafeModeAccountRequired: lang === "zh" ? "\u542f\u7528\u65f6\u8bf7\u8f93\u5165 Web \u8d26\u6237" : "Enter a web account before enabling safe mode.",
+    webSafeModePasswordRequired: lang === "zh" ? "\u9996\u6b21\u542f\u7528\u65f6\u8bf7\u8bbe\u7f6e Web \u5bc6\u7801" : "Set a web password before enabling safe mode.",
     saveApplied: lang === "zh" ? "\u8bbe\u7f6e\u5df2\u4fdd\u5b58\uff0c\u4e0b\u4e00\u6761\u6d88\u606f\u4f1a\u7acb\u5373\u751f\u6548\u3002" : "Settings saved. The next message will use the updated configuration.",
     modelEmpty: lang === "zh" ? "\u8fd8\u6ca1\u6709\u6a21\u578b\u914d\u7f6e" : "No model profiles yet.",
     savedApiKey: lang === "zh" ? "\u5df2\u4fdd\u5b58 API Key" : "Saved API key",
@@ -285,9 +299,10 @@ export const Settings: React.FC = () => {
   const { settings, loadSettings, saveSettings, modelProfiles: profiles, loadModelProfiles } = useChatStore();
   const { lang, t } = useI18n();
   const ui = useMemo(() => buildUi(lang), [lang]);
+  const isDesktopApp = isElectron();
   const capabilityLabels = useMemo(() => buildCapabilityLabels(lang), [lang]);
   const providerOptions = useMemo(() => getProviderOptions(lang), [lang]);
-  const [form] = Form.useForm<AgentSettings>();
+  const [form] = Form.useForm<AgentSettingsSaveInput>();
   const [messageApi, ctx] = message.useMessage();
   const [formKey, setFormKey] = useState(0);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
@@ -301,6 +316,9 @@ export const Settings: React.FC = () => {
   const watchedApiBase = Form.useWatch("apiBase", profileForm) as string | undefined;
   const watchedApiKey = Form.useWatch("apiKey", profileForm) as string | undefined;
   const routingEnabled = Form.useWatch("plannerExecutorRoutingEnabled", form) === true;
+  const safeModeEnabled = Form.useWatch(["webSafeMode", "enabled"], form) === true;
+  const safeModeHasPassword = settings.webSafeMode?.hasPassword === true;
+  const safeModeLocked = Boolean(settings.webSafeMode?.lockedAt);
 
   const normalizedWatchedProviderId = normalizeProviderId(watchedProviderId);
   const allowsEmptyProfileApiKey = providerConnectionAllowsEmptyApiKey({
@@ -355,6 +373,7 @@ export const Settings: React.FC = () => {
     form.setFieldsValue({
       ...settings,
       fileAccessRoots: settings.fileAccessRoots ?? [],
+      webSafeModePassword: "",
     });
   }, [settings, form]);
 
@@ -366,10 +385,27 @@ export const Settings: React.FC = () => {
 
   const label = (text: string) => <span className="settings-page__label">{text}</span>;
 
-  const onSave = async (values: AgentSettings) => {
-    await saveSettings(sanitizeApiKeyForSave({ ...settings, ...values }));
+  const onSave = async (values: AgentSettingsSaveInput) => {
+    const payload = {
+      ...settings,
+      ...values,
+      webSafeModePassword: values.webSafeModePassword?.trim() || undefined,
+    } as AgentSettingsSaveInput;
+    const sanitized = sanitizeApiKeyForSave(payload) as AgentSettingsSaveInput;
+    sanitized.webSafeModePassword = payload.webSafeModePassword;
+    await saveSettings(sanitized);
     setFormKey((key) => key + 1);
     void messageApi.success(ui.saveApplied);
+  };
+
+  const unlockSafeModeAccount = async () => {
+    try {
+      await apiPost<{ ok: boolean }>("/api/auth/safe-mode/unlock", {});
+      await loadSettings();
+      void messageApi.success(ui.webSafeModeUnlockSuccess);
+    } catch (error) {
+      void messageApi.error(error instanceof Error ? error.message : ui.webSafeModeUnlockFailed);
+    }
   };
 
   const openCreateProfile = () => {
@@ -570,7 +606,7 @@ export const Settings: React.FC = () => {
         key={formKey}
         form={form}
         layout="vertical"
-        onFinish={(values) => void onSave(values as AgentSettings)}
+        onFinish={(values) => void onSave(values as AgentSettingsSaveInput)}
         initialValues={{ ...settings, fileAccessRoots: settings.fileAccessRoots ?? [] }}
       >
         <div className="settings-page__form-grid">
@@ -619,6 +655,71 @@ export const Settings: React.FC = () => {
             </Form.Item>
           </div>
         </div>
+
+        {isDesktopApp ? (
+          <div className="settings-page__safe-mode-panel">
+            <div className="settings-page__safe-mode-header">
+              <div className="settings-page__safe-mode-title">{ui.webSafeModeSection}</div>
+              <Space size={8}>
+                <Tag color={safeModeLocked ? "red" : "green"}>
+                  {safeModeLocked ? ui.webSafeModeLocked : ui.webSafeModeUnlocked}
+                </Tag>
+                <Button
+                  size="small"
+                  disabled={!safeModeLocked}
+                  onClick={() => void unlockSafeModeAccount()}
+                >
+                  {ui.webSafeModeUnlock}
+                </Button>
+              </Space>
+            </div>
+            <div className="settings-page__safe-mode-grid">
+              <Form.Item label={label(ui.webSafeModeEnabled)} name={["webSafeMode", "enabled"]} valuePropName="checked">
+                <Switch />
+              </Form.Item>
+              <Form.Item
+                label={label(ui.webSafeModeAccount)}
+                name={["webSafeMode", "accountName"]}
+                rules={[
+                  ({ getFieldValue }) => ({
+                    validator: (_, value) => {
+                      if (getFieldValue(["webSafeMode", "enabled"]) && !String(value ?? "").trim()) {
+                        return Promise.reject(new Error(ui.webSafeModeAccountRequired));
+                      }
+                      return Promise.resolve();
+                    },
+                  }),
+                ]}
+              >
+                <Input className="settings-page__input" autoComplete="username" disabled={!safeModeEnabled} />
+              </Form.Item>
+              <Form.Item
+                label={label(ui.webSafeModePassword)}
+                name="webSafeModePassword"
+                rules={[
+                  ({ getFieldValue }) => ({
+                    validator: (_, value) => {
+                      if (getFieldValue(["webSafeMode", "enabled"]) && !safeModeHasPassword && !String(value ?? "").trim()) {
+                        return Promise.reject(new Error(ui.webSafeModePasswordRequired));
+                      }
+                      return Promise.resolve();
+                    },
+                  }),
+                ]}
+              >
+                <Input.Password
+                  className="settings-page__input"
+                  autoComplete="new-password"
+                  disabled={!safeModeEnabled}
+                  placeholder={safeModeHasPassword ? ui.webSafeModePasswordPlaceholder : undefined}
+                />
+              </Form.Item>
+              <Form.Item label={label(ui.webSafeModeRetryLimit)} name={["webSafeMode", "retryLimit"]}>
+                <InputNumber min={1} max={100} step={1} className="settings-page__full-width" disabled={!safeModeEnabled} />
+              </Form.Item>
+            </div>
+          </div>
+        ) : null}
 
         <div className="settings-page__routing-panel">
           <div className="settings-page__routing-header">

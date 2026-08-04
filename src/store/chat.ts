@@ -3,6 +3,7 @@ import { v4 as uuid } from "uuid";
 import { message as antdMessage } from "antd";
 import type {
   AgentSettings,
+  AgentSettingsSaveInput,
   Attachment as ChatAttachment,
   ChatMessage,
   ConversationSurface,
@@ -15,7 +16,9 @@ import type {
 } from "../shared/types";
 import { apiDelete, apiGet, apiPatch, apiPost, getRuntimeApiBase, setRuntimeApiBase, subscribeStream } from "../services/api";
 import {
+  DEFAULT_WEB_SAFE_MODE_SETTINGS,
   DEFAULT_PLANNER_EXECUTOR_ROUTING_SETTINGS,
+  normalizeAgentWebSafeModeSettings,
   normalizeAiRequestTimeoutMs,
   normalizePlannerExecutorRoutingSettings,
   sanitizeApiKeyForSave,
@@ -74,7 +77,7 @@ interface ChatStore {
   cancelStream: () => void;
   undoAssistantMessage: (messageId: string) => Promise<void>;
   loadSettings: () => Promise<void>;
-  saveSettings: (partial: Partial<AgentSettings>) => Promise<void>;
+  saveSettings: (partial: Partial<AgentSettingsSaveInput>) => Promise<void>;
 }
 
 function replaceMessageId(messages: ChatMessage[], fromId: string, toId: string) {
@@ -139,6 +142,7 @@ const defaultSettings: AgentSettings = {
   webHost: "0.0.0.0",
   webPort: 9898,
   webPassword: "",
+  webSafeMode: DEFAULT_WEB_SAFE_MODE_SETTINGS,
   channels: { web: true, desktop: true, feishu: false, dingtalk: false, wechat: false, wecom: false },
 };
 
@@ -149,13 +153,13 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerId,
     settings.providerName,
   );
-  return normalizePlannerExecutorRoutingSettings({
+  return normalizeAgentWebSafeModeSettings(normalizePlannerExecutorRoutingSettings({
     ...settings,
     providerId,
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
     aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
-  });
+  }));
 }
 
 function getDesktopApi(): DesktopApi | null {

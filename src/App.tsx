@@ -3,6 +3,7 @@ import { ConfigProvider, theme as antdTheme } from "antd";
 import zhCN from "antd/locale/zh_CN";
 import enUS from "antd/locale/en_US";
 import { AppLayout } from "./components/Layout/AppLayout";
+import { WebAuthGate } from "./components/WebAuthGate";
 import { I18nProvider, useI18n } from "./i18n";
 import { ThemeProvider, useTheme, applyThemeCssVars } from "./theme";
 
@@ -36,7 +37,9 @@ function AppShell() {
         },
       }}
     >
-      <AppLayout />
+      <WebAuthGate>
+        <AppLayout />
+      </WebAuthGate>
     </ConfigProvider>
   );
 }

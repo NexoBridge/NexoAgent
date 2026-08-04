@@ -17,11 +17,11 @@ import { registerToolRoutes } from "./tools";
 import { registerUploadRoutes } from "./upload";
 
 export function registerRoutes(app: Application, ctx: ServerContext) {
-  registerSettingsRoutes(app);
+  registerSettingsRoutes(app, ctx);
   registerMemoryRoutes(app, ctx);
   registerKnowledgeRoutes(app);
   registerUploadRoutes(app);
-  registerAuthRoutes(app);
+  registerAuthRoutes(app, ctx);
   registerChannelRoutes(app, ctx);
   registerTaskRoutes(app, ctx);
   registerLogRoutes(app);

@@ -69,6 +69,7 @@ export const SKILLS_FILE = path.join(DATA_DIR, "skills.json");
 export const SKILL_STATE_FILE = path.join(DATA_DIR, "skill-state.json");
 export const MANAGED_SKILLS_DIR = path.join(DATA_DIR, "skills");
 export const MANAGED_CUSTOM_SKILLS_DIR = path.join(MANAGED_SKILLS_DIR, "custom");
+export const MANAGED_LOCAL_SKILLS_DIR = path.join(MANAGED_SKILLS_DIR, "local");
 export const MANAGED_MARKETPLACE_SKILLS_DIR = path.join(MANAGED_SKILLS_DIR, "marketplace");
 export const MANAGED_SKILLSHUB_MARKETPLACE_SKILLS_DIR = path.join(MANAGED_MARKETPLACE_SKILLS_DIR, "skillshub");
 export const TASKS_FILE = path.join(DATA_DIR, "tasks.json");

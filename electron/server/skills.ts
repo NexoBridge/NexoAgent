@@ -11,6 +11,7 @@ import { readBundledJson, resolveBundledFile } from "./bundled-config";
 import {
   DATA_DIR,
   MANAGED_CUSTOM_SKILLS_DIR,
+  MANAGED_LOCAL_SKILLS_DIR,
   MANAGED_MARKETPLACE_SKILLS_DIR,
   MANAGED_SKILLSHUB_MARKETPLACE_SKILLS_DIR,
   MANAGED_SKILLS_DIR,
@@ -51,7 +52,7 @@ interface ManagedSkillSidecar {
   name?: string;
   category?: string;
   description?: string;
-  source?: SkillDefinition["source"];
+  source?: SkillDefinition["source"] | "local";
   marketplaceId?: string;
   marketplaceName?: string;
   homepage?: string;
@@ -287,6 +288,19 @@ function summarizeText(value: string, maxLength = 220) {
   return `${normalized.slice(0, maxLength - 1).trim()}...`;
 }
 
+function normalizeSkillSource(
+  source: ManagedSkillSidecar["source"] | undefined,
+  fallback: SkillDefinition["source"],
+): SkillDefinition["source"] {
+  if (source === "built-in" || source === "workspace" || source === "marketplace") {
+    return source;
+  }
+  if (source === "local") {
+    return "workspace";
+  }
+  return fallback;
+}
+
 function tokenizeSearch(value: string) {
   return value
     .toLowerCase()
@@ -414,7 +428,7 @@ async function loadSkillFromDirectory(
     name,
     category: sidecar?.category || options.category,
     enabled: false,
-    source: sidecar?.source || options.source,
+    source: normalizeSkillSource(sidecar?.source, options.source),
     description: summarizeText(descriptionSource || `${name} skill`),
     instruction: skillFile.trim(),
     path: skillDir,
@@ -451,6 +465,10 @@ function getDiscoveryRoots() {
     {
       root: MANAGED_CUSTOM_SKILLS_DIR,
       options: { source: "workspace", managed: true, category: "custom", maxDepth: 2 },
+    },
+    {
+      root: MANAGED_LOCAL_SKILLS_DIR,
+      options: { source: "workspace", managed: true, category: "local", maxDepth: 2 },
     },
     {
       root: MANAGED_MARKETPLACE_SKILLS_DIR,

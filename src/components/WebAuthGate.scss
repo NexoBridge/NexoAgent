@@ -1,0 +1,37 @@
+.web-auth-gate {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    linear-gradient(135deg, rgba(42, 157, 143, 0.16), transparent 38%),
+    linear-gradient(315deg, rgba(233, 196, 106, 0.16), transparent 42%),
+    var(--nexo-bg-primary);
+  color: var(--nexo-text-primary);
+  box-sizing: border-box;
+
+  &__panel {
+    width: min(380px, 100%);
+    padding: 28px;
+    border: 1px solid var(--nexo-border-strong);
+    border-radius: 8px;
+    background: var(--nexo-bg-secondary);
+    box-shadow: 0 18px 48px rgba(15, 23, 42, 0.16);
+  }
+
+  &__title.ant-typography {
+    margin-top: 0;
+    margin-bottom: 22px;
+    color: var(--nexo-text-primary);
+  }
+
+  &__error.ant-typography {
+    display: block;
+    margin-bottom: 14px;
+    color: #ef4444;
+  }
+
+  &__submit {
+    width: 100%;
+  }
+}

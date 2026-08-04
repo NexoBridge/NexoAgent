@@ -6,11 +6,14 @@ import path from "node:path";
 import { migrateLegacyLogFile, serverLog } from "./logger";
 import { registerRoutes } from "./routes";
 import { startTaskScheduler, type TaskExecutionOrigin, type TaskExecutionResult } from "./tasks";
+import type { AgentSettings } from "../../src/shared/types";
 
 export { serverLog } from "./logger";
 export type { StreamEvent } from "./types";
 
 interface ExpressAppOptions {
+  desktopAuthorityToken?: string;
+  persistAgentSettings?: (patch: Partial<AgentSettings>) => Promise<void>;
   onTaskFinished?: (result: TaskExecutionResult, meta: { origin: TaskExecutionOrigin }) => void;
 }
 
@@ -44,7 +47,13 @@ export function createExpressApp(getStoredApiKey: () => string, options: Express
   const distPath = distCandidates.find((candidate) => fs.existsSync(path.join(candidate, "index.html"))) ?? distCandidates[0];
   app.use(express.static(distPath));
 
-  const ctx = { getStoredApiKey, distPath, onTaskFinished: options.onTaskFinished };
+  const ctx = {
+    getStoredApiKey,
+    distPath,
+    desktopAuthorityToken: options.desktopAuthorityToken,
+    persistAgentSettings: options.persistAgentSettings,
+    onTaskFinished: options.onTaskFinished,
+  };
   registerRoutes(app, ctx);
 
   app.get("*", (req, res) => {

@@ -1,9 +1,13 @@
 import { NEXO_API_PORT, NEXO_API_URL, VITE_DEV_PORT } from "../shared/ports";
+import { DESKTOP_AUTHORITY_HEADER } from "../shared/desktop";
 
 export const isElectron = () =>
   typeof window !== "undefined" && "nexoDesktop" in window;
 
 let runtimeBaseUrl = "";
+let authToken = typeof localStorage !== "undefined"
+  ? localStorage.getItem("nexo-auth-token") || ""
+  : "";
 
 export function setRuntimeApiBase(baseUrl?: string) {
   runtimeBaseUrl = baseUrl?.trim().replace(/\/+$/, "") || "";
@@ -11,6 +15,42 @@ export function setRuntimeApiBase(baseUrl?: string) {
 
 export function getRuntimeApiBase() {
   return runtimeBaseUrl;
+}
+
+export function getAuthToken() {
+  return authToken;
+}
+
+export function setAuthToken(token: string) {
+  authToken = token.trim();
+  if (typeof localStorage !== "undefined") {
+    if (authToken) {
+      localStorage.setItem("nexo-auth-token", authToken);
+    } else {
+      localStorage.removeItem("nexo-auth-token");
+    }
+  }
+}
+
+export function clearAuthToken() {
+  setAuthToken("");
+}
+
+async function buildApiHeaders(json = false) {
+  const headers: Record<string, string> = {};
+  if (json) {
+    headers["Content-Type"] = "application/json";
+  }
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
+  const desktopToken = typeof window !== "undefined"
+    ? await window.nexoDesktop?.getDesktopAuthorityToken?.().catch(() => "")
+    : "";
+  if (desktopToken) {
+    headers[DESKTOP_AUTHORITY_HEADER] = desktopToken;
+  }
+  return headers;
 }
 
 function resolveApiBase() {
@@ -64,7 +104,9 @@ async function toApiError(response: Response, fallback: string) {
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(`${getApiBase()}${path}`);
+  const response = await fetch(`${getApiBase()}${path}`, {
+    headers: await buildApiHeaders(),
+  });
   if (!response.ok) throw await toApiError(response, `GET ${path} failed: ${response.status}`);
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.includes("application/json")) {
@@ -80,7 +122,7 @@ export async function apiGet<T>(path: string): Promise<T> {
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`${getApiBase()}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: await buildApiHeaders(true),
     body: JSON.stringify(body),
   });
   if (!response.ok) throw await toApiError(response, `POST ${path} failed: ${response.status}`);
@@ -96,14 +138,17 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
 }
 
 export async function apiDelete(path: string): Promise<void> {
-  const response = await fetch(`${getApiBase()}${path}`, { method: "DELETE" });
+  const response = await fetch(`${getApiBase()}${path}`, {
+    method: "DELETE",
+    headers: await buildApiHeaders(),
+  });
   if (!response.ok) throw await toApiError(response, `DELETE ${path} failed: ${response.status}`);
 }
 
 export async function apiPatch(path: string, body: unknown): Promise<void> {
   const response = await fetch(`${getApiBase()}${path}`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: await buildApiHeaders(true),
     body: JSON.stringify(body),
   });
   if (!response.ok) throw await toApiError(response, `PATCH ${path} failed: ${response.status}`);

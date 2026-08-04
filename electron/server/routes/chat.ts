@@ -10,6 +10,7 @@ import { serverLog } from "../logger";
 import { createSseQueue, pushEvent, scheduleSseCleanup } from "../sse";
 import type { ChatAttachment } from "../types";
 import { toErrorLog } from "../utils";
+import { denySafeModeWebRequest, isWebSafeModeRequestAuthorized } from "../web-safe-mode-access";
 import type { ServerContext } from "./context";
 
 function findAssistantMessageIndexById(messages: Array<{ id: string; role: string }>, messageId: string) {
@@ -22,11 +23,17 @@ function normalizeConversationSurface(value: unknown): ConversationSurface {
 
 export function registerChatRoutes(app: Application, ctx: ServerContext) {
   app.post("/api/chat/:requestId/interrupt", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     interruptRun(req.params.requestId);
     res.json({ ok: true });
   });
 
   app.post("/api/chat", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureSessionsLoaded();
     const { sessionId, message, settings, attachments, surface } = req.body as {
       sessionId: string;
@@ -142,6 +149,9 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
   });
 
   app.post("/api/chat/:sessionId/undo", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureSessionsLoaded();
     const { sessionId } = req.params;
     const { messageId } = req.body as { messageId?: string };
