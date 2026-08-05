@@ -1,10 +1,15 @@
-import type { Application } from "express";
+﻿import type { Application } from "express";
 import { randomUUID } from "node:crypto";
 import { ensureSessionsLoaded, getSessionsMap, saveSessionsToDisk } from "../sessions";
+import { denySafeModeWebRequest, isWebSafeModeRequestAuthorized } from "../web-safe-mode-access";
 import type { Session } from "../types";
+import type { ServerContext } from "./context";
 
-export function registerSessionRoutes(app: Application) {
-  app.get("/api/sessions", async (_req, res) => {
+export function registerSessionRoutes(app: Application, ctx: ServerContext) {
+  app.get("/api/sessions", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureSessionsLoaded();
     const list = [...getSessionsMap().values()]
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -12,7 +17,10 @@ export function registerSessionRoutes(app: Application) {
     res.json(list);
   });
 
-  app.post("/api/sessions", async (_req, res) => {
+  app.post("/api/sessions", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureSessionsLoaded();
     const id = randomUUID();
     const now = new Date().toISOString();
@@ -23,6 +31,9 @@ export function registerSessionRoutes(app: Application) {
   });
 
   app.get("/api/sessions/:id/messages", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureSessionsLoaded();
     const session = getSessionsMap().get(req.params.id);
     if (!session) return res.status(404).json({ error: "Session not found." });
@@ -30,6 +41,9 @@ export function registerSessionRoutes(app: Application) {
   });
 
   app.delete("/api/sessions/:id", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureSessionsLoaded();
     getSessionsMap().delete(req.params.id);
     void saveSessionsToDisk();
@@ -37,6 +51,9 @@ export function registerSessionRoutes(app: Application) {
   });
 
   app.patch("/api/sessions/:id", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureSessionsLoaded();
     const session = getSessionsMap().get(req.params.id);
     if (!session) return res.status(404).json({ error: "Session not found." });

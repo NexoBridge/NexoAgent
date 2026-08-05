@@ -1,17 +1,24 @@
-import type { Application } from "express";
+﻿import type { Application } from "express";
 import { serverLog } from "../logger";
 import { executeTask } from "../tasks";
 import { createScheduledTask, ensureTasksLoaded, saveTasks, taskStore, validateCronExpression } from "../task-store";
+import { denySafeModeWebRequest, isWebSafeModeRequestAuthorized } from "../web-safe-mode-access";
 import { toErrorMessage } from "../utils";
 import type { ServerContext } from "./context";
 
 export function registerTaskRoutes(app: Application, ctx: ServerContext) {
-  app.get("/api/tasks", async (_req, res) => {
+  app.get("/api/tasks", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureTasksLoaded();
     res.json(taskStore);
   });
 
   app.post("/api/tasks", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     try {
       const task = await createScheduledTask(req.body as Record<string, unknown>);
       res.json(task);
@@ -21,6 +28,9 @@ export function registerTaskRoutes(app: Application, ctx: ServerContext) {
   });
 
   app.patch("/api/tasks/:id", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureTasksLoaded();
     const t = taskStore.find((x) => x.id === req.params.id);
     if (!t) return res.status(404).json({ error: "not found" });
@@ -33,6 +43,9 @@ export function registerTaskRoutes(app: Application, ctx: ServerContext) {
   });
 
   app.post("/api/tasks/:id/run", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureTasksLoaded();
     const t = taskStore.find((x) => x.id === req.params.id);
     if (!t) return res.status(404).json({ error: "not found" });
@@ -48,6 +61,9 @@ export function registerTaskRoutes(app: Application, ctx: ServerContext) {
   });
 
   app.delete("/api/tasks/:id", async (req, res) => {
+    if (!isWebSafeModeRequestAuthorized(req, ctx.desktopAuthorityToken)) {
+      return denySafeModeWebRequest(res);
+    }
     await ensureTasksLoaded();
     const idx = taskStore.findIndex((x) => x.id === req.params.id);
     if (idx !== -1) {

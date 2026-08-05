@@ -7,7 +7,10 @@ import type {
   BrowserBounds,
   BrowserElementPickResult,
   BrowserState,
+  DesktopApiRequest,
+  DesktopApiResponse,
   RuntimeInfo,
+  StreamEvent,
 } from "../src/shared/types";
 import type { DesktopApi, DesktopThemeMode } from "../src/shared/desktop";
 
@@ -17,6 +20,30 @@ const desktopApi: DesktopApi = {
   saveSettings: (settings: AgentSettingsSaveInput): Promise<AgentSettings> =>
     ipcRenderer.invoke("settings:save", settings),
   getDesktopAuthorityToken: (): Promise<string> => ipcRenderer.invoke("desktop-authority:get-token"),
+  apiRequest: (request: DesktopApiRequest): Promise<DesktopApiResponse> => ipcRenderer.invoke("desktop-api:request", request),
+  uploadFile: (file: { name: string; type: string; data: ArrayBuffer }): Promise<DesktopApiResponse> =>
+    ipcRenderer.invoke("desktop-api:upload-file", file),
+  subscribeStream: (requestId: string, listener: (event: StreamEvent) => void) => {
+    const channel = "desktop-api:stream:" + requestId;
+    const wrapped = (_event: unknown, payload: StreamEvent) => listener(payload);
+    ipcRenderer.on(channel, wrapped);
+    void ipcRenderer.invoke("desktop-api:stream-subscribe", requestId).catch(() => undefined);
+    return () => {
+      ipcRenderer.removeListener(channel, wrapped);
+      void ipcRenderer.invoke("desktop-api:stream-unsubscribe", requestId).catch(() => undefined);
+    };
+  },
+  subscribeLogs: (date: string | undefined, listener: (line: string) => void) => {
+    const subscriptionId = Date.now() + "-" + Math.random().toString(16).slice(2);
+    const channel = "desktop-api:logs:" + subscriptionId;
+    const wrapped = (_event: unknown, line: string) => listener(line);
+    ipcRenderer.on(channel, wrapped);
+    void ipcRenderer.invoke("desktop-api:logs-subscribe", { subscriptionId, date }).catch(() => undefined);
+    return () => {
+      ipcRenderer.removeListener(channel, wrapped);
+      void ipcRenderer.invoke("desktop-api:logs-unsubscribe", subscriptionId).catch(() => undefined);
+    };
+  },
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke("shell:openExternal", url),
   setThemeMode: (mode: DesktopThemeMode): Promise<void> => ipcRenderer.invoke("theme:set", mode),
   minimizeWindow: (): Promise<void> => ipcRenderer.invoke("window:minimize"),

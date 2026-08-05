@@ -9,17 +9,17 @@ function isLogDate(value: unknown): value is string {
   return typeof value === "string" && LOG_DATE_RE.test(value);
 }
 
-async function readRecentLines(file: string, limit = 200) {
+export async function readRecentLogLines(file: string, limit = 200) {
   const raw = await fs.readFile(file, "utf8");
   return raw.split("\n").filter(Boolean).slice(-limit);
 }
 
-async function fileSize(file: string) {
+export async function getLogFileSize(file: string) {
   const st = await fs.stat(file);
   return st.size;
 }
 
-async function listDailyLogFiles() {
+export async function listDailyLogFiles() {
   try {
     const entries = await fs.readdir(LOG_DIR, { withFileTypes: true });
     const files = await Promise.all(
@@ -49,7 +49,7 @@ async function listDailyLogFiles() {
   }
 }
 
-async function streamNewLines(file: string, offset: number, write: (line: string) => void) {
+export async function streamNewLogLines(file: string, offset: number, write: (line: string) => void) {
   const st = await fs.stat(file);
   if (st.size <= offset) return offset;
   const buf = Buffer.alloc(st.size - offset);
@@ -81,12 +81,12 @@ export function registerLogRoutes(app: Application) {
     const followCurrentDate = !requestedDate;
     let activeLogFile = requestedDate ? getLogFileForDate(requestedDate) : getCurrentLogFile();
     try {
-      const lines = await readRecentLines(activeLogFile);
+      const lines = await readRecentLogLines(activeLogFile);
       for (const line of lines) res.write("data: " + JSON.stringify(line) + "\n\n");
     } catch {
       if (!requestedDate) {
         try {
-          const lines = await readRecentLines(LOG_FILE);
+          const lines = await readRecentLogLines(LOG_FILE);
           for (const line of lines) res.write("data: " + JSON.stringify(line) + "\n\n");
         } catch { /* no file yet */ }
       }
@@ -94,7 +94,7 @@ export function registerLogRoutes(app: Application) {
 
     let offset = 0;
     try {
-      offset = await fileSize(activeLogFile);
+      offset = await getLogFileSize(activeLogFile);
     } catch { /* ok */ }
 
     const interval = setInterval(async () => {
@@ -108,7 +108,7 @@ export function registerLogRoutes(app: Application) {
           activeLogFile = currentLogFile;
           offset = 0;
         }
-        offset = await streamNewLines(activeLogFile, offset, (line) => {
+        offset = await streamNewLogLines(activeLogFile, offset, (line) => {
           res.write("data: " + JSON.stringify(line) + "\n\n");
         });
       } catch { /* ok */ }

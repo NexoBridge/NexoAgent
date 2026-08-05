@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { Button, Form, Input, Typography } from "antd";
+﻿import React, { useEffect, useState } from "react";
+import { Button, Form, Input, Spin, Typography } from "antd";
 import { apiGet, apiPost, clearAuthToken, isElectron, setAuthToken } from "../services/api";
 import "./WebAuthGate.scss";
 
@@ -19,6 +19,7 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
   const [status, setStatus] = useState<AuthStatus | null>(() =>
     isElectron() ? { authenticated: true } : null
   );
+  const [checkingAuth, setCheckingAuth] = useState(!isElectron());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [form] = Form.useForm<{ accountName?: string; password: string }>();
@@ -31,12 +32,14 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
       .then((nextStatus) => {
         if (!disposed) {
           setStatus(nextStatus);
+          setCheckingAuth(false);
         }
       })
       .catch(() => {
         if (!disposed) {
           clearAuthToken();
           setStatus({ authenticated: false, legacyPasswordRequired: true });
+          setCheckingAuth(false);
         }
       });
 
@@ -45,10 +48,26 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
+  // Show loading spinner during initial auth check
+  if (checkingAuth) {
+    return (
+      <div className="web-auth-gate">
+        <div className="web-auth-gate__panel" style={{ textAlign: "center", padding: "48px 28px" }}>
+          <Spin size="large" />
+          <div style={{ marginTop: "16px", color: "var(--nexo-text-secondary)" }}>
+            Checking authentication...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // If authenticated, render children
   if (status?.authenticated) {
     return <>{children}</>;
   }
 
+  // Show login form if authentication is required
   const safeModeEnabled = status?.safeModeEnabled === true;
   const title = safeModeEnabled ? "Web Safe Mode" : "Sign In";
   const failureMessage = safeModeEnabled

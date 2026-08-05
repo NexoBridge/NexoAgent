@@ -13,9 +13,7 @@ export type PlannerExecutorExecutionMode =
   | "fast_executor"
   | "planned_executor"
   | "iterative_orchestration"
-  | "verified_executor"
-  | "primary_takeover";
-export type PlannerExecutorRiskLevel = "low" | "medium" | "high";
+  | "verified_executor";
 export type PlannerExecutorVerificationLevel = "none" | "deterministic" | "primary";
 
 export interface ModelRoutingUsage {
@@ -30,7 +28,6 @@ export interface ModelRoutingTraceStep {
   status: "resolved" | "started" | "completed" | "failed" | "skipped";
   routeClass?: PlannerExecutorRouteClass;
   executionMode?: PlannerExecutorExecutionMode;
-  riskLevel?: PlannerExecutorRiskLevel;
   verificationLevel?: PlannerExecutorVerificationLevel;
   iteration?: number;
   profileId?: string;
@@ -46,7 +43,6 @@ export interface ModelRoutingMetadata {
   enabled: boolean;
   routeClass?: PlannerExecutorRouteClass;
   executionMode?: PlannerExecutorExecutionMode;
-  riskLevel?: PlannerExecutorRiskLevel;
   verificationLevel?: PlannerExecutorVerificationLevel;
   checkTriggered?: boolean;
   checkReasons?: string[];
@@ -55,7 +51,6 @@ export interface ModelRoutingMetadata {
   loopIterations?: number;
   executorSelectionReason?: string;
   executorCostConfidence?: "known" | "unknown";
-  usingPrimaryAsExecutor?: boolean;
   qualityScore?: number;
   qualityThreshold?: number;
   steps: ModelRoutingTraceStep[];
@@ -177,6 +172,23 @@ export interface RuntimeInfo {
   userDataPath?: string;
   webBaseUrl?: string;
 }
+
+export interface DesktopApiRequest {
+  method: "GET" | "POST" | "PATCH" | "DELETE";
+  path: string;
+  headers?: Record<string, string>;
+  body?: unknown;
+  bodyBase64?: string;
+}
+
+export interface DesktopApiResponse {
+  ok: boolean;
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+}
+
+export type StreamEvent = { type: string; [key: string]: unknown };
 
 export type BrowserAction =
   | "snapshot"

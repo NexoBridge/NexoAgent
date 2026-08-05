@@ -1,8 +1,7 @@
 import type { Application } from "express";
-import { randomBytes } from "node:crypto";
-import { addAuthToken, hasAuthToken, removeAuthToken } from "../auth-store";
 import { DEFAULT_WEB_SAFE_MODE_SETTINGS, sanitizeWebSafeModeForDesktop } from "../../../src/shared/settings";
 import { isDesktopAuthorizedRequest } from "../desktop-authority";
+import { createAuthJwt, revokeAuthJwt, verifyAuthJwt } from "../jwt-auth";
 import { getWebSettings, setWebSafeModeState } from "../settings";
 import {
   evaluateSafeModeLogin,
@@ -15,8 +14,8 @@ function getBearerToken(value: string | undefined) {
   return (value || "").replace(/^Bearer\s+/i, "").trim();
 }
 
-function createSessionToken() {
-  return randomBytes(32).toString("hex");
+function createLoginToken(subject: string) {
+  return createAuthJwt(subject.trim() || "web");
 }
 
 async function persistWebSafeModeState(ctx: ServerContext, webSafeMode: ReturnType<typeof unlockSafeModeAccount>) {
@@ -39,28 +38,26 @@ export function registerAuthRoutes(app: Application, ctx: ServerContext) {
     const webSafeMode = webSettings.webSafeMode;
 
     if (webSafeMode?.enabled) {
-      const evaluation = evaluateSafeModeLogin(webSafeMode, accountName ?? account, password);
+      const submittedAccount = accountName ?? account;
+      const evaluation = evaluateSafeModeLogin(webSafeMode, submittedAccount, password);
       if (evaluation.shouldPersist) {
         await persistWebSafeModeState(ctx, evaluation.nextSettings);
       }
       if (!evaluation.ok) {
         return res.status(401).json({ error: GENERIC_SAFE_MODE_LOGIN_ERROR });
       }
-      const token = createSessionToken();
-      addAuthToken(token);
-      return res.json({ token });
+      return res.json({ token: createLoginToken(evaluation.nextSettings.accountName || submittedAccount || "web") });
     }
 
     const expected = webSettings.webPassword || "";
-    if (expected && password !== expected) return res.status(401).json({ error: "wrong password" });
-    const token = createSessionToken();
-    addAuthToken(token);
-    return res.json({ token });
+    if (expected && password !== expected) {
+      return res.status(401).json({ error: "wrong password" });
+    }
+    return res.json({ token: createLoginToken(accountName ?? account ?? "legacy-web") });
   });
 
   app.post("/api/auth/logout", (req, res) => {
-    const token = getBearerToken(req.headers.authorization);
-    removeAuthToken(token);
+    revokeAuthJwt(getBearerToken(req.headers.authorization));
     res.json({ ok: true });
   });
 
@@ -79,7 +76,7 @@ export function registerAuthRoutes(app: Application, ctx: ServerContext) {
 
     const token = getBearerToken(req.headers.authorization);
     return res.json({
-      authenticated: hasAuthToken(token),
+      authenticated: verifyAuthJwt(token),
       safeModeEnabled,
       legacyPasswordRequired,
     });

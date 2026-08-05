@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { migrateLegacyLogFile, serverLog } from "./logger";
 import { registerRoutes } from "./routes";
+import { requireHttpJwtForApi } from "./web-safe-mode-access";
 import { startTaskScheduler, type TaskExecutionOrigin, type TaskExecutionResult } from "./tasks";
 import type { AgentSettings } from "../../src/shared/types";
 
@@ -37,6 +38,7 @@ export function createExpressApp(getStoredApiKey: () => string, options: Express
   app.use(express.json({ limit: REQUEST_BODY_LIMIT }));
   app.use(express.text({ type: ["text/*", "application/xml", "*/xml"], limit: REQUEST_BODY_LIMIT }));
   app.use(requestBodyErrorHandler);
+  app.use(requireHttpJwtForApi(options.desktopAuthorityToken));
   startTaskScheduler(getStoredApiKey, options.onTaskFinished);
 
   const distCandidates = [

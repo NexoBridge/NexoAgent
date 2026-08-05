@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, Select, Space, Tag } from "antd";
 import { PauseCircleOutlined, PlayCircleOutlined, DeleteOutlined } from "@ant-design/icons";
-import { apiGet, getApiBase } from "../../services/api";
+import { apiGet, subscribeLogs } from "../../services/api";
 import { useI18n } from "../../i18n";
 import "./index.scss";
 
@@ -33,7 +33,7 @@ export default function Logs() {
   const [logDates, setLogDates] = useState<LogDateItem[]>([]);
   const [selectedDate, setSelectedDate] = useState("");
   const [paused, setPaused] = useState(false);
-  const esRef = useRef<EventSource | null>(null);
+  const unsubscribeRef = useRef<(() => void) | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const ui = useMemo(
@@ -55,11 +55,8 @@ export default function Logs() {
   }
 
   function connect(date = selectedDate) {
-    esRef.current?.close();
-    const query = date ? `?date=${encodeURIComponent(date)}` : "";
-    const es = new EventSource(`${getApiBase()}/api/logs${query}`);
-    es.onmessage = (event) => setLines((prev) => [...prev, parseLogEventData(event.data)]);
-    esRef.current = es;
+    unsubscribeRef.current?.();
+    unsubscribeRef.current = subscribeLogs(date || undefined, (line) => setLines((prev) => [...prev, line]));
   }
 
   useEffect(() => {
@@ -68,7 +65,7 @@ export default function Logs() {
 
   useEffect(() => {
     connect(selectedDate);
-    return () => esRef.current?.close();
+    return () => unsubscribeRef.current?.();
   }, [selectedDate]);
 
   useEffect(() => {
@@ -85,7 +82,7 @@ export default function Logs() {
       setPaused(false);
       return;
     }
-    esRef.current?.close();
+    unsubscribeRef.current?.();
     setPaused(true);
   }
 

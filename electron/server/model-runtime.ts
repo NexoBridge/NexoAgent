@@ -302,7 +302,6 @@ export interface PlannerExecutorRoleConfigs {
   verifier?: ModelRuntimeConfig;
   executorSelectionReason?: string;
   executorCostConfidence?: "known" | "unknown";
-  usingPrimaryAsExecutor?: boolean;
   errors: string[];
 }
 
@@ -359,7 +358,6 @@ export async function resolvePlannerExecutorRoleConfigs(
     verifier: primaryConfig,
     executorSelectionReason: executorProfile ? "configured_executor_profile" : "missing_configured_executor_profile",
     executorCostConfidence: "unknown",
-    usingPrimaryAsExecutor: false,
     errors,
   };
 }

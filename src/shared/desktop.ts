@@ -6,7 +6,10 @@ import type {
   BrowserBounds,
   BrowserElementPickResult,
   BrowserState,
+  DesktopApiRequest,
+  DesktopApiResponse,
   RuntimeInfo,
+  StreamEvent,
 } from "./types";
 
 export type DesktopThemeMode = "dark" | "light";
@@ -17,6 +20,10 @@ export interface DesktopApi {
   loadSettings: () => Promise<AgentSettings>;
   saveSettings: (settings: AgentSettingsSaveInput) => Promise<AgentSettings>;
   getDesktopAuthorityToken?: () => Promise<string>;
+  apiRequest?: (request: DesktopApiRequest) => Promise<DesktopApiResponse>;
+  uploadFile?: (file: { name: string; type: string; data: ArrayBuffer }) => Promise<DesktopApiResponse>;
+  subscribeStream?: (requestId: string, listener: (event: StreamEvent) => void) => () => void;
+  subscribeLogs?: (date: string | undefined, listener: (line: string) => void) => () => void;
   openExternal: (url: string) => Promise<void>;
   setThemeMode?: (mode: DesktopThemeMode) => Promise<void>;
   minimizeWindow?: () => Promise<void>;

@@ -277,7 +277,6 @@ function formatRoutingRolesForLog(routing: ModelRoutingMetadata | undefined) {
   return [
     `routing=${routing.routeClass ?? "unknown"}`,
     `mode=${routing.executionMode ?? ""}`,
-    `risk=${routing.riskLevel ?? ""}`,
     `loops=${routing.loopIterations ?? 0}`,
     `roles=${routing.steps.map((step) => `${step.role}:${step.status}:i${step.iteration ?? 0}:${step.profileName ?? ""}/${step.model ?? ""}`).join("|")}`,
   ].join(" ");
@@ -882,7 +881,6 @@ export async function streamFromLLM(
         enabled: true,
         routeClass: routeDecision?.routeClass,
         executionMode: routeDecision?.executionMode,
-        riskLevel: routeDecision?.riskLevel,
         verificationLevel: routeDecision?.verificationLevel,
         checkTriggered: false,
         checkReasons: [],
@@ -897,13 +895,11 @@ export async function streamFromLLM(
   if (routingMetadata?.enabled) {
     routingMetadata.executorSelectionReason = roleConfigs.executorSelectionReason;
     routingMetadata.executorCostConfidence = roleConfigs.executorCostConfidence;
-    routingMetadata.usingPrimaryAsExecutor = roleConfigs.usingPrimaryAsExecutor === true;
   }
   if (routingMetadata?.enabled) {
     appendRoutingStep(routingMetadata, buildRoutingStep("planner", "resolved", roleConfigs.planner, {
       routeClass: routeDecision?.routeClass,
       executionMode: routeDecision?.executionMode,
-      riskLevel: routeDecision?.riskLevel,
       verificationLevel: routeDecision?.verificationLevel,
       reason: "primary model",
     }));
@@ -911,18 +907,14 @@ export async function streamFromLLM(
       appendRoutingStep(routingMetadata, buildRoutingStep("executor", "resolved", roleConfigs.executor, {
         routeClass: routeDecision?.routeClass,
         executionMode: routeDecision?.executionMode,
-        riskLevel: routeDecision?.riskLevel,
         verificationLevel: routeDecision?.verificationLevel,
-        reason: roleConfigs.usingPrimaryAsExecutor
-          ? (roleConfigs.executorSelectionReason ?? "primary fallback")
-          : (roleConfigs.executorSelectionReason ?? "configured executor"),
+        reason: roleConfigs.executorSelectionReason ?? "configured executor",
       }));
     }
     if (roleConfigs.verifier) {
       appendRoutingStep(routingMetadata, buildRoutingStep("verifier", "resolved", roleConfigs.verifier, {
         routeClass: routeDecision?.routeClass,
         executionMode: routeDecision?.executionMode,
-        riskLevel: routeDecision?.riskLevel,
         verificationLevel: routeDecision?.verificationLevel,
         reason: "primary model",
       }));
@@ -952,15 +944,9 @@ export async function streamFromLLM(
     });
   }
 
-  const primaryTakeoverForRisk = roleConfigs.enabled && routeDecision?.executionMode === "primary_takeover";
   const activeConfig = roleConfigs.enabled
-    ? (primaryTakeoverForRisk ? primaryConfig : roleConfigs.executor!)
+    ? roleConfigs.executor!
     : primaryConfig;
-  if (routingMetadata?.enabled && primaryTakeoverForRisk) {
-    routingMetadata.usingPrimaryAsExecutor = true;
-    routingMetadata.executorSelectionReason = "primary_takeover";
-    pushEvent(requestId, { type: "status", content: "已自动切换到主模型执行。", tone: "warning" });
-  }
   const plannerConfig = roleConfigs.planner;
   const verifierConfig = roleConfigs.verifier ?? plannerConfig;
   const effectiveApiKey = activeConfig.apiKey || (!roleConfigs.enabled ? fallbackApiKey : "");
@@ -1039,7 +1025,6 @@ export async function streamFromLLM(
       `plannerExecutor=${roleConfigs.enabled ? "on" : "off"}`,
       `routeClass=${routeDecision?.routeClass ?? ""}`,
       `executionMode=${routeDecision?.executionMode ?? ""}`,
-      `riskLevel=${routeDecision?.riskLevel ?? ""}`,
       `verificationLevel=${routeDecision?.verificationLevel ?? ""}`,
       `aiTimeoutMs=${normalizedAiTimeout}`,
       `sdkTimeoutMs=${normalizedAiTimeout || SDK_NO_TIMEOUT_MS}`,
@@ -1088,7 +1073,6 @@ export async function streamFromLLM(
     appendRoutingStep(routingMetadata, buildRoutingStep("planner", "started", plannerConfig, {
       routeClass: routeDecision.routeClass,
       executionMode: routeDecision.executionMode,
-      riskLevel: routeDecision.riskLevel,
       verificationLevel: routeDecision.verificationLevel,
       reason: routeDecision.reasons.join(","),
     }));
@@ -1107,7 +1091,7 @@ export async function streamFromLLM(
           content: [
             "You are the planning model for Nexo Agent.",
             "Create a compact structured execution contract for an executor model that already has normal context. Do not call tools.",
-            "Return concise JSON with keys: goal, scope, non_goals, constraints, steps, allowed_tools, success_criteria, handoff_requirements, escalation_rules.",
+            "Return concise JSON with keys: goal, scope, non_goals, constraints, steps, allowed_tools, success_criteria, handoff_requirements, verification_rules.",
             "handoff_requirements tells the executor what stage evidence or data summary to return before the primary model replans.",
             "Do not include hidden chain-of-thought. Keep values short and operational.",
           ].join("\n"),
@@ -1117,7 +1101,6 @@ export async function streamFromLLM(
           content: [
             `Route class: ${routeDecision.routeClass}`,
             `Execution mode: ${routeDecision.executionMode}`,
-            `Risk level: ${routeDecision.riskLevel}`,
             `Verification level: ${routeDecision.verificationLevel}`,
             `Route reasons: ${routeDecision.reasons.join(", ")}`,
             "Latest user request:",
@@ -1140,7 +1123,6 @@ export async function streamFromLLM(
       appendRoutingStep(routingMetadata, buildRoutingStep("planner", "completed", plannerConfig, {
         routeClass: routeDecision.routeClass,
         executionMode: routeDecision.executionMode,
-        riskLevel: routeDecision.riskLevel,
         verificationLevel: routeDecision.verificationLevel,
         usage: routingUsageFromChatCompletion(plannerResponse.usage),
       }));
@@ -1160,7 +1142,6 @@ export async function streamFromLLM(
       appendRoutingStep(routingMetadata, buildRoutingStep("planner", "failed", plannerConfig, {
         routeClass: routeDecision.routeClass,
         executionMode: routeDecision.executionMode,
-        riskLevel: routeDecision.riskLevel,
         verificationLevel: routeDecision.verificationLevel,
         reason: toErrorMessage(error),
       }));
@@ -1180,7 +1161,6 @@ export async function streamFromLLM(
     appendRoutingStep(routingMetadata, buildRoutingStep("planner", "skipped", plannerConfig, {
       routeClass: routeDecision?.routeClass,
       executionMode: routeDecision?.executionMode,
-      riskLevel: routeDecision?.riskLevel,
       verificationLevel: routeDecision?.verificationLevel,
       reason: "executor can use normal context directly",
     }));
@@ -1233,7 +1213,7 @@ export async function streamFromLLM(
     "Avoid starting long-lived dev servers such as vite, webpack, or npm run dev with shell_command unless the user explicitly wants that process to occupy the current run.",
     `Active model: ${activeConfig.name} / ${activeConfig.model}.`,
     roleConfigs.enabled
-      ? `Planner/executor routing: enabled. Route class=${routeDecision?.routeClass ?? "unknown"}. Execution mode=${routeDecision?.executionMode ?? "unknown"}. Risk=${routeDecision?.riskLevel ?? "unknown"}. Planner=${plannerConfig.name}/${plannerConfig.model}. Executor=${activeConfig.name}/${activeConfig.model}. Verifier=${verifierConfig.name}/${verifierConfig.model}.`
+      ? `Planner/executor routing: enabled. Route class=${routeDecision?.routeClass ?? "unknown"}. Execution mode=${routeDecision?.executionMode ?? "unknown"}. Planner=${plannerConfig.name}/${plannerConfig.model}. Executor=${activeConfig.name}/${activeConfig.model}. Verifier=${verifierConfig.name}/${verifierConfig.model}.`
       : `Primary model: ${primaryConfig.name} / ${primaryConfig.model}.`,
     plannerExecutionBrief
       ? "The planner execution brief is a handoff anchor, not a replacement for normal context. Follow its constraints and handoff requirements, while treating tool results and the current user request as authoritative if they conflict with the brief."
@@ -1463,7 +1443,6 @@ export async function streamFromLLM(
     appendRoutingStep(routingMetadata, buildRoutingStep("executor", "started", activeConfig, {
       routeClass: routeDecision?.routeClass,
       executionMode: routeDecision?.executionMode,
-      riskLevel: routeDecision?.riskLevel,
       verificationLevel: routeDecision?.verificationLevel,
       reason: routeDecision?.reasons.join(","),
     }));
@@ -1734,8 +1713,6 @@ export async function streamFromLLM(
         && routeDecision?.needsIterativeReplan
         && stageToolEvidence.length
         && replanIterations < MAX_ITERATIVE_REPLAN_CHECKPOINTS
-        && !roleConfigs.usingPrimaryAsExecutor
-        && !primaryTakeoverForRisk
       );
       if (shouldReplanAfterStage) {
         pushEvent(requestId, { type: "status", content: "正在基于阶段结果重新规划..." });
@@ -1747,7 +1724,6 @@ export async function streamFromLLM(
         appendRoutingStep(routingMetadata, buildRoutingStep("planner", "started", plannerConfig, {
           routeClass: routeDecision!.routeClass,
           executionMode: routeDecision!.executionMode,
-          riskLevel: routeDecision!.riskLevel,
           verificationLevel: routeDecision!.verificationLevel,
           iteration: replanIterations,
           replanReason,
@@ -1771,7 +1747,7 @@ export async function streamFromLLM(
                 "You are the primary planner/controller for Nexo Agent.",
                 "Review the executor's latest stage evidence and produce the next compact orchestration directive.",
                 "Do not call tools. Do not reveal hidden chain-of-thought.",
-                "Return either APPROVED_TO_CONTINUE with concise next constraints, REQUEST_VERIFICATION with reasons, or PRIMARY_TAKEOVER with a brief reason.",
+                "Return either APPROVED_TO_CONTINUE with concise next constraints or REQUEST_VERIFICATION with reasons.",
               ].join("\n"),
             },
             {
@@ -1780,7 +1756,6 @@ export async function streamFromLLM(
                 `Iteration: ${replanIterations}`,
                 `Route class: ${routeDecision!.routeClass}`,
                 `Execution mode: ${routeDecision!.executionMode}`,
-                `Risk level: ${routeDecision!.riskLevel}`,
                 `Replan triggers: ${routeDecision!.replanTriggers.join(", ") || "stage_evidence"}`,
                 plannerExecutionBrief ? `Original brief:\n${plannerExecutionBrief}` : "",
                 "Latest user request:",
@@ -1810,7 +1785,6 @@ export async function streamFromLLM(
           appendRoutingStep(routingMetadata, buildRoutingStep("planner", "completed", plannerConfig, {
             routeClass: routeDecision!.routeClass,
             executionMode: routeDecision!.executionMode,
-            riskLevel: routeDecision!.riskLevel,
             verificationLevel: routeDecision!.verificationLevel,
             iteration: replanIterations,
             replanReason,
@@ -1833,7 +1807,6 @@ export async function streamFromLLM(
           appendRoutingStep(routingMetadata, buildRoutingStep("planner", "failed", plannerConfig, {
             routeClass: routeDecision!.routeClass,
             executionMode: routeDecision!.executionMode,
-            riskLevel: routeDecision!.riskLevel,
             verificationLevel: routeDecision!.verificationLevel,
             iteration: replanIterations,
             replanReason,
@@ -1956,7 +1929,6 @@ export async function streamFromLLM(
     appendRoutingStep(routingMetadata, buildRoutingStep("executor", "completed", activeConfig, {
       routeClass: routeDecision?.routeClass,
       executionMode: routeDecision?.executionMode,
-      riskLevel: routeDecision?.riskLevel,
       verificationLevel: routeDecision?.verificationLevel,
       usage: { promptTokens, completionTokens, totalTokens, cachedTokens },
     }));
@@ -1972,7 +1944,6 @@ export async function streamFromLLM(
     routingMetadata.qualityScore = quality.score;
     const checkReasons = [...quality.reasons];
     const primaryVerificationRequired = routeDecision?.verificationLevel === "primary"
-      && !primaryTakeoverForRisk
       && activeConfig.profileId !== verifierConfig.profileId;
     if (primaryVerificationRequired) {
       checkReasons.push("primary_verification_required");
@@ -1985,7 +1956,6 @@ export async function streamFromLLM(
       appendRoutingStep(routingMetadata, buildRoutingStep("verifier", "started", verifierConfig, {
         routeClass: routeDecision?.routeClass,
         executionMode: routeDecision?.executionMode,
-        riskLevel: routeDecision?.riskLevel,
         verificationLevel: routeDecision?.verificationLevel,
         reason: checkReasons.join(","),
       }));
@@ -2051,7 +2021,6 @@ export async function streamFromLLM(
         appendRoutingStep(routingMetadata, buildRoutingStep("verifier", "completed", verifierConfig, {
           routeClass: routeDecision?.routeClass,
           executionMode: routeDecision?.executionMode,
-          riskLevel: routeDecision?.riskLevel,
           verificationLevel: routeDecision?.verificationLevel,
           reason: /^APPROVED\.?$/i.test(verifierContent) ? "approved" : "revised",
           usage: routingUsageFromChatCompletion(verifierResponse.usage),
@@ -2072,7 +2041,6 @@ export async function streamFromLLM(
         appendRoutingStep(routingMetadata, buildRoutingStep("verifier", "failed", verifierConfig, {
           routeClass: routeDecision?.routeClass,
           executionMode: routeDecision?.executionMode,
-          riskLevel: routeDecision?.riskLevel,
           verificationLevel: routeDecision?.verificationLevel,
           reason: toErrorMessage(error),
         }));
@@ -2093,7 +2061,6 @@ export async function streamFromLLM(
       appendRoutingStep(routingMetadata, buildRoutingStep("verifier", "skipped", verifierConfig, {
         routeClass: routeDecision?.routeClass,
         executionMode: routeDecision?.executionMode,
-        riskLevel: routeDecision?.riskLevel,
         verificationLevel: routeDecision?.verificationLevel,
         reason: "answer passed check",
       }));

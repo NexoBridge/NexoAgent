@@ -1,4 +1,4 @@
-import type { Application } from "express";
+﻿import type { Application } from "express";
 import type { ServerContext } from "./context";
 import { registerAuthRoutes } from "./auth";
 import { registerChatRoutes } from "./chat";
@@ -29,7 +29,7 @@ export function registerRoutes(app: Application, ctx: ServerContext) {
   registerMcpServerRoutes(app);
   registerModelProfileRoutes(app);
   registerSkillRoutes(app);
-  registerSessionRoutes(app);
+  registerSessionRoutes(app, ctx);
   registerChatRoutes(app, ctx);
   registerStreamRoutes(app);
 }

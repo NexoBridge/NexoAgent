@@ -1,4 +1,4 @@
-import { getApiBase } from "../../services/api";
+import { uploadFile } from "../../services/api";
 import type { Attachment } from "../../shared/types";
 
 function inferAttachmentType(file: File, fallback?: string): Attachment["type"] {
@@ -11,19 +11,7 @@ function inferAttachmentType(file: File, fallback?: string): Attachment["type"] 
 }
 
 async function uploadSingleFile(file: File): Promise<Attachment> {
-  const form = new FormData();
-  form.append("file", file);
-
-  const response = await fetch(`${getApiBase()}/api/upload`, {
-    method: "POST",
-    body: form,
-  });
-
-  if (!response.ok) {
-    throw new Error(`Upload failed: ${file.name}`);
-  }
-
-  const data = await response.json() as Partial<Attachment>;
+  const data = await uploadFile(file) as Partial<Attachment>;
   return {
     url: data.url || "",
     name: data.name || file.name,

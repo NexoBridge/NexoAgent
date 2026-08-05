@@ -3,12 +3,17 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import http from "node:http";
 import net from "node:net";
+import type { Application } from "express";
 import { randomBytes } from "node:crypto";
 import { createExpressApp } from "./server/index";
+import { dispatchDesktopApiRequest } from "./server/internal-api";
 import { applyAgentSettings } from "./server/settings";
 import { applyWebSafeModeSettingsUpdate } from "./server/web-safe-mode-auth";
-import { DATA_DIR, SETTINGS_FILE } from "./server/config";
+import { DATA_DIR, LOG_FILE, SETTINGS_FILE } from "./server/config";
 import { cleanupOldSnapshots } from "./server/snapshot";
+import { deleteSseWaiters, getSseQueue, getSseWaiters, hasSseQueue, scheduleSseCleanup, setSseWaiters } from "./server/sse";
+import { getCurrentLogFile, getLogFileForDate } from "./server/logger";
+import { getLogFileSize, readRecentLogLines, streamNewLogLines } from "./server/routes/logs";
 import { browserManager } from "./server/browser-manager";
 import {
   getDefaultServiceProviderName,
@@ -20,6 +25,7 @@ import {
 import type {
   AgentSettings,
   AgentSettingsSaveInput,
+  DesktopApiRequest,
   RuntimeInfo
 } from "../src/shared/types";
 import {
@@ -89,6 +95,7 @@ const defaultSettings: AgentSettings = {
 
 let mainWindow: BrowserWindow | null = null;
 let httpServer: http.Server | null = null;
+let expressAppForDesktop: Application | null = null;
 let webServerPort = 9898;
 const desktopAuthorityToken = randomBytes(32).toString("hex");
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -247,6 +254,7 @@ async function startHttpServer() {
       }
     },
   });
+  expressAppForDesktop = expressApp;
   const host = "0.0.0.0";
   const port = await findAvailablePort(9898, host);
   webServerPort = port;
@@ -540,6 +548,125 @@ function registerDesktopShortcuts() {
   }
 }
 
+
+const desktopStreamWaiters = new Map<string, () => void>();
+const desktopLogIntervals = new Map<string, ReturnType<typeof setInterval>>();
+
+function getDesktopApiApp() {
+  if (!expressAppForDesktop) {
+    throw new Error("Desktop API is not ready.");
+  }
+  return expressAppForDesktop;
+}
+
+function createMultipartUploadBody(file: { name?: string; type?: string; data?: ArrayBuffer }) {
+  const boundary = "----NexoDesktopUpload" + randomBytes(12).toString("hex");
+  const filename = String(file.name || "file").replace(/["\r\n]/g, "_");
+  const contentType = String(file.type || "application/octet-stream");
+  const data = Buffer.from(file.data ?? new ArrayBuffer(0));
+  const head = Buffer.from(
+    "--" + boundary
+      + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\""
+      + "\r\nContent-Type: " + contentType + "\r\n\r\n",
+    "utf8",
+  );
+  const tail = Buffer.from("\r\n--" + boundary + "--\r\n", "utf8");
+  return { boundary, body: Buffer.concat([head, data, tail]) };
+}
+
+function sendDesktopStreamEvents(requestId: string) {
+  if (!mainWindow) return;
+  const channel = "desktop-api:stream:" + requestId;
+  if (!hasSseQueue(requestId)) {
+    mainWindow.webContents.send(channel, { type: "error", message: "响应流不存在或已过期。" });
+    return;
+  }
+  let cursor = 0;
+
+  const flush = () => {
+    if (!mainWindow) return;
+    const queue = getSseQueue(requestId);
+    while (cursor < queue.length) {
+      const event = queue[cursor++];
+      mainWindow.webContents.send(channel, event);
+      if (event.type === "done" || event.type === "error") {
+        deleteSseWaiters(requestId);
+        scheduleSseCleanup(requestId);
+        desktopStreamWaiters.delete(requestId);
+        return;
+      }
+    }
+    const waiters = getSseWaiters(requestId).filter((waiter) => waiter !== flush);
+    waiters.push(flush);
+    setSseWaiters(requestId, waiters);
+    desktopStreamWaiters.set(requestId, flush);
+  };
+
+  flush();
+}
+
+function stopDesktopStreamSubscription(requestId: string) {
+  const waiter = desktopStreamWaiters.get(requestId);
+  if (!waiter) return;
+  desktopStreamWaiters.delete(requestId);
+  setSseWaiters(requestId, getSseWaiters(requestId).filter((item) => item !== waiter));
+}
+
+async function startDesktopLogSubscription(subscriptionId: string, date?: string) {
+  if (!mainWindow) return;
+  const channel = "desktop-api:logs:" + subscriptionId;
+  const requestedDate = typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined;
+  const followCurrentDate = !requestedDate;
+  let activeLogFile = requestedDate ? getLogFileForDate(requestedDate) : getCurrentLogFile();
+
+  const sendLine = (line: string) => {
+    mainWindow?.webContents.send(channel, line);
+  };
+
+  try {
+    for (const line of await readRecentLogLines(activeLogFile)) {
+      sendLine(line);
+    }
+  } catch {
+    if (!requestedDate) {
+      try {
+        for (const line of await readRecentLogLines(LOG_FILE)) {
+          sendLine(line);
+        }
+      } catch {
+        // No log file yet.
+      }
+    }
+  }
+
+  let offset = 0;
+  try {
+    offset = await getLogFileSize(activeLogFile);
+  } catch {
+    // No log file yet.
+  }
+
+  const interval = setInterval(async () => {
+    try {
+      const currentLogFile = followCurrentDate ? getCurrentLogFile() : activeLogFile;
+      if (followCurrentDate && currentLogFile !== activeLogFile) {
+        activeLogFile = currentLogFile;
+        offset = 0;
+      }
+      offset = await streamNewLogLines(activeLogFile, offset, sendLine);
+    } catch {
+      // Ignore transient log file read errors.
+    }
+  }, 1000);
+  desktopLogIntervals.set(subscriptionId, interval);
+}
+
+function stopDesktopLogSubscription(subscriptionId: string) {
+  const interval = desktopLogIntervals.get(subscriptionId);
+  if (!interval) return;
+  clearInterval(interval);
+  desktopLogIntervals.delete(subscriptionId);
+}
 ipcMain.handle("runtime:info", (): RuntimeInfo => ({
   surface: "desktop",
   platform: process.platform,
@@ -548,6 +675,34 @@ ipcMain.handle("runtime:info", (): RuntimeInfo => ({
   webBaseUrl: getDesktopAppUrl(),
 }));
 ipcMain.handle("desktop-authority:get-token", () => desktopAuthorityToken);
+ipcMain.handle("desktop-api:request", async (_event, request: DesktopApiRequest) => {
+  return dispatchDesktopApiRequest(getDesktopApiApp(), request, desktopAuthorityToken);
+});
+ipcMain.handle("desktop-api:upload-file", async (_event, file: { name?: string; type?: string; data?: ArrayBuffer }) => {
+  const { boundary, body } = createMultipartUploadBody(file);
+  return dispatchDesktopApiRequest(getDesktopApiApp(), {
+    method: "POST",
+    path: "/api/upload",
+    headers: { "content-type": "multipart/form-data; boundary=" + boundary },
+    bodyBase64: body.toString("base64"),
+  }, desktopAuthorityToken);
+});
+ipcMain.handle("desktop-api:stream-subscribe", async (_event, requestId: string) => {
+  stopDesktopStreamSubscription(requestId);
+  sendDesktopStreamEvents(requestId);
+});
+ipcMain.handle("desktop-api:stream-unsubscribe", async (_event, requestId: string) => {
+  stopDesktopStreamSubscription(requestId);
+});
+ipcMain.handle("desktop-api:logs-subscribe", async (_event, payload: { subscriptionId?: string; date?: string }) => {
+  const subscriptionId = payload?.subscriptionId;
+  if (!subscriptionId) return;
+  stopDesktopLogSubscription(subscriptionId);
+  await startDesktopLogSubscription(subscriptionId, payload.date);
+});
+ipcMain.handle("desktop-api:logs-unsubscribe", async (_event, subscriptionId: string) => {
+  stopDesktopLogSubscription(subscriptionId);
+});
 ipcMain.handle("browser:open-workbench", async () => {
   await browserManager.openWorkbench();
 });
@@ -632,5 +787,8 @@ app.on("window-all-closed", () => {
 
 app.on("will-quit", () => {
   browserManager.destroy();
+  desktopLogIntervals.forEach((interval) => clearInterval(interval));
+  desktopLogIntervals.clear();
+  desktopStreamWaiters.forEach((_waiter, requestId) => stopDesktopStreamSubscription(requestId));
   globalShortcut.unregisterAll();
 });
