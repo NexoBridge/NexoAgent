@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { Avatar, Button, Modal, Popconfirm, Tag, Tooltip } from "antd";
-import { BookOutlined, DownOutlined, DownloadOutlined, FileOutlined, RightOutlined, RobotOutlined, SoundOutlined, UndoOutlined, UserOutlined } from "@ant-design/icons";
+import { BookOutlined, BulbOutlined, DownOutlined, DownloadOutlined, FileOutlined, RightOutlined, RobotOutlined, SoundOutlined, UndoOutlined, UserOutlined } from "@ant-design/icons";
 import type { Attachment, ChatMessage, KnowledgeSourceHit, KnowledgeSourceMethod, ModelRoutingMetadata } from "../../shared/types";
 import { ToolCallItem } from "./ToolCallSteps";
 import type { ToolCallEvent } from "./ToolCallSteps";
@@ -24,11 +24,21 @@ interface Props {
   onOpenKnowledgeSource?: (path: string) => void;
 }
 
+type TranslationFn = ReturnType<typeof useI18n>["t"];
+
 const STREAM_CURSOR = "|";
 const DSML_TAG_PATTERN = String.raw`(?:\|\|DSML\|\||\uFF5C\uFF5CDSML\uFF5C\uFF5C|锝滐綔DSML锝滐綔|閿濇粣缍擠SML閿濇粣缍攟闁挎繃绮ｇ紞鎿燬ML闁挎繃绮ｇ紞?)`;
 const DSML_TOOL_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_TAG_PATTERN}tool_calls\s*>[\s\S]*?<\/\s*${DSML_TAG_PATTERN}tool_calls\s*>`, "g");
 const DSML_TOOL_START_RE = new RegExp(String.raw`<\s*${DSML_TAG_PATTERN}tool_calls\s*>`);
 const DSML_ANY_TAG_RE = new RegExp(String.raw`<\/?\s*${DSML_TAG_PATTERN}(?:tool_calls|invoke|parameter)\b[^>]*>`, "g");
+const THINKING_OPEN_RE = /<thinking\b[^>]*>/gi;
+const THINKING_CLOSE_RE = /<\/thinking>/gi;
+const THINKING_ANY_TAG_RE = /<\/?thinking\b[^>]*>/gi;
+
+interface ThinkingSegment {
+  type: "text" | "thinking";
+  content: string;
+}
 
 function stripDsmlArtifacts(content: string) {
   let visibleText = content;
@@ -38,6 +48,57 @@ function stripDsmlArtifacts(content: string) {
     visibleText = visibleText.slice(0, danglingStart);
   }
   return visibleText.replace(DSML_ANY_TAG_RE, "");
+}
+
+function appendVisibleTextSegment(segments: ThinkingSegment[], content: string) {
+  const cleaned = content.replace(THINKING_ANY_TAG_RE, "");
+  if (cleaned.trim()) {
+    segments.push({ type: "text", content: cleaned });
+  }
+}
+
+function splitThinkingContent(content: string) {
+  const segments: ThinkingSegment[] = [];
+  let cursor = 0;
+  THINKING_OPEN_RE.lastIndex = 0;
+  THINKING_CLOSE_RE.lastIndex = 0;
+
+  while (cursor < content.length) {
+    THINKING_OPEN_RE.lastIndex = cursor;
+    const openMatch = THINKING_OPEN_RE.exec(content);
+    if (!openMatch) {
+      appendVisibleTextSegment(segments, content.slice(cursor));
+      break;
+    }
+
+    appendVisibleTextSegment(segments, content.slice(cursor, openMatch.index));
+    const thinkingStart = openMatch.index + openMatch[0].length;
+    THINKING_CLOSE_RE.lastIndex = thinkingStart;
+    const closeMatch = THINKING_CLOSE_RE.exec(content);
+    const thinkingEnd = closeMatch?.index ?? content.length;
+    const thinkingContent = content.slice(thinkingStart, thinkingEnd).trim();
+    if (thinkingContent) {
+      segments.push({ type: "thinking", content: thinkingContent });
+    }
+
+    if (!closeMatch) {
+      break;
+    }
+    cursor = closeMatch.index + closeMatch[0].length;
+  }
+
+  if (!segments.length && content.trim()) {
+    appendVisibleTextSegment(segments, content);
+  }
+
+  return segments;
+}
+
+function stripThinkingArtifacts(content: string) {
+  return splitThinkingContent(content)
+    .filter((segment) => segment.type === "text")
+    .map((segment) => segment.content)
+    .join("");
 }
 
 function buildMarkdownComponents() {
@@ -66,6 +127,72 @@ const MarkdownText: React.FC<{ content: string; streaming?: boolean }> = ({ cont
     <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]} components={components}>
       {content}
     </ReactMarkdown>
+  );
+};
+
+const ThinkingBlock: React.FC<{ content: string; streaming?: boolean; t: TranslationFn }> = ({ content, streaming, t }) => {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="message-bubble__thinking">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((current) => !current)}
+        className="message-bubble__thinking-toggle"
+      >
+        {expanded ? <DownOutlined /> : <RightOutlined />}
+        <BulbOutlined />
+        <span>{t("assistantThinking")}</span>
+        {streaming && !expanded ? <span className="message-bubble__stream-cursor">{STREAM_CURSOR}</span> : null}
+      </button>
+      {expanded ? (
+        <div className="message-bubble__thinking-content">
+          <MarkdownText content={content} streaming={streaming} />
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const MessageText: React.FC<{ content: string; streaming?: boolean; t: TranslationFn }> = ({ content, streaming, t }) => {
+  const segments = useMemo(() => splitThinkingContent(content), [content]);
+  const hasThinking = segments.some((segment) => segment.type === "thinking");
+  const visibleText = segments
+    .filter((segment) => segment.type === "text")
+    .map((segment) => segment.content)
+    .join("");
+
+  if (!segments.length) {
+    return streaming ? <span className="message-bubble__stream-cursor">{STREAM_CURSOR}</span> : null;
+  }
+
+  if (!hasThinking) {
+    return <MarkdownText content={visibleText || content} streaming={streaming} />;
+  }
+
+  return (
+    <>
+      {segments.map((segment, index) => {
+        const isLast = index === segments.length - 1;
+        if (segment.type === "thinking") {
+          return (
+            <ThinkingBlock
+              key={`thinking-${index}`}
+              content={segment.content}
+              streaming={streaming && isLast}
+              t={t}
+            />
+          );
+        }
+        return (
+          <MarkdownText
+            key={`text-${index}`}
+            content={segment.content}
+            streaming={streaming && isLast}
+          />
+        );
+      })}
+    </>
   );
 };
 
@@ -330,6 +457,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
   const hasBlocks = !isUser && Boolean(effectiveBlocks?.length);
   const apiBase = getApiBase();
   const safeContent = useMemo(() => (!isUser ? stripDsmlArtifacts(message.content) : message.content), [isUser, message.content]);
+  const visibleContent = useMemo(() => (!isUser ? stripThinkingArtifacts(safeContent) : safeContent), [isUser, safeContent]);
   const knowledgeSources = !isUser ? message.meta?.knowledgeSources ?? [] : [];
   const routing = !isUser ? message.meta?.routing : undefined;
   const normalizedAttachments = useMemo(() => {
@@ -337,7 +465,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
     if (isUser) return explicit;
 
     const byUrl = new Map(explicit.map((attachment) => [attachment.url, attachment]));
-    for (const artifact of extractUploadArtifacts(safeContent)) {
+    for (const artifact of extractUploadArtifacts(visibleContent)) {
       if (!byUrl.has(artifact.url)) {
         byUrl.set(artifact.url, {
           url: artifact.url,
@@ -348,7 +476,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
       }
     }
     return [...byUrl.values()];
-  }, [isUser, message.attachments, safeContent]);
+  }, [isUser, message.attachments, visibleContent]);
   const statusMeta = !isUser ? getMessageStatusMeta(message.status, t) : null;
   const isUndone = message.status === "undone";
 
@@ -384,10 +512,11 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
                 const isLast = index === effectiveBlocks.length - 1;
                 if (block.type === "text") {
                   return (
-                    <MarkdownText
+                    <MessageText
                       key={`text-${index}`}
                       content={stripDsmlArtifacts(block.content)}
                       streaming={streaming && isLast}
+                      t={t}
                     />
                   );
                 }
@@ -408,7 +537,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
               ) : null}
             </>
           ) : (
-            <MarkdownText content={safeContent} streaming={streaming} />
+            <MessageText content={safeContent} streaming={streaming} t={t} />
           )}
         </div>
         {knowledgeSources.length ? (

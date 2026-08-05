@@ -1,5 +1,7 @@
 ﻿import React, { useEffect, useState } from "react";
-import { Button, Form, Input, Spin, Typography } from "antd";
+import { Button, Form, Input, Segmented, Spin, Typography } from "antd";
+import type { Lang } from "../i18n";
+import { useI18n } from "../i18n";
 import { apiGet, apiPost, clearAuthToken, isElectron, setAuthToken } from "../services/api";
 import "./WebAuthGate.scss";
 
@@ -16,6 +18,7 @@ interface LoginResponse {
 }
 
 export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { lang, setLang, t } = useI18n();
   const [status, setStatus] = useState<AuthStatus | null>(() =>
     isElectron() ? { authenticated: true } : null
   );
@@ -23,6 +26,22 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [form] = Form.useForm<{ accountName?: string; password: string }>();
+  const languageOptions = [
+    { label: t("simplifiedChinese"), value: "zh" },
+    { label: t("english"), value: "en" },
+  ];
+
+  const languageSwitch = (
+    <div className="web-auth-gate__language">
+      <span className="web-auth-gate__language-label">{t("language")}</span>
+      <Segmented
+        size="small"
+        value={lang}
+        options={languageOptions}
+        onChange={(value) => setLang(value as Lang)}
+      />
+    </div>
+  );
 
   useEffect(() => {
     if (isElectron()) return;
@@ -52,10 +71,13 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
   if (checkingAuth) {
     return (
       <div className="web-auth-gate">
-        <div className="web-auth-gate__panel" style={{ textAlign: "center", padding: "48px 28px" }}>
-          <Spin size="large" />
-          <div style={{ marginTop: "16px", color: "var(--nexo-text-secondary)" }}>
-            Checking authentication...
+        <div className="web-auth-gate__panel web-auth-gate__panel--checking">
+          {languageSwitch}
+          <div className="web-auth-gate__checking-body">
+            <Spin size="large" />
+            <div className="web-auth-gate__checking-text">
+              {t("checkingAuth")}
+            </div>
           </div>
         </div>
       </div>
@@ -69,10 +91,10 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Show login form if authentication is required
   const safeModeEnabled = status?.safeModeEnabled === true;
-  const title = safeModeEnabled ? "Web Safe Mode" : "Sign In";
+  const title = safeModeEnabled ? t("webSafeMode") : t("signIn");
   const failureMessage = safeModeEnabled
-    ? "Sign-in failed. Check the account and password, then try again."
-    : "Sign-in failed. Check the password and try again.";
+    ? t("signInFailedAccountPassword")
+    : t("signInFailedPassword");
 
   const submit = async (values: { accountName?: string; password: string }) => {
     setLoading(true);
@@ -93,21 +115,24 @@ export const WebAuthGate: React.FC<{ children: React.ReactNode }> = ({ children 
   return (
     <div className="web-auth-gate">
       <div className="web-auth-gate__panel">
-        <Title level={3} className="web-auth-gate__title">
-          {title}
-        </Title>
+        <div className="web-auth-gate__header">
+          <Title level={3} className="web-auth-gate__title">
+            {title}
+          </Title>
+          {languageSwitch}
+        </div>
         <Form form={form} layout="vertical" onFinish={(values) => void submit(values)}>
           {safeModeEnabled ? (
-            <Form.Item name="accountName" label="Account" rules={[{ required: true, message: "Enter the account." }]}>
+            <Form.Item name="accountName" label={t("account")} rules={[{ required: true, message: t("accountRequired") }]}>
               <Input autoComplete="username" autoFocus />
             </Form.Item>
           ) : null}
-          <Form.Item name="password" label="Password" rules={[{ required: true, message: "Enter the password." }]}>
+          <Form.Item name="password" label={t("password")} rules={[{ required: true, message: t("passwordRequired") }]}>
             <Input.Password autoComplete={safeModeEnabled ? "current-password" : "current-password"} autoFocus={!safeModeEnabled} />
           </Form.Item>
           {error ? <Text className="web-auth-gate__error">{error}</Text> : null}
           <Button type="primary" htmlType="submit" loading={loading} className="web-auth-gate__submit">
-            Sign In
+            {t("signIn")}
           </Button>
         </Form>
       </div>

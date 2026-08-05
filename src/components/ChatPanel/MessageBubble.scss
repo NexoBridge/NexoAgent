@@ -117,6 +117,40 @@
     }
   }
 
+  &__thinking {
+    margin: 6px 0 10px;
+    border: 1px solid var(--nexo-border);
+    border-radius: 8px;
+    background: var(--nexo-bg-tertiary);
+    color: var(--nexo-text-muted);
+    font-size: 12px;
+    overflow: hidden;
+  }
+
+  &__thinking-toggle {
+    width: 100%;
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 9px;
+    border: 0;
+    background: transparent;
+    color: var(--nexo-text-secondary);
+    cursor: pointer;
+    text-align: left;
+  }
+
+  &__thinking-content {
+    padding: 0 10px 10px 28px;
+    color: var(--nexo-text-secondary);
+    border-top: 1px solid var(--nexo-border);
+
+    .message-bubble__markdown-p {
+      margin: 6px 0;
+    }
+  }
+
   &__knowledge {
     margin-top: 8px;
     border: 1px solid var(--nexo-border);
