@@ -14,6 +14,7 @@ import {
   normalizeProviderId,
   normalizeServiceProviderName,
 } from "../../src/shared/providers";
+import { normalizeContextWindowTokens } from "../../src/shared/context-window";
 import { applyWebSafeModeSettingsUpdate } from "./web-safe-mode-auth";
 
 let webSettings: Partial<AgentSettings> = {};
@@ -31,6 +32,7 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
     aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
+    contextWindowTokens: normalizeContextWindowTokens(settings.contextWindowTokens),
   }));
 }
 

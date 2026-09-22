@@ -70,6 +70,8 @@ export interface Session {
   threadSummaryMessageCount?: number;
   threadSummaryUpdatedAt?: string;
   threadSummaryVersion?: number;
+  /** Non-system messages already written to durable context-window memory. */
+  archivedMessageCount?: number;
 }
 
 export interface ToolExecutionContext {

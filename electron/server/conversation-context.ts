@@ -1,4 +1,4 @@
-import type { AgentSettings, ChatMessage } from "../../src/shared/types";
+import type { ChatMessage } from "../../src/shared/types";
 import type { Session } from "./types";
 import {
   estimateMessageTokens,
@@ -7,22 +7,23 @@ import {
 } from "./token-budget";
 import type { computePromptBudget } from "./token-budget";
 
-function normalizePositiveInteger(value: number | undefined, fallback: number, min = 1) {
-  const normalized = Math.floor(Number(value));
-  return Number.isFinite(normalized) ? Math.max(min, normalized) : fallback;
+export const CONTEXT_ARCHIVE_CHUNK_TOKENS = 1_500;
+
+export interface ContextArchiveChunk {
+  content: string;
+  sessionId: string;
+  startIndex: number;
+  endIndex: number;
+  legacyThreadSummary?: boolean;
 }
 
-function normalizeNonNegativeInteger(value: number | undefined, max: number) {
-  const normalized = Math.floor(Number(value));
-  if (!Number.isFinite(normalized)) return 0;
-  return Math.max(0, Math.min(max, normalized));
-}
+export type ArchiveContextChunk = (chunk: ContextArchiveChunk) => Promise<boolean>;
 
 function normalizeForPrompt(text: string) {
   return text.replace(/\s+\n/g, "\n").trim();
 }
 
-function formatMessageForCompaction(message: ChatMessage, index: number) {
+function formatMessageForArchive(message: ChatMessage, index: number) {
   const role = message.role === "assistant" ? "Assistant" : "User";
   const attachmentText = message.attachments?.length
     ? `\nAttachments: ${message.attachments.map((attachment) => `${attachment.name} (${attachment.type}, ${attachment.url})`).join("; ")}`
@@ -30,132 +31,113 @@ function formatMessageForCompaction(message: ChatMessage, index: number) {
   return `#${index + 1} ${role} at ${message.createdAt}\n${normalizeForPrompt(message.content)}${attachmentText}`;
 }
 
-export function buildCompactionTranscript(messages: ChatMessage[]) {
-  return messages.map(formatMessageForCompaction).join("\n\n");
+export function buildConversationTranscript(messages: ChatMessage[]) {
+  return messages.map(formatMessageForArchive).join("\n\n");
 }
 
 export function formatCurrentSessionContextForRecall(session: Session) {
   const conversationMessages = session.messages.filter((message) => message.role !== "system");
-  const transcript = buildCompactionTranscript(conversationMessages);
-  return [
-    session.threadSummary?.trim()
-      ? `Compressed earlier current-session context:\n${session.threadSummary.trim()}`
-      : "",
-    transcript
-      ? `Current-session transcript:\n${transcript}`
-      : "",
-  ].filter(Boolean).join("\n\n");
+  const transcript = buildConversationTranscript(conversationMessages);
+  return transcript ? `Current-session transcript:\n${transcript}` : "";
 }
 
-function fallbackCompactMessages(messages: ChatMessage[]) {
-  const transcript = buildCompactionTranscript(messages);
-  return [
-    "Automatic context compaction summary could not be generated. Full earlier conversation transcript follows:",
-    transcript,
-  ].join("\n");
-}
-
-async function compactOlderMessages(messages: ChatMessage[], summarize: (transcript: string) => Promise<string>) {
-  if (messages.length === 0) return "";
-
-  try {
-    const transcript = buildCompactionTranscript(messages);
-    const content = await summarize(transcript);
-    return content || fallbackCompactMessages(messages);
-  } catch {
-    return fallbackCompactMessages(messages);
-  }
+function clampCursor(value: number | undefined, length: number) {
+  const normalized = Math.floor(Number(value));
+  if (!Number.isFinite(normalized)) return 0;
+  return Math.max(0, Math.min(length, normalized));
 }
 
 export async function buildBudgetAwareConversationContext(
-  settings: AgentSettings,
   session: Session,
-  summarize: (transcript: string) => Promise<string>,
+  archiveChunk: ArchiveContextChunk,
   baseSections: Array<{ key: string; label: string; content: string }>,
-  budgetConfig: ReturnType<typeof computePromptBudget>
+  budgetConfig: ReturnType<typeof computePromptBudget>,
 ) {
+  const windowTokens = budgetConfig.contextWindowTokens;
   const conversationMessages = session.messages.filter((message) => message.role !== "system");
-  const recentWindow = normalizePositiveInteger(settings.maxContextTurns, 12);
-  const originalThreadSummary = session.threadSummary?.trim() ?? "";
-  const originalSummaryMessageCount = session.threadSummaryMessageCount;
-  let threadSummary = originalThreadSummary;
-  let summarizedMessageCount = settings.enableContextCompaction
-    ? normalizeNonNegativeInteger(session.threadSummaryMessageCount, conversationMessages.length)
-    : 0;
-  if (settings.enableContextCompaction && threadSummary && session.threadSummaryMessageCount === undefined) {
-    summarizedMessageCount = Math.max(0, conversationMessages.length - recentWindow);
-  }
-  if (!threadSummary) {
-    summarizedMessageCount = 0;
-  }
-  let recentMessages = conversationMessages.slice(summarizedMessageCount);
-  let compacted = false;
-  let passes = 0;
-  const initialSummarizedMessageCount = summarizedMessageCount;
-
+  const legacySummary = session.threadSummary?.trim() ?? "";
+  const initialCursor = clampCursor(session.archivedMessageCount, conversationMessages.length);
   const estimateBase = () => baseSections.reduce((sum, section) => sum + estimateSectionTokens(section.label, section.content), 0);
-  const estimateSummary = () => estimateSectionTokens("Earlier conversation summary", threadSummary);
-  const estimateRecent = () => estimateMessagesTokens(recentMessages);
-  const estimateTotal = () => estimateBase() + estimateSummary() + estimateRecent();
-  const shouldCompactByTokens = () => estimateTotal() >= budgetConfig.autoCompactTokenLimit;
-  const originalEstimatedPromptTokens = estimateTotal();
+  const originalEstimatedPromptTokens = estimateBase()
+    + estimateSectionTokens("Earlier conversation summary", legacySummary)
+    + estimateMessagesTokens(conversationMessages.slice(initialCursor));
 
-  while (
-    settings.enableContextCompaction
-    && shouldCompactByTokens()
-    && passes < 4
-  ) {
-    const targetRawTurns = Math.max(2, Math.min(recentWindow, Math.floor(recentMessages.length / 2)));
-    const summaryInput = recentMessages.slice(0, Math.max(0, recentMessages.length - targetRawTurns));
-    if (!summaryInput.length) break;
-
-    const nextSummary = await compactOlderMessages(summaryInput, summarize);
-    threadSummary = [threadSummary, nextSummary].filter(Boolean).join("\n\n");
-    summarizedMessageCount += summaryInput.length;
-    compacted = true;
-    passes += 1;
-    recentMessages = recentMessages.slice(summaryInput.length);
-
-    while (estimateTotal() > budgetConfig.compactionTargetTokens && recentMessages.length > 2) {
-      const shifted = recentMessages.shift();
-      if (!shifted) break;
-      const fragment = await compactOlderMessages([shifted], summarize);
-      threadSummary = [threadSummary, fragment].filter(Boolean).join("\n\n");
-      summarizedMessageCount += 1;
-      compacted = true;
+  let archiveFailed = false;
+  if (legacySummary) {
+    const stored = await archiveChunk({
+      content: legacySummary,
+      sessionId: session.id,
+      startIndex: -1,
+      endIndex: -1,
+      legacyThreadSummary: true,
+    });
+    if (!stored) {
+      archiveFailed = true;
+    } else {
+      session.threadSummary = undefined;
+      session.threadSummaryMessageCount = undefined;
+      session.threadSummaryUpdatedAt = undefined;
+      session.threadSummaryVersion = undefined;
     }
   }
 
-  session.threadSummary = threadSummary || undefined;
-  if (threadSummary) {
-    if (settings.enableContextCompaction) {
-      session.threadSummaryMessageCount = summarizedMessageCount;
+  let cursor = initialCursor;
+  const liveMessages = () => conversationMessages.slice(cursor);
+  const estimateLive = () => estimateBase() + estimateMessagesTokens(liveMessages());
+  let archivedThisPass = 0;
+
+  if (!archiveFailed) {
+    while (estimateLive() >= windowTokens && liveMessages().length > 1) {
+      const available = liveMessages();
+      const chunk: ChatMessage[] = [];
+      let chunkTokens = 0;
+      for (let index = 0; index < available.length - 1; index += 1) {
+        const nextTokens = estimateMessageTokens(available[index]);
+        if (chunk.length > 0 && chunkTokens + nextTokens > CONTEXT_ARCHIVE_CHUNK_TOKENS) break;
+        chunk.push(available[index]);
+        chunkTokens += nextTokens;
+        const remaining = available.slice(index + 1);
+        if (estimateBase() + estimateMessagesTokens(remaining) < windowTokens) break;
+      }
+      if (!chunk.length) break;
+
+      const startIndex = cursor;
+      const endIndex = cursor + chunk.length - 1;
+      const stored = await archiveChunk({
+        content: buildConversationTranscript(chunk),
+        sessionId: session.id,
+        startIndex,
+        endIndex,
+      });
+      if (!stored) {
+        archiveFailed = true;
+        break;
+      }
+      cursor += chunk.length;
+      session.archivedMessageCount = cursor;
+      archivedThisPass += chunk.length;
     }
-    const summaryChanged = threadSummary !== originalThreadSummary;
-    const countChanged = session.threadSummaryMessageCount !== originalSummaryMessageCount;
-    if (summaryChanged || countChanged || compacted) {
-      session.threadSummaryUpdatedAt = new Date().toISOString();
-      session.threadSummaryVersion = (session.threadSummaryVersion ?? 0) + (compacted ? 1 : 0);
-    }
-  } else if (session.threadSummaryMessageCount !== undefined) {
-    session.threadSummaryMessageCount = undefined;
   }
+
+  const recentMessages = liveMessages();
+  const latest = conversationMessages.length
+    ? conversationMessages[conversationMessages.length - 1]
+    : undefined;
 
   return {
-    compactedSummary: threadSummary,
-    estimatedPromptTokens: estimateTotal(),
+    compactedSummary: "",
+    estimatedPromptTokens: estimateLive(),
     originalEstimatedPromptTokens,
-    compacted,
-    compactedMessageCount: Math.max(0, summarizedMessageCount - initialSummarizedMessageCount),
-    compactionPasses: passes,
-    summaryMessageCount: summarizedMessageCount,
+    compacted: false,
+    archived: archivedThisPass > 0 || Boolean(legacySummary && !archiveFailed && !session.threadSummary),
+    archiveFailed,
+    archivedMessageCount: cursor,
+    compactedMessageCount: archivedThisPass,
+    compactionPasses: 0,
+    summaryMessageCount: cursor,
     recentRawMessageCount: recentMessages.length,
-    latestRawMessageTokens: conversationMessages.length
-      ? estimateMessageTokens(conversationMessages[conversationMessages.length - 1])
-      : 0,
-    latestRawMessageChars: conversationMessages.length
-      ? conversationMessages[conversationMessages.length - 1].content.length
-      : 0,
+    latestRawMessageTokens: latest ? estimateMessageTokens(latest) : 0,
+    latestRawMessageChars: latest ? latest.content.length : 0,
     recentRawMessages: recentMessages,
   };
 }

@@ -30,6 +30,7 @@ import {
 } from "../../shared/types";
 import { apiDelete, apiGet, apiPost, isElectron } from "../../services/api";
 import "./index.scss";
+import { CONTEXT_WINDOW_256K, CONTEXT_WINDOW_500K, isContextWindowPreset, normalizeContextWindowTokens } from "../../shared/context-window";
 import { sanitizeApiKeyForSave, SAVED_API_KEY_MASK } from "../../shared/settings";
 import { OverflowMenuButton } from "../Common/OverflowMenuButton";
 import { useI18n } from "../../i18n";
@@ -60,9 +61,7 @@ const CAPABILITY_COLORS: Record<ModelCapability, string> = {
 };
 
 const tokenCountFormatter = new Intl.NumberFormat("en-US");
-const UNKNOWN_MODEL_CONTEXT_WINDOW = 256_000;
 const UNKNOWN_MODEL_RESERVED_OUTPUT = 24_576;
-const UNKNOWN_MODEL_COMPACT_LIMIT = 180_000;
 
 type ModelProfileFormValues = ModelProfile & {
   contextBudgetMode?: "auto" | "manual";
@@ -126,7 +125,7 @@ function buildUi(lang: "zh" | "en") {
     enableMemory: lang === "zh" ? "\u542f\u7528\u8bb0\u5fc6" : "Enable Memory",
     enableKnowledge: lang === "zh" ? "\u542f\u7528\u77e5\u8bc6\u5e93" : "Enable Knowledge Base",
     temperature: "Temperature",
-    enableContextCompaction: lang === "zh" ? "\u542f\u7528\u4e0a\u4e0b\u6587\u81ea\u52a8\u538b\u7f29" : "Enable Context Auto-compaction",
+    contextWindowPreset: lang === "zh" ? "\u4e0a\u4e0b\u6587\u7a97\u53e3" : "Context Window",
     aiRequestTimeout: lang === "zh" ? "AI \u8bf7\u6c42\u8d85\u65f6\uff08\u79d2\uff09" : "AI Request Timeout (s)",
     aiRequestTimeoutTip: lang === "zh"
       ? "\u586b 0 \u8868\u793a\u4e0d\u7531\u7cfb\u7edf\u81ea\u52a8\u8d85\u65f6\uff0c\u53ea\u80fd\u624b\u52a8\u505c\u6b62\uff1b\u586b\u6b63\u6570\u5219\u6309\u8be5\u65f6\u95f4\u4e2d\u65ad AI \u8bf7\u6c42\u3002"
@@ -172,7 +171,6 @@ function buildUi(lang: "zh" | "en") {
     contextDefault: lang === "zh" ? "\u9ed8\u8ba4" : "Default",
     contextWindow: lang === "zh" ? "\u7a97\u53e3" : "Window",
     reservedOutput: lang === "zh" ? "\u9884\u7559\u8f93\u51fa" : "Reserve",
-    compactLimit: lang === "zh" ? "\u538b\u7f29\u9608\u503c" : "Compact",
     contextBudgetMode: lang === "zh" ? "\u4e0a\u4e0b\u6587\u9884\u7b97" : "Context Budget",
     contextBudgetAuto: lang === "zh" ? "\u81ea\u52a8（\u672a\u77e5\u6a21\u578b 256K）" : "Auto (256K for unknown models)",
     contextBudgetManual: lang === "zh" ? "\u624b\u52a8\u6307\u5b9a" : "Manual",
@@ -181,7 +179,6 @@ function buildUi(lang: "zh" | "en") {
       : "Auto uses provider metadata and the known-model dictionary first, then defaults unknown models to 256K.",
     contextWindowRequired: lang === "zh" ? "\u8bf7\u8f93\u5165\u4e0a\u4e0b\u6587\u7a97\u53e3" : "Enter the context window.",
     reservedOutputRequired: lang === "zh" ? "\u8bf7\u8f93\u5165\u9884\u7559\u8f93\u51fa" : "Enter the reserved output budget.",
-    compactLimitRequired: lang === "zh" ? "\u8bf7\u8f93\u5165\u538b\u7f29\u9608\u503c" : "Enter the compaction threshold.",
     thinking: lang === "zh" ? "\u6df1\u5ea6\u601d\u8003" : "Thinking",
     thinkingOn: lang === "zh" ? "\u5f00\u542f" : "On",
     thinkingOff: lang === "zh" ? "\u5173\u95ed" : "Off",
@@ -459,6 +456,9 @@ export const Settings: React.FC = () => {
       apiKey: "",
       capabilities: profile.capabilities?.length ? profile.capabilities : ["chat"],
       contextBudgetMode: profile.contextWindowSource === "user" || profile.contextWindowSource === "profile" ? "manual" : "auto",
+      contextWindowTokens: isContextWindowPreset(profile.contextWindowTokens)
+        ? profile.contextWindowTokens
+        : CONTEXT_WINDOW_256K,
     });
     setDiscoveredModels([]);
     setProfileModalOpen(true);
@@ -604,12 +604,8 @@ export const Settings: React.FC = () => {
       capabilities: model.capabilities.length ? model.capabilities : ["chat"],
       thinkingEnabled: profileForm.getFieldValue("thinkingEnabled") ?? true,
       thinkingEffort: profileForm.getFieldValue("thinkingEffort") || "high",
-      ...(model.contextWindowTokens
-        ? {
-            contextWindowTokens: model.contextWindowTokens,
-            reservedOutputTokens: model.reservedOutputTokens,
-            autoCompactTokenLimit: model.autoCompactTokenLimit,
-          }
+      ...(model.reservedOutputTokens
+        ? { reservedOutputTokens: model.reservedOutputTokens }
         : {}),
       description: profileForm.getFieldValue("description") || (model.ownedBy ? ui.discoveredFrom(model.ownedBy) : ui.discoveredFrom("provider")),
     });
@@ -647,7 +643,11 @@ export const Settings: React.FC = () => {
         form={form}
         layout="vertical"
         onFinish={(values) => void onSave(values as AgentSettingsSaveInput)}
-        initialValues={{ ...settings, fileAccessRoots: settings.fileAccessRoots ?? [] }}
+        initialValues={{
+          ...settings,
+          contextWindowTokens: normalizeContextWindowTokens(settings.contextWindowTokens),
+          fileAccessRoots: settings.fileAccessRoots ?? [],
+        }}
       >
         <div className="settings-page__form-grid">
           <div>
@@ -668,8 +668,14 @@ export const Settings: React.FC = () => {
             <Form.Item label={label(ui.temperature)} name="temperature">
               <InputNumber min={0} max={2} step={0.1} className="settings-page__full-width" />
             </Form.Item>
-            <Form.Item label={label(ui.enableContextCompaction)} name="enableContextCompaction" valuePropName="checked">
-              <Switch />
+            <Form.Item label={label(ui.contextWindowPreset)} name="contextWindowTokens">
+              <Select
+                className="settings-page__full-width"
+                options={[
+                  { value: CONTEXT_WINDOW_256K, label: "256K" },
+                  { value: CONTEXT_WINDOW_500K, label: "500K" },
+                ]}
+              />
             </Form.Item>
             <Form.Item
               label={label(ui.aiRequestTimeout)}
@@ -891,9 +897,8 @@ export const Settings: React.FC = () => {
                     </Space>
                     <Text className="settings-page__text-secondary">{profile.apiBase}</Text>
                     <Space wrap size={8}>
-                      <Text className="settings-page__text-secondary">{ui.contextWindow} {formatTokenCount(profile.contextWindowTokens)}</Text>
+                      <Text className="settings-page__text-secondary">{ui.contextWindow} {isContextWindowPreset(profile.contextWindowTokens) ? formatTokenCount(profile.contextWindowTokens) : "-"}</Text>
                       <Text className="settings-page__text-secondary">{ui.reservedOutput} {formatTokenCount(profile.reservedOutputTokens)}</Text>
-                      <Text className="settings-page__text-secondary">{ui.compactLimit} {formatTokenCount(profile.autoCompactTokenLimit)}</Text>
                     </Space>
                     <Space wrap size={8}>
                       <Text className="settings-page__text-secondary">{ui.thinking} {profile.thinkingEnabled === false ? ui.thinkingOff : ui.thinkingOn}</Text>
@@ -1086,9 +1091,10 @@ export const Settings: React.FC = () => {
                 onChange={(mode) => {
                   if (mode !== "manual") return;
                   profileForm.setFieldsValue({
-                    contextWindowTokens: profileForm.getFieldValue("contextWindowTokens") || UNKNOWN_MODEL_CONTEXT_WINDOW,
+                    contextWindowTokens: isContextWindowPreset(profileForm.getFieldValue("contextWindowTokens"))
+                      ? profileForm.getFieldValue("contextWindowTokens")
+                      : CONTEXT_WINDOW_256K,
                     reservedOutputTokens: profileForm.getFieldValue("reservedOutputTokens") || UNKNOWN_MODEL_RESERVED_OUTPUT,
-                    autoCompactTokenLimit: profileForm.getFieldValue("autoCompactTokenLimit") || UNKNOWN_MODEL_COMPACT_LIMIT,
                   });
                 }}
               />
@@ -1096,13 +1102,16 @@ export const Settings: React.FC = () => {
             {watchedContextBudgetMode === "manual" ? (
               <div className="settings-page__modal-grid">
                 <Form.Item name="contextWindowTokens" label={ui.contextWindow} rules={[{ required: true, message: ui.contextWindowRequired }]}>
-                  <InputNumber min={8_192} step={1_024} className="settings-page__full-width" />
+                  <Select
+                    className="settings-page__full-width"
+                    options={[
+                      { value: CONTEXT_WINDOW_256K, label: "256K" },
+                      { value: CONTEXT_WINDOW_500K, label: "500K" },
+                    ]}
+                  />
                 </Form.Item>
                 <Form.Item name="reservedOutputTokens" label={ui.reservedOutput} rules={[{ required: true, message: ui.reservedOutputRequired }]}>
                   <InputNumber min={1_024} step={1_024} className="settings-page__full-width" />
-                </Form.Item>
-                <Form.Item name="autoCompactTokenLimit" label={ui.compactLimit} rules={[{ required: true, message: ui.compactLimitRequired }]}>
-                  <InputNumber min={4_096} step={1_024} className="settings-page__full-width" />
                 </Form.Item>
               </div>
             ) : null}

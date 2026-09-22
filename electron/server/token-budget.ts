@@ -1,3 +1,4 @@
+import { isContextWindowPreset, normalizeContextWindowTokens } from "../../src/shared/context-window";
 import type { AgentSettings, ChatMessage, ModelContextBudget } from "../../src/shared/types";
 
 export interface TokenEstimateDetail {
@@ -18,22 +19,13 @@ export interface PromptBudget {
   maxInputTokens: number;
 }
 
-const DEFAULT_CONTEXT_WINDOW_TOKENS = 256_000;
 const DEFAULT_RESERVED_OUTPUT_TOKENS = 24_576;
-const DEFAULT_COMPACTION_TARGET_RATIO = 0.6;
 const DEFAULT_TOOL_SCHEMA_RESERVE_TOKENS = 2_048;
-const DEFAULT_AUTO_COMPACT_RATIO = 0.75;
 
 function clampInteger(value: number | undefined, fallback: number, min: number, max: number) {
   const normalized = Math.floor(Number(value));
   if (!Number.isFinite(normalized)) return fallback;
   return Math.max(min, Math.min(max, normalized));
-}
-
-function clampRatio(value: number | undefined, fallback = DEFAULT_COMPACTION_TARGET_RATIO) {
-  const normalized = Number(value);
-  if (!Number.isFinite(normalized)) return fallback;
-  return Math.max(0.2, Math.min(0.9, normalized));
 }
 
 export function inspectTokenEstimate(text: string): TokenEstimateDetail {
@@ -100,11 +92,8 @@ export function computePromptBudget(
   budget: ModelContextBudget = {},
   toolSchemaReserveTokens = DEFAULT_TOOL_SCHEMA_RESERVE_TOKENS
 ): PromptBudget {
-  const contextWindowTokens = clampInteger(
-    budget.contextWindowTokens ?? settings.contextWindowTokens,
-    DEFAULT_CONTEXT_WINDOW_TOKENS,
-    8_192,
-    10_000_000
+  const contextWindowTokens = normalizeContextWindowTokens(
+    isContextWindowPreset(budget.contextWindowTokens) ? budget.contextWindowTokens : settings.contextWindowTokens,
   );
   const reservedOutputTokens = clampInteger(
     budget.reservedOutputTokens ?? settings.reservedOutputTokens,
@@ -118,22 +107,14 @@ export function computePromptBudget(
     256,
     Math.max(512, Math.floor(contextWindowTokens * 0.2))
   );
-  const maxInputTokens = Math.max(2_048, contextWindowTokens - reservedOutputTokens - safeToolSchemaReserve);
-  const autoCompactTokenLimit = clampInteger(
-    budget.autoCompactTokenLimit ?? settings.autoCompactTokenLimit,
-    Math.floor(maxInputTokens * DEFAULT_AUTO_COMPACT_RATIO),
-    1_024,
-    maxInputTokens
-  );
-  const compactionTargetRatio = clampRatio(budget.compactionTargetRatio ?? settings.compactionTargetRatio);
-  const compactionTargetTokens = Math.max(768, Math.min(autoCompactTokenLimit, Math.floor(maxInputTokens * compactionTargetRatio)));
+  const maxInputTokens = contextWindowTokens;
 
   return {
     contextWindowTokens,
     reservedOutputTokens,
     toolSchemaReserveTokens: safeToolSchemaReserve,
-    autoCompactTokenLimit,
-    compactionTargetTokens,
+    autoCompactTokenLimit: contextWindowTokens,
+    compactionTargetTokens: contextWindowTokens,
     maxInputTokens,
   };
 }

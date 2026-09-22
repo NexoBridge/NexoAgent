@@ -25,7 +25,8 @@ import {
   DEFAULT_PLANNER_EXECUTOR_QUALITY_THRESHOLD,
   normalizeAiRequestTimeoutMs,
 } from "../../src/shared/settings";
-import { extractAndStore, recallMemory } from "../memory";
+import { CONTEXT_ARCHIVE_SOURCE } from "../../src/shared/context-window";
+import { extractAndStore, recallMemory, storeMemory } from "../memory";
 import { loadAttachmentContext } from "./attachments";
 import { AI_REQUEST_MAX_RETRIES, streamWithAiRequestRetries } from "./ai-retry";
 import { circuitBreakerInfoFromDecision, createAgentLoopCircuitBreaker } from "./agent-loop-circuit-breaker";
@@ -47,7 +48,7 @@ import { getWebSettings } from "./settings";
 import { getEnabledSkillInstructions } from "./skills";
 import { computePromptBudget, estimateTokens } from "./token-budget";
 import { classifyPlannerExecutorRoute, evaluateExecutorQuality } from "./planner-executor-routing";
-import { buildBudgetAwareConversationContext, formatCurrentSessionContextForRecall } from "./conversation-context";
+import { buildBudgetAwareConversationContext, formatCurrentSessionContextForRecall, type ContextArchiveChunk } from "./conversation-context";
 import { normalizeToolOutputForModel, type BoundedToolOutput } from "./tool-output";
 import { getAllEnabledToolDefs, toLcTool } from "./tools/registry";
 import { extractArtifactsFromToolOutput } from "./tools/multimodal";
@@ -434,7 +435,7 @@ function buildContextOverflowMessage(
     "上下文过大，已停止本次模型请求，避免静默截断对话、附件或工具输出。",
     `原因：${cause}`,
     `估算输入 tokens：${formatCount(estimatedPromptTokens)}；当前模型输入预算：${formatCount(budgetConfig.maxInputTokens)}；上下文窗口：${formatCount(budgetConfig.contextWindowTokens)}；预留输出：${formatCount(budgetConfig.reservedOutputTokens)}；工具定义预留：${formatCount(budgetConfig.toolSchemaReserveTokens)}。`,
-    "请显式压缩/删减当前内容，或切换到更大上下文模型后重试。",
+    "当前内容超过所选上下文窗口。",
   ].join("\n");
 }
 
@@ -442,13 +443,10 @@ function describeContextOverflowCause(
   conversationContext: Awaited<ReturnType<typeof buildBudgetAwareConversationContext>>,
   budgetConfig: ReturnType<typeof computePromptBudget>,
 ) {
-  if (conversationContext.latestRawMessageTokens > Math.floor(budgetConfig.maxInputTokens * 0.8)) {
-    return `当前这次发送的内容本身过大（约 ${formatCount(conversationContext.latestRawMessageTokens)} tokens，${formatCount(conversationContext.latestRawMessageChars)} 字符），自动压缩只能压缩更早的历史对话，不能安全压缩最新用户请求。`;
+  if (conversationContext.latestRawMessageTokens > Math.floor(budgetConfig.contextWindowTokens * 0.8)) {
+    return `当前这次发送的内容本身过大（约 ${formatCount(conversationContext.latestRawMessageTokens)} tokens，${formatCount(conversationContext.latestRawMessageChars)} 字符），已经超过所选上下文窗口。`;
   }
-  if (!conversationContext.compacted && conversationContext.originalEstimatedPromptTokens >= budgetConfig.autoCompactTokenLimit) {
-    return "已达到压缩阈值，但可压缩的历史消息不足；需要删减当前内容或分批发送。";
-  }
-  return "完整当前会话、附件、记忆、知识库上下文或系统提示已经超过模型可用输入窗口。";
+  return "归档更早对话之后，当前内容仍然超过所选上下文窗口。";
 }
 
 function buildBrowserSurfacePrompt(surface: ConversationSurface) {
@@ -1378,7 +1376,7 @@ export async function streamFromLLM(
     "When the current session established a target such as admin, client, server, management console, or a specific page, keep using that target for follow-up requests unless the user explicitly switches it.",
     "Use tools when they are helpful.",
     "Never claim that you clicked, navigated, refreshed, submitted, requested, queried, read, wrote, ran, verified, or inspected something unless an actual tool result in the current turn or retained context proves it. If no tool was called, describe the next step or limitation instead of reporting it as completed.",
-    "When summarizing or continuing from compacted context, distinguish completed tool-backed actions from plans, intentions, assumptions, and user requests.",
+    "When earlier conversation has been archived into durable memory, use recall_memory to retrieve it. Do not assume omitted live history was compressed into a summary.",
     "Tool results are passed through to the model without application-level truncation. If a result is too large for the model context, report the limit clearly instead of pretending the missing content was inspected.",
     activeSupportsVision
       ? "When recent user messages include image attachments, up to a small number of recent images may be included directly in this model request. Inspect those attached images directly when they are present."
@@ -1412,34 +1410,32 @@ export async function streamFromLLM(
     roleConfigs.enabled
       ? "When new tool results or data materially change the next strategy, provide a concise stage summary and stop independent guessing so the primary planner can replan."
       : "",
-    `Resolved context budget: window=${budgetConfig.contextWindowTokens}, input=${budgetConfig.maxInputTokens}, compact=${budgetConfig.autoCompactTokenLimit}, source=${resolvedBudget.contextWindowSource ?? "default"}.`,
+    `Resolved context budget: window=${budgetConfig.contextWindowTokens}, input=${budgetConfig.maxInputTokens}, source=${resolvedBudget.contextWindowSource ?? "default"}.`,
   ].filter((part) => part.trim()).join("\n");
 
-  const summarizeOlderContext = async (transcript: string) => {
-    const summaryInstruction = [
-      "Summarize the earlier conversation so a new model call can continue with less context.",
-      "Preserve user preferences, project constraints, decisions already made, pending tasks, file paths, commands, tool results, errors, attempts, and unfinished work.",
-      "Treat tool results as the only proof that a browser action, shell command, file edit, network request, or verification actually happened.",
-      "If the transcript only contains a plan, intention, or assistant claim without a corresponding tool result, record it as unverified or planned rather than completed.",
-      "Do not invent details or convert planned work into finished work. Keep the summary concise but operational.",
-    ].join("\n");
-
-    const summaryLlm = createLangChainChatModel(activeConfig, effectiveApiKey, settings, {
-      temperature: 0,
-      maxTokens: 900,
-      streaming: false,
-    });
-    const response = await summaryLlm.invoke([
-      new SystemMessage(summaryInstruction),
-      new HumanMessage(transcript),
-    ], { signal: getRunAbortSignal(requestId) } as any);
-    return messageContentToText(response.content).trim() || JSON.stringify(response.content);
+  const archiveContextChunk = async (chunk: ContextArchiveChunk) => {
+    try {
+      const id = await storeMemory("daily", chunk.content, {
+        sessionId: session.id,
+        embeddingSettings: memoryEmbeddingSettings,
+        metadata: {
+          source: CONTEXT_ARCHIVE_SOURCE,
+          sessionId: chunk.sessionId,
+          startIndex: chunk.startIndex,
+          endIndex: chunk.endIndex,
+          ...(chunk.legacyThreadSummary ? { legacyThreadSummary: true } : {}),
+        },
+      });
+      return Boolean(id);
+    } catch (error) {
+      serverLog(`ERROR Context archive failed ${requestLogBase} error=${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
   };
 
   const conversationContext = await buildBudgetAwareConversationContext(
-    settings,
     session,
-    summarizeOlderContext,
+    archiveContextChunk,
     [
       { key: "system", label: "System prompt", content: stableSystemPrompt },
       { key: "runtime", label: "Current runtime context", content: dynamicRuntimePrompt },
@@ -1485,9 +1481,6 @@ export async function streamFromLLM(
 
   const lcMessages: BaseMessage[] = normalizeBaseMessagesForStrictChatTransports([
     buildCacheableSystemMessage(stableSystemPrompt, anthropicCacheBreakpoint === "system"),
-    ...(conversationContext.compactedSummary
-      ? [new SystemMessage(`Earlier conversation summary from automatic context compaction:\n${conversationContext.compactedSummary}`)]
-      : []),
     ...priorRuntimeMessages,
     ...runtimeContextMessages,
     ...dynamicAuxiliaryMessages,
@@ -1524,16 +1517,15 @@ export async function streamFromLLM(
       `toolSchemaHash=${toolSchemaHash}`,
       `anthropicCachePrefixHash=${anthropicCachePrefixHash}`,
       `toolNames=${enabledToolDefs.map((tool) => tool.name).join(",") || "none"}`,
-      `compacted=${conversationContext.compacted}`,
-      `compactionPasses=${conversationContext.compactionPasses}`,
-      `compactedMessages=${conversationContext.compactedMessageCount}`,
+      `archived=${conversationContext.archived}`,
+      `archiveFailed=${conversationContext.archiveFailed}`,
+      `archivedMessages=${conversationContext.compactedMessageCount}`,
       `summaryMessages=${conversationContext.summaryMessageCount}`,
       `recentMessages=${conversationContext.recentRawMessageCount}`,
       `originalEstimatedPromptTokens=${conversationContext.originalEstimatedPromptTokens}`,
       `estimatedPromptTokens=${conversationContext.estimatedPromptTokens}`,
       `runtimePromptTokens=${initialPromptTokens}`,
-      `autoCompactTokenLimit=${budgetConfig.autoCompactTokenLimit}`,
-      `compactionTargetTokens=${budgetConfig.compactionTargetTokens}`,
+      `contextWindowTokens=${budgetConfig.contextWindowTokens}`,
       `latestMessageTokens=${conversationContext.latestRawMessageTokens}`,
       `latestMessageChars=${conversationContext.latestRawMessageChars}`,
       `promptCacheKey=${openAiPromptCacheOptions.promptCacheKey ?? "off"}`,
@@ -1541,6 +1533,29 @@ export async function streamFromLLM(
       `anthropicCacheBreakpoint=${anthropicCacheBreakpoint}`,
     ].join(" "),
   );
+  if (conversationContext.archiveFailed) {
+    const content = "上下文归档失败，已停止本次模型请求。更早的对话还没有写入本地记忆，因此没有继续发送。";
+    serverLog(
+      [
+        `ERROR AI run precondition failed ${requestLogBase}`,
+        "reason=context_archive_failed",
+        `archivedMessageCount=${conversationContext.archivedMessageCount}`,
+      ].join(" "),
+    );
+    return buildDoneEvent(requestId, {
+      type: "done",
+      content,
+      status: "failed",
+      stopReason: "runtime_error",
+      routing: routingMetadata,
+      contextBudget: {
+        contextWindowTokens: budgetConfig.contextWindowTokens,
+        maxInputTokens: budgetConfig.maxInputTokens,
+        estimatedPromptTokens: initialPromptTokens,
+        source: resolvedBudget.contextWindowSource,
+      },
+    });
+  }
   if (initialPromptTokens > budgetConfig.maxInputTokens) {
     const content = buildContextOverflowMessage(
       initialPromptTokens,
@@ -1678,7 +1693,7 @@ export async function streamFromLLM(
         contextOverflowContent = buildContextOverflowMessage(
           stepPromptTokens,
           budgetConfig,
-          "完整历史或工具输出已经超过下一次模型调用的可用输入窗口",
+          "当前内容超过所选上下文窗口",
         );
         serverLog(
           [

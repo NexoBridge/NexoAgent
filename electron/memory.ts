@@ -16,6 +16,7 @@ import {
   providerConnectionAllowsEmptyApiKey,
   resolveProviderSdkApiKey,
 } from "../src/shared/providers";
+import { isContextWindowArchiveMetadata } from "../src/shared/context-window";
 import type { AgentSettings } from "../src/shared/types";
 import { resolveCapabilityModelConfig } from "./server/model-runtime";
 import {
@@ -1373,7 +1374,7 @@ export async function consolidateDreamForDay(
 
   await getDb();
   const sourceMemories = allRows({ dayKey: normalized, kinds: ["daily", "script"] }).filter(
-    (entry) => entry.kind !== "dream"
+    (entry) => entry.kind !== "dream" && !isContextWindowArchiveMetadata(entry.metadata)
   );
   if (!sourceMemories.length) return { ok: false, dayKey: normalized, reason: "no_source_memories" };
 

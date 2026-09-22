@@ -7,6 +7,7 @@ import type { Application } from "express";
 import { randomBytes } from "node:crypto";
 import { createExpressApp } from "./server/index";
 import { dispatchDesktopApiRequest } from "./server/internal-api";
+import { normalizeContextWindowTokens } from "../src/shared/context-window";
 import { applyAgentSettings } from "./server/settings";
 import { applyWebSafeModeSettingsUpdate } from "./server/web-safe-mode-auth";
 import { DATA_DIR, LOG_FILE, SETTINGS_FILE } from "./server/config";
@@ -129,6 +130,7 @@ function normalizeSettingsShape<T extends Partial<AgentSettings>>(settings: T): 
     providerName: normalizeServiceProviderName(settings.providerName, apiBase, providerId) || getDefaultServiceProviderName(providerId),
     apiBase,
     aiRequestTimeoutMs: normalizeAiRequestTimeoutMs(settings.aiRequestTimeoutMs),
+    contextWindowTokens: normalizeContextWindowTokens(settings.contextWindowTokens),
   }));
 }
 

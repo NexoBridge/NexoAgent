@@ -9,6 +9,7 @@ import {
   normalizeServiceProviderName,
   providerConnectionAllowsEmptyApiKey,
 } from "../../src/shared/providers";
+import { normalizeContextWindowTokens } from "../../src/shared/context-window";
 import { MODEL_CAPABILITIES, type DiscoveredModel, type ModelCapability, type ModelProfile, type ProviderId, type ThinkingEffort } from "../../src/shared/types";
 import { DATA_DIR, MODEL_PROFILES_FILE } from "./config";
 import { deleteStoredModelContextCacheEntry, inferBudgetFromProviderMetadata, isExplicitProfileContextBudget, resolveModelContextBudgetWithLookup, resolveStoredModelContextBudget, upsertStoredModelContextCacheEntry } from "./model-context";
@@ -155,7 +156,11 @@ function normalizeProfile(profile: Partial<ModelProfile> & Pick<ModelProfile, "n
     thinkingEffort: normalizeThinkingEffort(profile.thinkingEffort ?? existing?.thinkingEffort, "high"),
     description: profile.description?.trim() || existing?.description || "",
     enabled: profile.enabled ?? existing?.enabled ?? true,
-    contextWindowTokens: profile.contextWindowTokens ?? existing?.contextWindowTokens,
+    contextWindowTokens: profile.contextWindowTokens != null
+      ? normalizeContextWindowTokens(profile.contextWindowTokens)
+      : existing?.contextWindowTokens != null
+        ? normalizeContextWindowTokens(existing.contextWindowTokens)
+        : undefined,
     reservedOutputTokens: profile.reservedOutputTokens ?? existing?.reservedOutputTokens,
     autoCompactTokenLimit: profile.autoCompactTokenLimit ?? existing?.autoCompactTokenLimit,
     compactionTargetRatio: profile.compactionTargetRatio ?? existing?.compactionTargetRatio,
@@ -271,7 +276,9 @@ export async function saveModelProfile(profile: Partial<ModelProfile> & Pick<Mod
 
   if (!hasExplicitBudget) {
     const keepExistingExplicitBudget = !clearsExplicitBudget && existing && isExplicitProfileContextBudget(existing);
-    normalized.contextWindowTokens = keepExistingExplicitBudget ? existing.contextWindowTokens : undefined;
+    normalized.contextWindowTokens = keepExistingExplicitBudget
+      ? normalizeContextWindowTokens(existing.contextWindowTokens)
+      : undefined;
     normalized.reservedOutputTokens = keepExistingExplicitBudget ? existing.reservedOutputTokens : undefined;
     normalized.autoCompactTokenLimit = keepExistingExplicitBudget ? existing.autoCompactTokenLimit : undefined;
     normalized.compactionTargetRatio = keepExistingExplicitBudget ? existing.compactionTargetRatio : undefined;
