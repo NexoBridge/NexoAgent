@@ -117,12 +117,12 @@ const defaultSettings: AgentSettings = {
   hasApiKey: false,
   model: "gpt-4o-mini",
   temperature: 0.4,
-  contextWindowTokens: 128_000,
-  reservedOutputTokens: 8_192,
-  autoCompactTokenLimit: 96_000,
+  contextWindowTokens: 256_000,
+  reservedOutputTokens: 24_576,
+  autoCompactTokenLimit: 180_000,
   compactionTargetRatio: 0.6,
   contextWindowSource: "default",
-  contextWindowSourceDetail: "client-default",
+  contextWindowSourceDetail: "unknown-model-default-256k",
   maxContextTurns: 12,
   enableContextCompaction: true,
   shellCommandTimeoutMs: 0,
@@ -346,7 +346,7 @@ export const useChatStore = create<ChatStore>((set, get) => {
         id: assistantId,
         role: "assistant",
         content: "",
-        createdAt: new Date().toISOString(),
+        createdAt: userMessage.createdAt,
         status: "sending",
       };
 
@@ -441,17 +441,15 @@ export const useChatStore = create<ChatStore>((set, get) => {
         }
 
         if (event.type === "status") {
-          flushPendingTokens();
           const content = String(event.content ?? "").trim();
-          if (!content) return;
-          const tone = event.tone === "warning" || event.tone === "error" ? event.tone : "info";
+          const tone = event.tone === "warning" || event.tone === "error" ? event.tone : undefined;
+          if (!content || !tone) return;
+          flushPendingTokens();
           const notice: SharedMessageBlock = { type: "notice", content, tone };
-          set((state) => ({
-            messageBlocks: {
-              ...state.messageBlocks,
-              [serverTurnId]: [...(state.messageBlocks[serverTurnId] ?? []), notice],
-            },
-          }));
+          set((state) => ({ messageBlocks: {
+            ...state.messageBlocks,
+            [serverTurnId]: [...(state.messageBlocks[serverTurnId] ?? []), notice],
+          } }));
           return;
         }
 

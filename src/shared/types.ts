@@ -21,6 +21,8 @@ export interface ModelRoutingUsage {
   completionTokens?: number;
   totalTokens?: number;
   cachedTokens?: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
 }
 
 export interface ModelRoutingTraceStep {
@@ -518,6 +520,8 @@ export interface ChatMessage {
       completionTokens?: number;
       totalTokens?: number;
       cachedTokens?: number;
+      cacheCreationTokens?: number;
+      cacheReadTokens?: number;
     };
     toolCalls?: ToolCallTrace[];
     messageBlocks?: MessageBlock[];

@@ -97,6 +97,8 @@ export function registerChatRoutes(app: Application, ctx: ServerContext) {
             `promptTokens=${doneEvent.usage?.promptTokens ?? ""}`,
             `completionTokens=${doneEvent.usage?.completionTokens ?? ""}`,
             `cachedTokens=${doneEvent.usage?.cachedTokens ?? ""}`,
+            `cacheCreationTokens=${doneEvent.usage?.cacheCreationTokens ?? ""}`,
+            `cacheReadTokens=${doneEvent.usage?.cacheReadTokens ?? ""}`,
           ].join(" "),
         );
         sessionRef.messages.push({

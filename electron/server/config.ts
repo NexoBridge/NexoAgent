@@ -59,6 +59,7 @@ export const DATA_DIR = resolveDataDir();
 export const LOG_DIR = path.join(DATA_DIR, "logs");
 export const SESSIONS_FILE = path.join(DATA_DIR, "sessions.json");
 export const KNOWLEDGE_DIR = path.join(DATA_DIR, "knowledge");
+export const KNOWLEDGE_LEXICAL_INDEX_FILE = path.join(DATA_DIR, "knowledge-lexical-index.json");
 export const UPLOADS_DIR = path.join(DATA_DIR, "uploads");
 export const LOG_FILE = path.join(LOG_DIR, "app.log");
 export const TOOL_SETTINGS_FILE = path.join(DATA_DIR, "tools.json");

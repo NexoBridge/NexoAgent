@@ -27,8 +27,8 @@ export interface ResolveModelContextOptions {
   settings?: Partial<AgentSettings> | null;
 }
 
-const DEFAULT_CONTEXT_WINDOW = 128_000;
-const DEFAULT_RESERVED_OUTPUT = 8_192;
+const DEFAULT_CONTEXT_WINDOW = 256_000;
+const DEFAULT_RESERVED_OUTPUT = 24_576;
 const DEFAULT_TARGET_RATIO = 0.6;
 const OLLAMA_METADATA_LOOKUP_TIMEOUT_MS = 3_000;
 
@@ -37,7 +37,7 @@ const CONTEXT_DICTIONARY: ContextDictionaryEntry[] = [
   { pattern: /\bgpt-5\.4(?:\b|-pro\b)/i, contextWindowTokens: 1_050_000, reservedOutputTokens: 32_768, autoCompactTokenLimit: 735_000, compactionTargetRatio: 0.55, detail: "OpenAI GPT-5.4 / GPT-5.4 Pro" },
   { pattern: /\bgpt-5\.5\b/i, contextWindowTokens: 1_000_000, reservedOutputTokens: 32_768, autoCompactTokenLimit: 700_000, compactionTargetRatio: 0.55, detail: "OpenAI GPT-5.5" },
   { pattern: /\bgpt-5(?:\.\d+)?-chat(?:-latest)?\b/i, contextWindowTokens: 128_000, reservedOutputTokens: 16_384, autoCompactTokenLimit: 96_000, compactionTargetRatio: 0.6, detail: "OpenAI GPT-5 chat bridge models" },
-  { pattern: /\bgpt-5(?:\.[12])?(?:-mini|-nano|-codex(?:-max)?)?\b/i, contextWindowTokens: 400_000, reservedOutputTokens: 32_768, autoCompactTokenLimit: 280_000, compactionTargetRatio: 0.55, detail: "OpenAI GPT-5 family" },
+  { pattern: /\bgpt-5(?:\.[12])?(?:-mini|-nano|-codex(?:-max)?)?(?![.\d])\b/i, contextWindowTokens: 400_000, reservedOutputTokens: 32_768, autoCompactTokenLimit: 280_000, compactionTargetRatio: 0.55, detail: "OpenAI GPT-5 family" },
   { pattern: /\bgpt-4\.1(-mini|-nano)?\b/i, contextWindowTokens: 1_000_000, reservedOutputTokens: 32_768, autoCompactTokenLimit: 700_000, compactionTargetRatio: 0.55, detail: "OpenAI GPT-4.1 family" },
   { pattern: /\bgpt-4o(-mini)?\b/i, contextWindowTokens: 128_000, reservedOutputTokens: 16_384, autoCompactTokenLimit: 96_000, compactionTargetRatio: 0.6, detail: "OpenAI GPT-4o family" },
   { pattern: /\bo[134]\b/i, contextWindowTokens: 200_000, reservedOutputTokens: 32_768, autoCompactTokenLimit: 140_000, compactionTargetRatio: 0.55, detail: "OpenAI reasoning family" },
@@ -137,6 +137,11 @@ function formatLogValue(value: unknown) {
 function isFallbackDefaultBudget(budget: Partial<ModelContextBudget> | null | undefined) {
   if (!budget) return false;
   return normalizeSource(budget.contextWindowSource) === "default";
+}
+
+function isRecomputedBudget(budget: Partial<ModelContextBudget> | null | undefined) {
+  const source = normalizeSource(budget?.contextWindowSource);
+  return source === "lookup" || source === "dictionary";
 }
 
 function isOllamaApiBase(apiBase: unknown) {
@@ -285,7 +290,7 @@ export async function getStoredModelContextCacheEntry(providerId: string | undef
   const key = cacheKey(providerId, model);
   const entries = await readContextCache();
   const entry = entries.find((item) => item.key === key) ?? null;
-  return entry && !isFallbackDefaultBudget(entry) ? entry : null;
+  return entry && !isFallbackDefaultBudget(entry) && !isRecomputedBudget(entry) ? entry : null;
 }
 
 export async function upsertStoredModelContextCacheEntry(entry: StoredModelContextCacheEntry) {
@@ -293,7 +298,7 @@ export async function upsertStoredModelContextCacheEntry(entry: StoredModelConte
   const key = cacheKey(entry.providerId, entry.model);
   const next = entries.filter((item) => item.key !== key);
 
-  if (!sanitizePositiveInteger(entry.contextWindowTokens) || isFallbackDefaultBudget(entry)) {
+  if (!sanitizePositiveInteger(entry.contextWindowTokens) || isFallbackDefaultBudget(entry) || isRecomputedBudget(entry)) {
     await writeContextCache(next.sort((a, b) => a.key.localeCompare(b.key)));
     return null;
   }
@@ -461,13 +466,25 @@ export async function resolveStoredModelContextBudget(options: ResolveModelConte
     }
   }
 
+  const settingsSource = normalizeSource(settings?.contextWindowSource);
+  const useExplicitSettingsBudget = settingsSource === "user" || settingsSource === "profile";
+  const contextWindowTokens = useExplicitSettingsBudget
+    ? sanitizePositiveInteger(settings?.contextWindowTokens) ?? DEFAULT_CONTEXT_WINDOW
+    : DEFAULT_CONTEXT_WINDOW;
+
   return mergeBudgets({
-    contextWindowTokens: settings?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW,
-    reservedOutputTokens: settings?.reservedOutputTokens ?? DEFAULT_RESERVED_OUTPUT,
-    autoCompactTokenLimit: settings?.autoCompactTokenLimit ?? Math.floor((settings?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW) * 0.75),
-    compactionTargetRatio: settings?.compactionTargetRatio ?? DEFAULT_TARGET_RATIO,
+    contextWindowTokens,
+    reservedOutputTokens: useExplicitSettingsBudget
+      ? sanitizePositiveInteger(settings?.reservedOutputTokens) ?? defaultReservedOutputTokens(contextWindowTokens)
+      : DEFAULT_RESERVED_OUTPUT,
+    autoCompactTokenLimit: useExplicitSettingsBudget
+      ? sanitizePositiveInteger(settings?.autoCompactTokenLimit) ?? defaultAutoCompactTokenLimit(contextWindowTokens)
+      : defaultAutoCompactTokenLimit(contextWindowTokens),
+    compactionTargetRatio: useExplicitSettingsBudget
+      ? sanitizeRatio(settings?.compactionTargetRatio) ?? defaultCompactionTargetRatio(contextWindowTokens)
+      : defaultCompactionTargetRatio(contextWindowTokens),
     contextWindowSource: "default",
-    contextWindowSourceDetail: "fallback-default",
+    contextWindowSourceDetail: "unknown-model-default-256k",
     contextWindowResolvedAt: nowIso(),
   });
 }
@@ -540,27 +557,8 @@ export async function lookupModelContextBudgetWithLLM(
 }
 
 export async function resolveModelContextBudgetWithLookup(options: ResolveModelContextOptions = {}) {
-  const resolved = await resolveStoredModelContextBudget(options);
-  const profile = options.profile ?? null;
-  const discoveredModel = options.discoveredModel ?? null;
-  const settings = options.settings ?? null;
-  const providerId = profile?.providerId || settings?.providerId || undefined;
-  const model = profile?.model?.trim() || discoveredModel?.id?.trim() || settings?.model?.trim() || "";
-
-  if (resolved.contextWindowSource !== "default" || !model) {
-    return resolved;
-  }
-
-  const lookup = await lookupModelContextBudgetWithLLM(model, providerId, settings);
-  if (!lookup?.contextWindowTokens) {
-    return resolved;
-  }
-
-  await upsertStoredModelContextCacheEntry({
-    key: cacheKey(providerId, model),
-    model,
-    providerId,
-    ...lookup,
-  });
-  return lookup;
+  // Unknown models use the deterministic 256K fallback. Asking another model
+  // to guess this value produced plausible-looking but unsafe budgets and made
+  // the result depend on whichever primary model happened to answer first.
+  return resolveStoredModelContextBudget(options);
 }

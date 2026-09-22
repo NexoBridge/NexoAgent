@@ -1,4 +1,4 @@
-﻿import React, { useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -39,6 +39,24 @@ interface ThinkingSegment {
   type: "text" | "thinking";
   content: string;
 }
+
+const StreamingElapsed: React.FC<{ startedAt: string; hasOutput: boolean; t: TranslationFn }> = ({ startedAt, hasOutput, t }) => {
+  const [elapsedSeconds, setElapsedSeconds] = useState(() => Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)));
+
+  useEffect(() => {
+    const update = () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000)));
+    update();
+    const timer = window.setInterval(update, 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  return (
+    <div className="message-bubble__stream-status">
+      <span className="message-bubble__stream-dot" />
+      <span>{hasOutput ? t("generatingResponse") : t("waitingForModel")} · {elapsedSeconds}s</span>
+    </div>
+  );
+};
 
 function stripDsmlArtifacts(content: string) {
   let visibleText = content;
@@ -269,7 +287,15 @@ function formatRoutingUsage(step: ModelRoutingMetadata["steps"][number]) {
   const usage = step.usage;
   if (!usage) return "";
   const total = usage.totalTokens ?? ((usage.promptTokens ?? 0) + (usage.completionTokens ?? 0));
-  return total ? `${total} tokens` : "";
+  const parts = total ? [`${total.toLocaleString()} tokens`] : [];
+  const hasCacheDetail = usage.cacheCreationTokens !== undefined || usage.cacheReadTokens !== undefined;
+  if (hasCacheDetail) {
+    parts.push(`cache write ${(usage.cacheCreationTokens ?? 0).toLocaleString()}`);
+    parts.push(`read ${(usage.cacheReadTokens ?? 0).toLocaleString()}`);
+  } else if (usage.cachedTokens) {
+    parts.push(`cache ${usage.cachedTokens.toLocaleString()}`);
+  }
+  return parts.join(" · ");
 }
 
 const RoutingTraceBlock: React.FC<{ routing: ModelRoutingMetadata }> = ({ routing }) => {
@@ -479,6 +505,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
   }, [isUser, message.attachments, visibleContent]);
   const statusMeta = !isUser ? getMessageStatusMeta(message.status, t) : null;
   const isUndone = message.status === "undone";
+  const hasStreamingOutput = Boolean(safeContent.trim() || effectiveBlocks?.length || effectiveToolCalls.length || normalizedAttachments.length);
 
   const bubbleClass = [
     "message-bubble__bubble",
@@ -494,6 +521,7 @@ const MessageBubbleComponent: React.FC<Props> = ({ message, streaming, toolCalls
         size={32}
       />
       <div className="message-bubble__content">
+        {!isUser && streaming ? <StreamingElapsed startedAt={message.createdAt} hasOutput={hasStreamingOutput} t={t} /> : null}
         {normalizedAttachments.map((attachment, index) => (
           <AttachmentCard
             key={`${attachment.url}-${index}`}

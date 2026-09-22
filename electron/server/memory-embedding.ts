@@ -8,7 +8,9 @@ import { findStoredModelProfileByCapability } from "./model-profiles";
 export type MemoryEmbeddingSettings = Partial<Pick<
   AgentSettings,
   "providerId" | "providerName" | "apiBase" | "apiKey" | "model" | "temperature"
->>;
+>> & {
+  semanticEnabled?: boolean;
+};
 
 export async function resolveMemoryEmbeddingSettings(
   fallback: MemoryEmbeddingSettings = {},
@@ -24,6 +26,7 @@ export async function resolveMemoryEmbeddingSettings(
       apiKey: profile.apiKey || "",
       model: profile.model,
       temperature: profile.temperature ?? fallback.temperature ?? 0,
+      semanticEnabled: true,
     };
   }
 
@@ -36,5 +39,8 @@ export async function resolveMemoryEmbeddingSettings(
   return {
     ...fallback,
     providerName,
+    // Lexical retrieval remains available without a dedicated embedding model.
+    // Do not infer an embedding model from the active chat model here.
+    semanticEnabled: false,
   };
 }

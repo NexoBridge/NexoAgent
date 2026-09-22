@@ -267,15 +267,17 @@ export async function saveModelProfile(profile: Partial<ModelProfile> & Pick<Mod
   const existing = existingIndex >= 0 ? profiles[existingIndex] : undefined;
   const normalized = normalizeProfile(profile, existing);
   const hasExplicitBudget = isExplicitProfileContextBudget(profile);
+  const clearsExplicitBudget = profile.contextWindowSource === "default";
 
   if (!hasExplicitBudget) {
-    normalized.contextWindowTokens = existing && isExplicitProfileContextBudget(existing) ? existing.contextWindowTokens : undefined;
-    normalized.reservedOutputTokens = existing && isExplicitProfileContextBudget(existing) ? existing.reservedOutputTokens : undefined;
-    normalized.autoCompactTokenLimit = existing && isExplicitProfileContextBudget(existing) ? existing.autoCompactTokenLimit : undefined;
-    normalized.compactionTargetRatio = existing && isExplicitProfileContextBudget(existing) ? existing.compactionTargetRatio : undefined;
-    normalized.contextWindowSource = existing && isExplicitProfileContextBudget(existing) ? existing.contextWindowSource : undefined;
-    normalized.contextWindowSourceDetail = existing && isExplicitProfileContextBudget(existing) ? existing.contextWindowSourceDetail : undefined;
-    normalized.contextWindowResolvedAt = existing && isExplicitProfileContextBudget(existing) ? existing.contextWindowResolvedAt : undefined;
+    const keepExistingExplicitBudget = !clearsExplicitBudget && existing && isExplicitProfileContextBudget(existing);
+    normalized.contextWindowTokens = keepExistingExplicitBudget ? existing.contextWindowTokens : undefined;
+    normalized.reservedOutputTokens = keepExistingExplicitBudget ? existing.reservedOutputTokens : undefined;
+    normalized.autoCompactTokenLimit = keepExistingExplicitBudget ? existing.autoCompactTokenLimit : undefined;
+    normalized.compactionTargetRatio = keepExistingExplicitBudget ? existing.compactionTargetRatio : undefined;
+    normalized.contextWindowSource = keepExistingExplicitBudget ? existing.contextWindowSource : undefined;
+    normalized.contextWindowSourceDetail = keepExistingExplicitBudget ? existing.contextWindowSourceDetail : undefined;
+    normalized.contextWindowResolvedAt = keepExistingExplicitBudget ? existing.contextWindowResolvedAt : undefined;
   }
 
   if (normalized.enabled && normalized.isPrimary) {

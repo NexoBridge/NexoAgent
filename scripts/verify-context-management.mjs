@@ -74,6 +74,51 @@ await cleanupCache();
 }
 
 {
+  const futureModel = findDictionaryBudget("gpt-5.6-luna");
+  assert.equal(futureModel, null);
+  const resolved = await resolveStoredModelContextBudget({
+    profile: { providerId: "openai-compatible", model: "gpt-5.6-luna" },
+  });
+  assert.equal(resolved.contextWindowTokens, 256_000);
+  assert.equal(resolved.reservedOutputTokens, 24_576);
+  assert.equal(resolved.autoCompactTokenLimit, 180_000);
+  assert.equal(resolved.contextWindowSource, "default");
+}
+
+{
+  const resolved = await resolveStoredModelContextBudget({
+    profile: { providerId: "openai-compatible", model: "gpt-5.6-sol" },
+    settings: {
+      model: "gpt-5.6-sol",
+      contextWindowTokens: 400_000,
+      reservedOutputTokens: 32_768,
+      autoCompactTokenLimit: 280_000,
+      contextWindowSource: "default",
+    },
+  });
+  assert.equal(resolved.contextWindowTokens, 256_000);
+  assert.equal(resolved.reservedOutputTokens, 24_576);
+  assert.equal(resolved.autoCompactTokenLimit, 180_000);
+}
+
+{
+  const resolved = await resolveStoredModelContextBudget({
+    profile: {
+      providerId: "openai-compatible",
+      model: "gpt-5.6-sol",
+      contextWindowTokens: 320_000,
+      reservedOutputTokens: 20_000,
+      autoCompactTokenLimit: 210_000,
+      contextWindowSource: "user",
+    },
+  });
+  assert.equal(resolved.contextWindowTokens, 320_000);
+  assert.equal(resolved.reservedOutputTokens, 20_000);
+  assert.equal(resolved.autoCompactTokenLimit, 210_000);
+  assert.equal(resolved.contextWindowSource, "user");
+}
+
+{
   const dictionary = findDictionaryBudget("llama-4-scout");
   assert.ok(dictionary);
   assert.equal(dictionary?.contextWindowTokens, 10_000_000);
@@ -99,8 +144,8 @@ await cleanupCache();
     providerId: "openai-compatible",
     contextWindowTokens: 65432,
     reservedOutputTokens: 4096,
-    contextWindowSource: "lookup",
-    contextWindowSourceDetail: "test-cache",
+    contextWindowSource: "provider",
+    contextWindowSourceDetail: "test-provider-cache",
     contextWindowResolvedAt: new Date().toISOString(),
   });
   const cached = await getStoredModelContextCacheEntry("openai-compatible", "custom-model-x");
@@ -116,16 +161,54 @@ await cleanupCache();
     key: "openai-compatible::unknown-fallback",
     model: "unknown-fallback",
     providerId: "openai-compatible",
-    contextWindowTokens: 128000,
-    reservedOutputTokens: 8192,
-    contextWindowSource: "default",
-    contextWindowSourceDetail: "fallback-default",
+    contextWindowTokens: 400000,
+    reservedOutputTokens: 32768,
+    autoCompactTokenLimit: 280000,
+    contextWindowSource: "lookup",
+    contextWindowSourceDetail: "legacy-model-guessed-budget",
     contextWindowResolvedAt: new Date().toISOString(),
   });
   const cached = await getStoredModelContextCacheEntry("openai-compatible", "unknown-fallback");
   assert.equal(cached, null);
   const rawCache = JSON.parse(await fs.readFile(MODEL_CONTEXT_CACHE_FILE, "utf8").catch(() => "[]"));
   assert.equal(rawCache.some((entry) => entry?.model === "unknown-fallback"), false);
+}
+
+{
+  await upsertStoredModelContextCacheEntry({
+    key: "openai-compatible::gpt-5.6-luna",
+    model: "gpt-5.6-luna",
+    providerId: "openai-compatible",
+    contextWindowTokens: 400000,
+    reservedOutputTokens: 32768,
+    autoCompactTokenLimit: 280000,
+    contextWindowSource: "dictionary",
+    contextWindowSourceDetail: "OpenAI GPT-5 family",
+    contextWindowResolvedAt: new Date().toISOString(),
+  });
+  const cached = await getStoredModelContextCacheEntry("openai-compatible", "gpt-5.6-luna");
+  assert.equal(cached, null);
+  const resolved = await resolveStoredModelContextBudget({
+    profile: { providerId: "openai-compatible", model: "gpt-5.6-luna" },
+  });
+  assert.equal(resolved.contextWindowTokens, 256_000);
+}
+
+{
+  await upsertStoredModelContextCacheEntry({
+    key: "openai-compatible::default-fallback",
+    model: "default-fallback",
+    providerId: "openai-compatible",
+    contextWindowTokens: 256000,
+    reservedOutputTokens: 24576,
+    contextWindowSource: "default",
+    contextWindowSourceDetail: "unknown-model-default-256k",
+    contextWindowResolvedAt: new Date().toISOString(),
+  });
+  const cached = await getStoredModelContextCacheEntry("openai-compatible", "default-fallback");
+  assert.equal(cached, null);
+  const rawCache = JSON.parse(await fs.readFile(MODEL_CONTEXT_CACHE_FILE, "utf8").catch(() => "[]"));
+  assert.equal(rawCache.some((entry) => entry?.model === "default-fallback"), false);
 }
 
 {

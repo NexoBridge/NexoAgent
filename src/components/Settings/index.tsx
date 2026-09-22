@@ -60,6 +60,13 @@ const CAPABILITY_COLORS: Record<ModelCapability, string> = {
 };
 
 const tokenCountFormatter = new Intl.NumberFormat("en-US");
+const UNKNOWN_MODEL_CONTEXT_WINDOW = 256_000;
+const UNKNOWN_MODEL_RESERVED_OUTPUT = 24_576;
+const UNKNOWN_MODEL_COMPACT_LIMIT = 180_000;
+
+type ModelProfileFormValues = ModelProfile & {
+  contextBudgetMode?: "auto" | "manual";
+};
 
 function formatTokenCount(value?: number) {
   return typeof value === "number" && Number.isFinite(value) ? tokenCountFormatter.format(value) : "-";
@@ -166,6 +173,15 @@ function buildUi(lang: "zh" | "en") {
     contextWindow: lang === "zh" ? "\u7a97\u53e3" : "Window",
     reservedOutput: lang === "zh" ? "\u9884\u7559\u8f93\u51fa" : "Reserve",
     compactLimit: lang === "zh" ? "\u538b\u7f29\u9608\u503c" : "Compact",
+    contextBudgetMode: lang === "zh" ? "\u4e0a\u4e0b\u6587\u9884\u7b97" : "Context Budget",
+    contextBudgetAuto: lang === "zh" ? "\u81ea\u52a8（\u672a\u77e5\u6a21\u578b 256K）" : "Auto (256K for unknown models)",
+    contextBudgetManual: lang === "zh" ? "\u624b\u52a8\u6307\u5b9a" : "Manual",
+    contextBudgetHelp: lang === "zh"
+      ? "\u81ea\u52a8\u6a21\u5f0f\u4f18\u5148\u4f7f\u7528\u63d0\u4f9b\u5546\u5143\u6570\u636e\u548c\u5df2\u77e5\u6a21\u578b\u5b57\u5178；\u65e0\u6cd5\u8bc6\u522b\u65f6\u9ed8\u8ba4 256K\u3002"
+      : "Auto uses provider metadata and the known-model dictionary first, then defaults unknown models to 256K.",
+    contextWindowRequired: lang === "zh" ? "\u8bf7\u8f93\u5165\u4e0a\u4e0b\u6587\u7a97\u53e3" : "Enter the context window.",
+    reservedOutputRequired: lang === "zh" ? "\u8bf7\u8f93\u5165\u9884\u7559\u8f93\u51fa" : "Enter the reserved output budget.",
+    compactLimitRequired: lang === "zh" ? "\u8bf7\u8f93\u5165\u538b\u7f29\u9608\u503c" : "Enter the compaction threshold.",
     thinking: lang === "zh" ? "\u6df1\u5ea6\u601d\u8003" : "Thinking",
     thinkingOn: lang === "zh" ? "\u5f00\u542f" : "On",
     thinkingOff: lang === "zh" ? "\u5173\u95ed" : "Off",
@@ -307,7 +323,7 @@ export const Settings: React.FC = () => {
   const [formKey, setFormKey] = useState(0);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<ModelProfile | null>(null);
-  const [profileForm] = Form.useForm<ModelProfile>();
+  const [profileForm] = Form.useForm<ModelProfileFormValues>();
   const [discovering, setDiscovering] = useState(false);
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
   const [refreshingContextProfileId, setRefreshingContextProfileId] = useState("");
@@ -315,6 +331,7 @@ export const Settings: React.FC = () => {
   const watchedProviderName = Form.useWatch("providerName", profileForm) as string | undefined;
   const watchedApiBase = Form.useWatch("apiBase", profileForm) as string | undefined;
   const watchedApiKey = Form.useWatch("apiKey", profileForm) as string | undefined;
+  const watchedContextBudgetMode = Form.useWatch("contextBudgetMode", profileForm) as "auto" | "manual" | undefined;
   const routingEnabled = Form.useWatch("plannerExecutorRoutingEnabled", form) === true;
   const safeModeEnabled = Form.useWatch(["webSafeMode", "enabled"], form) === true;
   const safeModeHasPassword = settings.webSafeMode?.hasPassword === true;
@@ -426,8 +443,9 @@ export const Settings: React.FC = () => {
       temperature: settings.temperature ?? 0,
       thinkingEnabled: true,
       thinkingEffort: "high",
+      contextBudgetMode: "auto",
       description: "",
-    } as Partial<ModelProfile>);
+    } as Partial<ModelProfileFormValues>);
     setDiscoveredModels([]);
     setProfileModalOpen(true);
   };
@@ -440,6 +458,7 @@ export const Settings: React.FC = () => {
       providerName: normalizeServiceProviderName(profile.providerName, profile.apiBase, profile.providerId),
       apiKey: "",
       capabilities: profile.capabilities?.length ? profile.capabilities : ["chat"],
+      contextBudgetMode: profile.contextWindowSource === "user" || profile.contextWindowSource === "profile" ? "manual" : "auto",
     });
     setDiscoveredModels([]);
     setProfileModalOpen(true);
@@ -480,23 +499,37 @@ export const Settings: React.FC = () => {
   };
 
   const saveProfile = async () => {
-    const values = await profileForm.validateFields();
-    const modelId = String(values.model ?? "").trim();
-    await apiPost<ModelProfile>("/api/model-profiles", {
-      ...editingProfile,
-      ...values,
-      name: String(values.name ?? "").trim() || modelId,
-      model: modelId,
-      providerName: normalizeServiceProviderName(values.providerName, String(values.apiBase ?? ""), values.providerId),
-      apiBase: String(values.apiBase ?? "").trim(),
-      apiKey: values.apiKey === SAVED_API_KEY_MASK ? "" : values.apiKey,
-      providerId: normalizeProviderId(values.providerId),
-    });
-    await loadModelProfiles();
-    setProfileModalOpen(false);
-    setEditingProfile(null);
-    profileForm.resetFields();
-    void messageApi.success(ui.profileSaved);
+    try {
+      const values = await profileForm.validateFields();
+      const modelId = String(values.model ?? "").trim();
+      const manualContextBudget = values.contextBudgetMode === "manual";
+      const { contextBudgetMode: _contextBudgetMode, ...profileValues } = values;
+      await apiPost<ModelProfile>("/api/model-profiles", {
+        ...editingProfile,
+        ...profileValues,
+        name: String(values.name ?? "").trim() || modelId,
+        model: modelId,
+        providerName: normalizeServiceProviderName(values.providerName, String(values.apiBase ?? ""), values.providerId),
+        apiBase: String(values.apiBase ?? "").trim(),
+        apiKey: values.apiKey === SAVED_API_KEY_MASK ? "" : values.apiKey,
+        providerId: normalizeProviderId(values.providerId),
+        contextWindowTokens: manualContextBudget ? values.contextWindowTokens : undefined,
+        reservedOutputTokens: manualContextBudget ? values.reservedOutputTokens : undefined,
+        autoCompactTokenLimit: manualContextBudget ? values.autoCompactTokenLimit : undefined,
+        compactionTargetRatio: manualContextBudget ? values.compactionTargetRatio ?? 0.55 : undefined,
+        contextWindowSource: manualContextBudget ? "user" : "default",
+        contextWindowSourceDetail: manualContextBudget ? "manual-profile-override" : undefined,
+        contextWindowResolvedAt: manualContextBudget ? new Date().toISOString() : undefined,
+      });
+      await loadModelProfiles();
+      setProfileModalOpen(false);
+      setEditingProfile(null);
+      profileForm.resetFields();
+      void messageApi.success(ui.profileSaved);
+    } catch (error) {
+      void messageApi.error(error instanceof Error ? error.message : "Failed to save model profile");
+      console.error("[settings] failed to save model profile:", error);
+    }
   };
 
   const deleteProfile = async (id: string) => {
@@ -571,6 +604,13 @@ export const Settings: React.FC = () => {
       capabilities: model.capabilities.length ? model.capabilities : ["chat"],
       thinkingEnabled: profileForm.getFieldValue("thinkingEnabled") ?? true,
       thinkingEffort: profileForm.getFieldValue("thinkingEffort") || "high",
+      ...(model.contextWindowTokens
+        ? {
+            contextWindowTokens: model.contextWindowTokens,
+            reservedOutputTokens: model.reservedOutputTokens,
+            autoCompactTokenLimit: model.autoCompactTokenLimit,
+          }
+        : {}),
       description: profileForm.getFieldValue("description") || (model.ownedBy ? ui.discoveredFrom(model.ownedBy) : ui.discoveredFrom("provider")),
     });
   };
@@ -1031,6 +1071,42 @@ export const Settings: React.FC = () => {
           <Form.Item name="description" label={ui.description} className="settings-page__modal-item">
             <Input.TextArea rows={2} />
           </Form.Item>
+          <div className="settings-page__thinking-panel">
+            <Form.Item
+              name="contextBudgetMode"
+              label={ui.contextBudgetMode}
+              tooltip={ui.contextBudgetHelp}
+              className="settings-page__modal-item"
+            >
+              <Select
+                options={[
+                  { value: "auto", label: ui.contextBudgetAuto },
+                  { value: "manual", label: ui.contextBudgetManual },
+                ]}
+                onChange={(mode) => {
+                  if (mode !== "manual") return;
+                  profileForm.setFieldsValue({
+                    contextWindowTokens: profileForm.getFieldValue("contextWindowTokens") || UNKNOWN_MODEL_CONTEXT_WINDOW,
+                    reservedOutputTokens: profileForm.getFieldValue("reservedOutputTokens") || UNKNOWN_MODEL_RESERVED_OUTPUT,
+                    autoCompactTokenLimit: profileForm.getFieldValue("autoCompactTokenLimit") || UNKNOWN_MODEL_COMPACT_LIMIT,
+                  });
+                }}
+              />
+            </Form.Item>
+            {watchedContextBudgetMode === "manual" ? (
+              <div className="settings-page__modal-grid">
+                <Form.Item name="contextWindowTokens" label={ui.contextWindow} rules={[{ required: true, message: ui.contextWindowRequired }]}>
+                  <InputNumber min={8_192} step={1_024} className="settings-page__full-width" />
+                </Form.Item>
+                <Form.Item name="reservedOutputTokens" label={ui.reservedOutput} rules={[{ required: true, message: ui.reservedOutputRequired }]}>
+                  <InputNumber min={1_024} step={1_024} className="settings-page__full-width" />
+                </Form.Item>
+                <Form.Item name="autoCompactTokenLimit" label={ui.compactLimit} rules={[{ required: true, message: ui.compactLimitRequired }]}>
+                  <InputNumber min={4_096} step={1_024} className="settings-page__full-width" />
+                </Form.Item>
+              </div>
+            ) : null}
+          </div>
         </Form>
       </Modal>
     </div>

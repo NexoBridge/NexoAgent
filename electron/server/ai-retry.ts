@@ -56,10 +56,32 @@ export async function* streamWithAiRequestRetries<T>(
   createStream: () => Promise<AsyncIterable<T>>,
   maxRetriesOrOptions: number | RetryOptions = AI_REQUEST_MAX_RETRIES,
 ): AsyncGenerator<T> {
-  const chunks = await collectStreamWithAiRequestRetries(createStream, maxRetriesOrOptions);
-  for (const chunk of chunks) {
-    yield chunk;
+  const { maxRetries, label, shouldRetry } = resolveRetryOptions(maxRetriesOrOptions, "AI stream request");
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+    let emittedChunks = 0;
+    try {
+      const stream = await createStream();
+      for await (const chunk of stream) {
+        emittedChunks += 1;
+        yield chunk;
+      }
+      if (attempt > 0) {
+        serverLog(`INFO ${label} succeeded on attempt ${attempt + 1}/${maxRetries + 1} after retry.`);
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      // Once anything has reached the UI, replaying the request would duplicate
+      // text/tool-call deltas. Retry only failures that occur before first byte.
+      if (emittedChunks > 0 || !shouldRetry(error)) throw error;
+      if (attempt < maxRetries) {
+        serverLog(`WARN ${label} failed before first chunk on attempt ${attempt + 1}/${maxRetries + 1}; retrying. ${errorMessage(error)}`);
+      }
+    }
   }
+  serverLog(`ERROR ${label} exhausted ${maxRetries + 1} attempt(s). ${toErrorLog(lastError)}`);
+  throw errorAfterRetries(lastError, maxRetries + 1);
 }
 
 export async function collectStreamWithAiRequestRetries<T>(

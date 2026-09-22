@@ -3,7 +3,7 @@ import { ChatAnthropic } from "@langchain/anthropic";
 import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
 import type { AIMessageChunk } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   getDefaultServiceProviderName,
   normalizeServiceProviderName,
@@ -27,7 +27,7 @@ import {
 } from "../../src/shared/settings";
 import { extractAndStore, recallMemory } from "../memory";
 import { loadAttachmentContext } from "./attachments";
-import { AI_REQUEST_MAX_RETRIES, collectStreamWithAiRequestRetries } from "./ai-retry";
+import { AI_REQUEST_MAX_RETRIES, streamWithAiRequestRetries } from "./ai-retry";
 import { circuitBreakerInfoFromDecision, createAgentLoopCircuitBreaker } from "./agent-loop-circuit-breaker";
 import { retrieveKnowledgeContextWithSources } from "./knowledge";
 import { resolveMemoryEmbeddingSettings } from "./memory-embedding";
@@ -51,6 +51,7 @@ import { buildBudgetAwareConversationContext, formatCurrentSessionContextForReca
 import { normalizeToolOutputForModel, type BoundedToolOutput } from "./tool-output";
 import { getAllEnabledToolDefs, toLcTool } from "./tools/registry";
 import { extractArtifactsFromToolOutput } from "./tools/multimodal";
+import { invokeModel } from "./tools/model-call";
 import type { ChatAttachment, Session, StreamEvent, ToolDef, ToolExecutionContext } from "./types";
 import { decodeHtml, safeParseToolArgs, toErrorLog, toErrorMessage } from "./utils";
 import { getWorkspaceRoot } from "./workspace";
@@ -66,6 +67,8 @@ const SDK_NO_TIMEOUT_MS = AI_REQUEST_TIMEOUT_MAX_MS;
 const MAX_DIRECT_IMAGE_ATTACHMENTS = 4;
 const MAX_ITERATIVE_REPLAN_CHECKPOINTS = 2;
 const OPENAI_PROMPT_CACHE_RETENTION = "24h" as const;
+const ANTHROPIC_PROMPT_CACHE_CONTROL = { type: "ephemeral" as const };
+const AUXILIARY_CONTEXT_TIMEOUT_MS = 4_000;
 const CONTEXT_COMPACTION_NOTICE = [
   "\u5df2\u63a5\u8fd1\u4e0a\u4e0b\u6587\u4e0a\u9650\uff0c\u6211\u5df2\u5c06\u8f83\u65e9\u7684\u5f53\u524d\u4f1a\u8bdd\u5185\u5bb9\u538b\u7f29\u6210\u6458\u8981\uff1b\u63a5\u4e0b\u6765\u4f1a\u7ee7\u7eed\u57fa\u4e8e\u538b\u7f29\u6458\u8981\u3001\u5f53\u524d\u4f1a\u8bdd\u5c3e\u90e8\u548c\u957f\u671f\u8bb0\u5fc6\u5de5\u4f5c\u3002",
   "",
@@ -118,6 +121,82 @@ function hashForPromptCache(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
 }
 
+function isShortSocialMessage(text: string) {
+  const normalized = text.trim().toLowerCase().replace(/[!！?？。,.，\s]/g, "");
+  return /^(你好|您好|嗨|哈喽|hello|hi|hey|在吗|谢谢|thanks|thankyou|早上好|下午好|晚上好)$/.test(normalized);
+}
+
+function withSoftTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise.catch((error) => {
+      serverLog(`WARN ${label} failed: ${toErrorLog(error)}`);
+      return fallback;
+    }),
+    new Promise<T>((resolve) => {
+      timer = setTimeout(() => {
+        serverLog(`WARN ${label} exceeded ${timeoutMs}ms; continuing without it.`);
+        resolve(fallback);
+      }, timeoutMs);
+      timer.unref?.();
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+export function detectDirectImageRequest(text: string, attachments: ChatAttachment[]) {
+  const normalized = text.trim();
+  if (!normalized) return null;
+  const lower = normalized.toLowerCase();
+  const isDiagnostic = /(没有|没能|未曾|为什么|为何|怎么没有|是否|能否|会不会|可以吗).{0,12}(调用|生成|制作|画|image)/i.test(lower);
+  if (isDiagnostic) return null;
+
+  const hasImageNoun = /(图片|图像|插画|海报|卡通|照片|头像|壁纸|图标|封面|表情包|logo|icon|cover|image|illustration|poster|picture|photo)/i.test(lower);
+  const hasGenerateAction = /(帮我|请|给我|替我).{0,12}(生成|画|绘制|创作|制作)|(?:生成|画|绘制|创作|制作).{0,16}(?:一张|一个|图片|图像|插画|海报|卡通|照片|头像|壁纸)|(?:generate|draw|create|make).{0,16}(?:an? )?(?:image|illustration|poster|picture|photo)/i.test(lower);
+  const hasEditAction = /(编辑|修改|改一下|调整|重绘|修图|edit|modify|retouch|redraw)/i.test(lower);
+  if ((!hasImageNoun && !/(帮我|请|给我|替我).{0,12}(画|绘制)/i.test(lower)) || (!hasGenerateAction && !hasEditAction)) return null;
+
+  const images = attachments.filter((attachment) => attachment.type === "image").map((attachment) => attachment.url);
+  return {
+    capability: hasEditAction && images.length ? "image_editing" as const : "image_generation" as const,
+    prompt: normalized,
+    images,
+  };
+}
+
+function canonicalizePromptCacheValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => canonicalizePromptCacheValue(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, canonicalizePromptCacheValue(nested)]),
+  );
+}
+
+function toolPromptCacheShape(tools: ToolDef[]) {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: canonicalizePromptCacheValue(tool.parameters),
+  }));
+}
+
+function normalizeToolDefsForPromptCache(tools: ToolDef[]): ToolDef[] {
+  return [...tools]
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((tool) => ({
+      ...tool,
+      parameters: canonicalizePromptCacheValue(tool.parameters) as Record<string, unknown>,
+    }));
+}
+
 // Keep volatile request and turn IDs out of this fingerprint; cache routing should
 // stay stable across repeated calls that share the same long prompt prefix.
 function buildOpenAIPromptCacheOptions(
@@ -134,16 +213,25 @@ function buildOpenAIPromptCacheOptions(
     surface,
     workspaceRoot: getWorkspaceRoot(settings),
     systemPromptHash: hashForPromptCache(stableSystemPrompt),
-    tools: tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    })),
+    tools: toolPromptCacheShape(tools),
   });
   return {
     promptCacheKey: `nexo-agent:${fingerprint}`,
     promptCacheRetention: OPENAI_PROMPT_CACHE_RETENTION,
   };
+}
+
+function buildCacheableSystemMessage(content: string, cacheBreakpoint: boolean) {
+  if (!cacheBreakpoint) return new SystemMessage(content);
+  return new SystemMessage({
+    content: [
+      {
+        type: "text",
+        text: content,
+        cache_control: ANTHROPIC_PROMPT_CACHE_CONTROL,
+      },
+    ],
+  } as any);
 }
 
 function formatToolNamesForLog(toolCalls: Array<Pick<ToolCallTrace, "name" | "status">>) {
@@ -209,6 +297,8 @@ interface ModelUsageSnapshot {
   completionTokens?: number;
   totalTokens?: number;
   cachedTokens?: number;
+  cacheCreationTokens?: number;
+  cacheReadTokens?: number;
 }
 
 function numberFromUnknown(value: unknown) {
@@ -218,8 +308,15 @@ function numberFromUnknown(value: unknown) {
 function usageFromChunk(chunk: AIMessageChunk): ModelUsageSnapshot {
   const usageMetadata = (chunk as any).usage_metadata as Record<string, any> | undefined;
   const responseUsage = (chunk as any).response_metadata?.usage as Record<string, any> | undefined;
-  // LangChain normalizes OpenAI cached prompt reads to input_token_details.cache_read.
-  // Some compatible gateways expose the original OpenAI usage object instead.
+  // LangChain normalizes usage across providers:
+  // - OpenAI: input_token_details.cache_read for cached prompt reads
+  // - Anthropic: cache_creation_input_tokens and cache_read_input_tokens
+  const cacheCreation = numberFromUnknown(usageMetadata?.input_token_details?.cache_creation)
+    ?? numberFromUnknown(responseUsage?.cache_creation_input_tokens);
+  const cacheRead = numberFromUnknown(usageMetadata?.input_token_details?.cache_read)
+    ?? numberFromUnknown(responseUsage?.prompt_tokens_details?.cached_tokens)
+    ?? numberFromUnknown(responseUsage?.cache_read_input_tokens);
+
   return {
     promptTokens: numberFromUnknown(usageMetadata?.input_tokens)
       ?? numberFromUnknown(responseUsage?.prompt_tokens),
@@ -227,8 +324,10 @@ function usageFromChunk(chunk: AIMessageChunk): ModelUsageSnapshot {
       ?? numberFromUnknown(responseUsage?.completion_tokens),
     totalTokens: numberFromUnknown(usageMetadata?.total_tokens)
       ?? numberFromUnknown(responseUsage?.total_tokens),
-    cachedTokens: numberFromUnknown(usageMetadata?.input_token_details?.cache_read)
-      ?? numberFromUnknown(responseUsage?.prompt_tokens_details?.cached_tokens),
+    // Combine cache creation and reads for the total cached token count
+    cachedTokens: (cacheCreation ?? 0) + (cacheRead ?? 0) || undefined,
+    cacheCreationTokens: cacheCreation,
+    cacheReadTokens: cacheRead,
   };
 }
 
@@ -238,15 +337,26 @@ function formatUsageForLog(usage: ModelUsageSnapshot) {
     `completionTokens=${usage.completionTokens ?? ""}`,
     `totalTokens=${usage.totalTokens ?? ""}`,
     `cachedTokens=${usage.cachedTokens ?? ""}`,
+    `cacheCreationTokens=${usage.cacheCreationTokens ?? ""}`,
+    `cacheReadTokens=${usage.cacheReadTokens ?? ""}`,
   ].join(" ");
 }
 
 function routingUsageFromChatCompletion(usage: Awaited<ReturnType<typeof callChatCompletion>>["usage"] | undefined) {
   if (!usage) return undefined;
+  const usageAny = usage as Record<string, any>;
+  const cacheCreation = numberFromUnknown(usageAny.input_token_details?.cache_creation)
+    ?? numberFromUnknown(usageAny.cache_creation_input_tokens);
+  const cacheRead = numberFromUnknown(usageAny.input_token_details?.cache_read)
+    ?? numberFromUnknown(usageAny.prompt_tokens_details?.cached_tokens)
+    ?? numberFromUnknown(usageAny.cache_read_input_tokens);
   return {
     promptTokens: usage.prompt_tokens,
     completionTokens: usage.completion_tokens,
     totalTokens: usage.total_tokens,
+    cachedTokens: (cacheCreation ?? 0) + (cacheRead ?? 0) || undefined,
+    cacheCreationTokens: cacheCreation,
+    cacheReadTokens: cacheRead,
   };
 }
 
@@ -867,6 +977,7 @@ export async function streamFromLLM(
   );
   const requestLogBase = `requestId=${requestId} sessionId=${session.id} turnId=${turnId || ""}`;
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const skipAuxiliaryRetrieval = isShortSocialMessage(lastUserMsg) && attachments.length === 0;
   const currentSessionContext = formatCurrentSessionContextForRecall(session);
   const routeDecision = settings.plannerExecutorRoutingEnabled
     ? classifyPlannerExecutorRoute({
@@ -988,7 +1099,69 @@ export async function streamFromLLM(
     },
     model,
   );
+  const enabledToolDefs = normalizeToolDefsForPromptCache(
+    withSettingsAwareToolDefs(await getAllEnabledToolDefs(), settings),
+  );
   const capabilitySummary = await getEnabledModelCapabilitySummary();
+  const directImageRequest = detectDirectImageRequest(lastUserMsg, attachments);
+  if (directImageRequest && enabledToolDefs.some((tool) => tool.name === "invoke_model")) {
+    const toolCallId = `call_${randomUUID()}`;
+    const toolArgs = {
+      capability: directImageRequest.capability,
+      prompt: directImageRequest.prompt,
+      ...(directImageRequest.images.length ? { images: directImageRequest.images } : {}),
+    };
+    pushEvent(requestId, { type: "status", content: directImageRequest.capability === "image_editing" ? "正在编辑图片..." : "正在生成图片..." });
+    pushEvent(requestId, { type: "tool_call", id: toolCallId, name: "invoke_model", input: toolArgs });
+    const startedAt = Date.now();
+    let output: string;
+    try {
+      output = await invokeModel(toolArgs, {
+        settings,
+        apiKey: effectiveApiKey,
+        apiBase,
+        requestId,
+        capabilitySummary,
+        defaultModelProfileId: roleConfigs.enabled ? activeConfig.profileId : undefined,
+        defaultModelRole: roleConfigs.enabled ? "executor" : undefined,
+      });
+    } catch (error) {
+      output = `Error: ${toErrorMessage(error)}`;
+    }
+    const elapsed = (Date.now() - startedAt) / 1000;
+    const isError = output.startsWith("Error:");
+    const generatedAttachments = isError
+      ? []
+      : generatedAttachmentsFromToolResult("invoke_model", toolArgs, output);
+    pushEvent(requestId, { type: "tool_result", id: toolCallId, output, elapsed });
+    const content = isError
+      ? output
+      : directImageRequest.capability === "image_editing"
+        ? "图片已编辑完成。"
+        : "图片已生成完成。";
+    pushTokenText(requestId, content);
+    const toolCalls: ToolCallTrace[] = [{
+      id: toolCallId,
+      name: "invoke_model",
+      input: toolArgs,
+      output,
+      elapsed,
+      status: isError ? "error" : "done",
+    }];
+    return buildDoneEvent(requestId, {
+      type: "done",
+      content,
+      status: isError ? "failed" : "completed",
+      stopReason: isError ? "runtime_error" : "completed",
+      attachments: generatedAttachments.length ? generatedAttachments : undefined,
+      toolCalls,
+      messageBlocks: [
+        { type: "tool", id: toolCallId },
+        { type: "text", content },
+      ],
+      routing: routingMetadata,
+    });
+  }
   const currentSessionMemoryQuery = [
     "Current user message:",
     lastUserMsg,
@@ -999,7 +1172,6 @@ export async function streamFromLLM(
     .filter((part) => part.trim())
     .join("\n\n");
   const skillInstructions = await getEnabledSkillInstructions(skillRoutingQuery || lastUserMsg);
-  const enabledToolDefs = withSettingsAwareToolDefs(await getAllEnabledToolDefs(), settings);
   const resolvedBudget = await resolveAndPersistModelContextBudget({
     providerId: activeConfig.providerId,
     apiBase: activeConfig.apiBase,
@@ -1039,6 +1211,7 @@ export async function streamFromLLM(
     ].join(" "),
   );
 
+  pushEvent(requestId, { type: "status", content: "正在准备上下文..." });
   const memoryEmbeddingSettings = await resolveMemoryEmbeddingSettings({
     providerId: activeConfig.providerId,
     providerName: activeConfig.providerName ?? settings.providerName,
@@ -1047,22 +1220,31 @@ export async function streamFromLLM(
     model: activeConfig.model,
     temperature: activeConfig.temperature,
   });
-  let memoryContext = "";
-  if (settings.enableMemory) {
-    const operationalMemoryQuery = [
-      currentSessionMemoryQuery || lastUserMsg,
-      "project path workspace root cwd repository location repo folder client admin management console conventions user preferences",
-      "项目路径 工作区 根目录 当前项目 仓库 管理端 客户端 项目规范 用户偏好",
-    ].join("\n");
-    const [taskMemoryContext, operationalMemoryContext] = await Promise.all([
-      recallMemory(currentSessionMemoryQuery || lastUserMsg, memoryEmbeddingSettings, undefined, 6),
-      recallMemory(operationalMemoryQuery, memoryEmbeddingSettings, undefined, 6),
-    ]);
-    memoryContext = mergeMemoryContext(taskMemoryContext, operationalMemoryContext);
-  }
-  const knowledgeResult = settings.enableKnowledge
-    ? await retrieveKnowledgeContextWithSources(currentSessionMemoryQuery || lastUserMsg, memoryEmbeddingSettings)
-    : { context: "", sources: [] };
+  const memoryPromise = settings.enableMemory && !skipAuxiliaryRetrieval
+    ? (async () => {
+        const operationalMemoryQuery = [
+          currentSessionMemoryQuery || lastUserMsg,
+          "project path workspace root cwd repository location repo folder client admin management console conventions user preferences",
+          "项目路径 工作区 根目录 当前项目 仓库 管理端 客户端 项目规范 用户偏好",
+        ].join("\n");
+        const [taskMemoryContext, operationalMemoryContext] = await Promise.all([
+          recallMemory(currentSessionMemoryQuery || lastUserMsg, memoryEmbeddingSettings, undefined, 6),
+          recallMemory(operationalMemoryQuery, memoryEmbeddingSettings, undefined, 6),
+        ]);
+        return mergeMemoryContext(taskMemoryContext, operationalMemoryContext);
+      })()
+    : Promise.resolve("");
+  const knowledgePromise = settings.enableKnowledge && !skipAuxiliaryRetrieval
+    // Knowledge BM25 should be driven by the current question. Feeding the
+    // whole session transcript into a sparse query adds many unrelated terms
+    // and weakens IDF ranking; conversation context remains available to the
+    // answering model after retrieval.
+    ? retrieveKnowledgeContextWithSources(lastUserMsg, memoryEmbeddingSettings)
+    : Promise.resolve({ context: "", sources: [] });
+  const [memoryContext, knowledgeResult] = await Promise.all([
+    withSoftTimeout(memoryPromise, AUXILIARY_CONTEXT_TIMEOUT_MS, "", `Memory retrieval ${requestLogBase}`),
+    withSoftTimeout(knowledgePromise, AUXILIARY_CONTEXT_TIMEOUT_MS, { context: "", sources: [] }, `Knowledge retrieval ${requestLogBase}`),
+  ]);
   const knowledgeContext = knowledgeResult.context;
   const knowledgeSources = knowledgeResult.sources;
   const attachmentContext = await loadAttachmentContext(attachments);
@@ -1185,7 +1367,7 @@ export async function streamFromLLM(
     .filter(Boolean)
     .join("\n\n");
 
-  const systemPrompt = [
+  const stableSystemPrompt = [
     "You are Nexo Agent, a helpful AI assistant.",
     `当前运行环境：${getRuntimeEnvironmentLabel()}`,
     "Answer in the user's language. Be concise and action-oriented.",
@@ -1211,6 +1393,15 @@ export async function streamFromLLM(
     "Before changing files in a dirty worktree, inspect relevant diffs and preserve user edits. To fix generated corruption, apply the smallest targeted patch instead of restoring whole files.",
     "For shell_command: do not rely on timeoutMs. Commands are not stopped by fixed time and should finish by process exit, explicit error, or user interruption.",
     "Avoid starting long-lived dev servers such as vite, webpack, or npm run dev with shell_command unless the user explicitly wants that process to occupy the current run.",
+    "You are the orchestrator. Route specialist work by capability instead of asking the user for a model name.",
+    'Use invoke_model with capability="vision" only when you need a separate specialist vision model; use capability="image_generation" for text-to-image and source/reference-image generation with images, capability="image_editing" for explicit edits to existing images, capability="speech_to_text" for transcription, and capability="text_to_speech" for spoken audio generation.',
+    "Use invoke_model with a capability when a configured specialist model is better suited for a sub-task.",
+    "Use recall_memory when prior durable context could materially improve the answer.",
+    `Configured specialist capabilities:\n${formatCapabilitySummary(capabilitySummary)}`,
+    ...(stableAuxiliaryPrompt ? [stableAuxiliaryPrompt] : []),
+  ].join("\n");
+
+  const dynamicRuntimePrompt = [
     `Active model: ${activeConfig.name} / ${activeConfig.model}.`,
     roleConfigs.enabled
       ? `Planner/executor routing: enabled. Route class=${routeDecision?.routeClass ?? "unknown"}. Execution mode=${routeDecision?.executionMode ?? "unknown"}. Planner=${plannerConfig.name}/${plannerConfig.model}. Executor=${activeConfig.name}/${activeConfig.model}. Verifier=${verifierConfig.name}/${verifierConfig.model}.`
@@ -1222,13 +1413,7 @@ export async function streamFromLLM(
       ? "When new tool results or data materially change the next strategy, provide a concise stage summary and stop independent guessing so the primary planner can replan."
       : "",
     `Resolved context budget: window=${budgetConfig.contextWindowTokens}, input=${budgetConfig.maxInputTokens}, compact=${budgetConfig.autoCompactTokenLimit}, source=${resolvedBudget.contextWindowSource ?? "default"}.`,
-    "You are the orchestrator. Route specialist work by capability instead of asking the user for a model name.",
-    'Use invoke_model with capability="vision" only when you need a separate specialist vision model; use capability="image_generation" for text-to-image and source/reference-image generation with images, capability="image_editing" for explicit edits to existing images, capability="speech_to_text" for transcription, and capability="text_to_speech" for spoken audio generation.',
-    "Use invoke_model with a capability when a configured specialist model is better suited for a sub-task.",
-    "Use recall_memory when prior durable context could materially improve the answer.",
-    `Configured specialist capabilities:\n${formatCapabilitySummary(capabilitySummary)}`,
-    ...(stableAuxiliaryPrompt ? [stableAuxiliaryPrompt] : []),
-  ].join("\n");
+  ].filter((part) => part.trim()).join("\n");
 
   const summarizeOlderContext = async (transcript: string) => {
     const summaryInstruction = [
@@ -1256,7 +1441,8 @@ export async function streamFromLLM(
     session,
     summarizeOlderContext,
     [
-      { key: "system", label: "System prompt", content: systemPrompt },
+      { key: "system", label: "System prompt", content: stableSystemPrompt },
+      { key: "runtime", label: "Current runtime context", content: dynamicRuntimePrompt },
       ...dynamicAuxiliarySections.map((section) => ({ key: section.key, label: section.label, content: section.content })),
     ],
     budgetConfig
@@ -1282,18 +1468,28 @@ export async function streamFromLLM(
       : new AIMessage(message.content);
   const priorRuntimeMessages: BaseMessage[] = await Promise.all(priorRecentMessages.map(toRuntimeMessage));
   const currentRuntimeMessages: BaseMessage[] = await Promise.all(currentAndFollowingMessages.map(toRuntimeMessage));
+  const runtimeContextMessages: BaseMessage[] = dynamicRuntimePrompt
+    ? [new SystemMessage(`Current turn runtime context. Treat this as application-provided context, not a user request:\n${dynamicRuntimePrompt}`)]
+    : [];
   const dynamicAuxiliaryMessages: BaseMessage[] = dynamicAuxiliaryPrompt
     // Put per-turn memory/knowledge after reusable history but before the latest user
     // message, so the model still sees the newest user request last.
     ? [new SystemMessage(`Current turn auxiliary context. Treat this as background and prefer the current session transcript when they conflict:\n${dynamicAuxiliaryPrompt}`)]
     : [];
+  // Anthropic evaluates cache prefixes as tools -> system -> messages, so a
+  // system breakpoint freezes the reusable tool definitions and stable prompt
+  // while keeping dynamic conversation context outside the cache.
+  const anthropicCacheBreakpoint = activeConfig.providerId === "anthropic-compatible"
+    ? "system"
+    : "off";
 
   const lcMessages: BaseMessage[] = normalizeBaseMessagesForStrictChatTransports([
-    new SystemMessage(systemPrompt),
+    buildCacheableSystemMessage(stableSystemPrompt, anthropicCacheBreakpoint === "system"),
     ...(conversationContext.compactedSummary
       ? [new SystemMessage(`Earlier conversation summary from automatic context compaction:\n${conversationContext.compactedSummary}`)]
       : []),
     ...priorRuntimeMessages,
+    ...runtimeContextMessages,
     ...dynamicAuxiliaryMessages,
     ...currentRuntimeMessages,
   ]);
@@ -1302,14 +1498,32 @@ export async function streamFromLLM(
     estimateRuntimePromptTokens(lcMessages),
   );
   const openAiPromptCacheOptions = activeConfig.providerId === "openai-compatible"
-    ? buildOpenAIPromptCacheOptions(activeConfig, settings, surface, systemPrompt, enabledToolDefs)
+    ? buildOpenAIPromptCacheOptions(activeConfig, settings, surface, stableSystemPrompt, enabledToolDefs)
     : {};
+  const enabledToolCacheShape = toolPromptCacheShape(enabledToolDefs);
+  const stableSystemHash = hashForPromptCache(stableSystemPrompt);
+  const dynamicRuntimeHash = hashForPromptCache(dynamicRuntimePrompt);
+  const toolSchemaHash = hashForPromptCache(enabledToolCacheShape);
+  const anthropicCachePrefixHash = activeConfig.providerId === "anthropic-compatible"
+    ? hashForPromptCache({
+        model: activeConfig.model,
+        tools: enabledToolCacheShape,
+        system: stableSystemPrompt,
+      })
+    : "off";
+
   serverLog(
     [
       `INFO AI prompt assembled ${requestLogBase}`,
       `lcMessages=${lcMessages.length}`,
-      `stableSystemChars=${systemPrompt.length}`,
+      `stableSystemChars=${stableSystemPrompt.length}`,
+      `dynamicRuntimeChars=${dynamicRuntimePrompt.length}`,
       `dynamicAuxChars=${dynamicAuxiliaryPrompt.length}`,
+      `stableSystemHash=${stableSystemHash}`,
+      `dynamicRuntimeHash=${dynamicRuntimeHash}`,
+      `toolSchemaHash=${toolSchemaHash}`,
+      `anthropicCachePrefixHash=${anthropicCachePrefixHash}`,
+      `toolNames=${enabledToolDefs.map((tool) => tool.name).join(",") || "none"}`,
       `compacted=${conversationContext.compacted}`,
       `compactionPasses=${conversationContext.compactionPasses}`,
       `compactedMessages=${conversationContext.compactedMessageCount}`,
@@ -1324,6 +1538,7 @@ export async function streamFromLLM(
       `latestMessageChars=${conversationContext.latestRawMessageChars}`,
       `promptCacheKey=${openAiPromptCacheOptions.promptCacheKey ?? "off"}`,
       `promptCacheRetention=${openAiPromptCacheOptions.promptCacheRetention ?? "off"}`,
+      `anthropicCacheBreakpoint=${anthropicCacheBreakpoint}`,
     ].join(" "),
   );
   if (initialPromptTokens > budgetConfig.maxInputTokens) {
@@ -1428,6 +1643,8 @@ export async function streamFromLLM(
   let completionTokens: number | undefined;
   let totalTokens: number | undefined;
   let cachedTokens: number | undefined;
+  let cacheCreationTokens: number | undefined;
+  let cacheReadTokens: number | undefined;
   const assistantAttachments: ChatAttachment[] = [];
   let browserResolveAttempted = false;
   let interruptedByUser = false;
@@ -1488,13 +1705,13 @@ export async function streamFromLLM(
       let streamToolChunks = 0;
 
       serverLog(`INFO AI stream start ${requestLogBase} step=${currentStep} lcMessages=${lcMessages.length} accumulatedChars=${fullContent.length}`);
-      const chunks = await collectStreamWithAiRequestRetries<AIMessageChunk>(() =>
+      const chunks = streamWithAiRequestRetries<AIMessageChunk>(() =>
         llmRunner.stream(lcMessages, { signal: getRunAbortSignal(requestId) } as any)
       , {
         label: `AI stream ${requestLogBase} step=${currentStep} model=${model}`,
         shouldRetry: () => !isRunInterrupted(requestId),
       });
-      for (const chunk of chunks) {
+      for await (const chunk of chunks) {
         streamChunks += 1;
         if (isRunInterrupted(requestId)) {
           interruptedByUser = true;
@@ -1541,9 +1758,11 @@ export async function streamFromLLM(
         if (chunkUsage.completionTokens !== undefined) completionTokens = chunkUsage.completionTokens;
         if (chunkUsage.totalTokens !== undefined) totalTokens = chunkUsage.totalTokens;
         if (chunkUsage.cachedTokens !== undefined) cachedTokens = chunkUsage.cachedTokens;
+        if (chunkUsage.cacheCreationTokens !== undefined) cacheCreationTokens = chunkUsage.cacheCreationTokens;
+        if (chunkUsage.cacheReadTokens !== undefined) cacheReadTokens = chunkUsage.cacheReadTokens;
       }
       serverLog(
-        `INFO AI stream complete ${requestLogBase} step=${currentStep} chunks=${streamChunks} textChars=${streamTextChars} toolChunks=${streamToolChunks} interrupted=${interruptedByUser} ${formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens })}`,
+        `INFO AI stream complete ${requestLogBase} step=${currentStep} chunks=${streamChunks} textChars=${streamTextChars} toolChunks=${streamToolChunks} interrupted=${interruptedByUser} ${formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreationTokens, cacheReadTokens })}`,
       );
 
       if (interruptedByUser) break;
@@ -1843,7 +2062,7 @@ export async function streamFromLLM(
         ),
       ]);
       serverLog(`INFO AI final stream start ${requestLogBase} step=${currentStep} reason=circuit_breaker`);
-      const finalChunks = await collectStreamWithAiRequestRetries<AIMessageChunk>(() =>
+      const finalChunks = streamWithAiRequestRetries<AIMessageChunk>(() =>
         llmNoTools.stream(finalMessages, { signal: getRunAbortSignal(requestId) } as any)
       , {
         label: `AI final stream ${requestLogBase} model=${model}`,
@@ -1853,7 +2072,7 @@ export async function streamFromLLM(
       let finalStreamChunks = 0;
       let finalStreamTextChars = 0;
       const finalDsmlBuffer = createDsmlStreamBuffer();
-      for (const chunk of finalChunks) {
+      for await (const chunk of finalChunks) {
         finalStreamChunks += 1;
         if (isRunInterrupted(requestId)) {
           interruptedByUser = true;
@@ -1875,8 +2094,10 @@ export async function streamFromLLM(
         if (chunkUsage.completionTokens !== undefined) completionTokens = chunkUsage.completionTokens;
         if (chunkUsage.totalTokens !== undefined) totalTokens = chunkUsage.totalTokens;
         if (chunkUsage.cachedTokens !== undefined) cachedTokens = chunkUsage.cachedTokens;
+        if (chunkUsage.cacheCreationTokens !== undefined) cacheCreationTokens = chunkUsage.cacheCreationTokens;
+        if (chunkUsage.cacheReadTokens !== undefined) cacheReadTokens = chunkUsage.cacheReadTokens;
       }
-      serverLog(`INFO AI final stream complete ${requestLogBase} chunks=${finalStreamChunks} textChars=${finalStreamTextChars} interrupted=${interruptedByUser} ${formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens })}`);
+      serverLog(`INFO AI final stream complete ${requestLogBase} chunks=${finalStreamChunks} textChars=${finalStreamTextChars} interrupted=${interruptedByUser} ${formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreationTokens, cacheReadTokens })}`);
       if (!interruptedByUser) {
         const finalDsmlChunk = finalDsmlBuffer.flush();
         if (finalDsmlChunk.visibleText) {
@@ -1895,7 +2116,7 @@ export async function streamFromLLM(
     appendRoutingStep(routingMetadata, buildRoutingStep("executor", "failed", activeConfig, {
       routeClass: routeDecision?.routeClass,
       reason: toErrorMessage(error),
-      usage: { promptTokens, completionTokens, totalTokens, cachedTokens },
+      usage: { promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreationTokens, cacheReadTokens },
     }));
     if (routingMetadata) {
       routingMetadata.error = toErrorMessage(error);
@@ -1930,7 +2151,7 @@ export async function streamFromLLM(
       routeClass: routeDecision?.routeClass,
       executionMode: routeDecision?.executionMode,
       verificationLevel: routeDecision?.verificationLevel,
-      usage: { promptTokens, completionTokens, totalTokens, cachedTokens },
+      usage: { promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreationTokens, cacheReadTokens },
     }));
 
     const quality = evaluateExecutorQuality({
@@ -2080,7 +2301,7 @@ export async function streamFromLLM(
         : breakerInfo
           ? "needs_input"
           : "completed",
-    usage: { promptTokens, completionTokens, totalTokens, cachedTokens },
+    usage: { promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreationTokens, cacheReadTokens },
     attachments: assistantAttachments.length ? assistantAttachments : undefined,
     toolCalls: persistentToolCalls.length ? persistentToolCalls : undefined,
     messageBlocks: persistentMessageBlocks.length ? persistentMessageBlocks : undefined,
@@ -2110,7 +2331,7 @@ export async function streamFromLLM(
       `toolCalls=${persistentToolCalls.length}`,
       `tools=${formatToolNamesForLog(persistentToolCalls)}`,
       formatRoutingRolesForLog(routingMetadata),
-      formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens }),
+      formatUsageForLog({ promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreationTokens, cacheReadTokens }),
     ].join(" "),
   );
   return buildDoneEvent(requestId, doneEvent);

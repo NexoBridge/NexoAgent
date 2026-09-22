@@ -39,6 +39,9 @@ const DREAM_DEBOUNCE_MS = 1200;
 const CHROMA_BACKFILL_BATCH_SIZE = 50;
 const CHROMA_RETRY_DELAY_MS = 30_000;
 const EMBEDDING_FAILURE_BACKOFF_MS = 30_000;
+const EMBEDDING_REQUEST_TIMEOUT_MS = 2_000;
+const EMBEDDING_REQUEST_MAX_RETRIES = 0;
+const SEMANTIC_RECALL_BUDGET_MS = 1_200;
 
 export type MemoryKind = "daily" | "dream" | "script";
 
@@ -108,7 +111,9 @@ const dreamTimers = new Map<string, NodeJS.Timeout>();
 const chromaChildren = new Set<ChildProcess>();
 const MEMORY_TABLE_COLUMNS = ["id", "kind", "day_key", "content", "session_id", "key", "scope", "metadata", "created_at", "updated_at"];
 
-export interface MemoryEmbeddingSettings extends Partial<Pick<AgentSettings, "providerId" | "providerName" | "apiBase" | "apiKey" | "model" | "temperature">> {}
+export interface MemoryEmbeddingSettings extends Partial<Pick<AgentSettings, "providerId" | "providerName" | "apiBase" | "apiKey" | "model" | "temperature">> {
+  semanticEnabled?: boolean;
+}
 
 interface ResolvedEmbeddingConfig {
   providerName: string;
@@ -506,10 +511,12 @@ function buildMemoryEmbeddingSettings(settings: MemoryEmbeddingSettings = {}): M
     apiKey: settings.apiKey?.trim() || "",
     model: settings.model?.trim() || "",
     temperature: settings.temperature ?? 0,
+    semanticEnabled: settings.semanticEnabled,
   };
 }
 
 async function resolveEmbeddingConfig(settings: MemoryEmbeddingSettings = {}): Promise<ResolvedEmbeddingConfig | null> {
+  if (settings.semanticEnabled === false) return null;
   const normalized = buildMemoryEmbeddingSettings(settings);
   const allowsEmptyApiKey = providerConnectionAllowsEmptyApiKey({
     providerId: normalized.providerId,
@@ -517,6 +524,25 @@ async function resolveEmbeddingConfig(settings: MemoryEmbeddingSettings = {}): P
     apiBase: normalized.apiBase,
   });
   if (!normalized.apiKey && !allowsEmptyApiKey) return null;
+
+  // A resolved embedding profile already contains everything needed for the
+  // embeddings endpoint. Avoid capability discovery/context probing on every
+  // retrieval request; those probes can be slower than lexical retrieval.
+  const direct = getProviderEmbeddingRuntimeConfig({
+    providerId: normalized.providerId,
+    providerName: normalized.providerName,
+    apiBase: normalized.apiBase,
+    model: normalized.model,
+  });
+  if (direct && normalized.model) {
+    return {
+      providerName: direct.providerName,
+      apiKey: normalized.apiKey || "",
+      apiBase: direct.apiBase,
+      model: direct.model,
+      transport: direct.transport,
+    };
+  }
 
   try {
     const config = await resolveCapabilityModelConfig("embedding", normalized, {
@@ -596,11 +622,41 @@ function clearEmbeddingFailure(config: ResolvedEmbeddingConfig) {
   embeddingFailureBackoff.delete(embeddingBackoffKey(config));
 }
 
+async function fetchEmbedding(url: string, init: RequestInit) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), EMBEDDING_REQUEST_TIMEOUT_MS);
+  timer.unref?.();
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function withinSemanticRecallBudget<T>(promise: Promise<T>, fallback: T, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise.catch((error) => {
+      serverLog(`WARN ${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+      return fallback;
+    }),
+    new Promise<T>((resolve) => {
+      timer = setTimeout(() => {
+        serverLog(`WARN ${label} exceeded ${SEMANTIC_RECALL_BUDGET_MS}ms; using lexical results.`);
+        resolve(fallback);
+      }, SEMANTIC_RECALL_BUDGET_MS);
+      timer.unref?.();
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 async function requestOpenAICompatibleEmbeddings(
   inputs: string[],
   config: ResolvedEmbeddingConfig,
 ) {
-  const response = await fetch(`${config.apiBase}/embeddings`, {
+  const response = await fetchEmbedding(`${config.apiBase}/embeddings`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -633,7 +689,7 @@ async function requestGeminiEmbeddings(
   purpose: EmbeddingPurpose,
 ) {
   const model = normalizeGeminiModel(config.model);
-  const response = await fetch(`${config.apiBase}/${model}:batchEmbedContents`, {
+  const response = await fetchEmbedding(`${config.apiBase}/${model}:batchEmbedContents`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -669,6 +725,9 @@ async function requestEmbeddings(
       return await requestGeminiEmbeddings(inputs, config, purpose);
     }
     return await requestOpenAICompatibleEmbeddings(inputs, config);
+  }, {
+    maxRetries: EMBEDDING_REQUEST_MAX_RETRIES,
+    label: `${config.providerName} embedding request`,
   });
 }
 
@@ -1060,11 +1119,11 @@ function formatRecallEntry(entry: MemoryEntry) {
 
 async function semanticSearchEntries(query: string, settings: MemoryEmbeddingSettings = {}, options: RecallOptions = {}) {
   const k = options.k ?? 6;
-  schedulePendingChromaBackfill(settings);
   const config = await resolveEmbeddingConfig(settings);
   if (!config) return null;
   const vector = await embedText(query, settings, "retrieval_query", config);
   if (!vector?.length) return null;
+  schedulePendingChromaBackfill(settings);
   const runtime = await getChromaRuntime();
   if (!runtime) return null;
 
@@ -1095,6 +1154,8 @@ export async function searchMemories(
     ? options
     : (typeof apiBaseOrOptions === "string" ? options : apiBaseOrOptions ?? options);
   const k = recallOptions.k ?? 6;
+  const lexical = fallbackRank(query, { ...recallOptions, k });
+  if (memorySettings.semanticEnabled === false) return lexical;
   const merged: MemoryEntry[] = [];
   const seen = new Set<string>();
   const addEntries = (entries: MemoryEntry[] | null | undefined) => {
@@ -1105,13 +1166,13 @@ export async function searchMemories(
     }
   };
 
-  try {
-    const semantic = await semanticSearchEntries(query, memorySettings, recallOptions);
-    addEntries(semantic);
-  } catch {
-    // Fall through to SQLite.
-  }
-  addEntries(fallbackRank(query, { ...recallOptions, k }));
+  const semantic = await withinSemanticRecallBudget(
+    semanticSearchEntries(query, memorySettings, recallOptions),
+    null,
+    "Memory semantic retrieval",
+  );
+  addEntries(semantic);
+  addEntries(lexical);
   return merged.slice(0, k);
 }
 

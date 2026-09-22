@@ -4,7 +4,13 @@ import { MarkdownTextSplitter, RecursiveCharacterTextSplitter } from "@langchain
 import type { Collection, Metadata } from "chromadb";
 import type { KnowledgeSourceHit, KnowledgeSourceMethod } from "../../src/shared/types";
 import { embedRetrievalText, getChromaCollection, type MemoryEmbeddingSettings } from "../memory";
-import { KNOWLEDGE_DIR } from "./config";
+import { KNOWLEDGE_DIR, KNOWLEDGE_LEXICAL_INDEX_FILE } from "./config";
+import {
+  buildKnowledgeLexicalIndex,
+  searchKnowledgeLexicalIndex,
+  type KnowledgeLexicalDocument,
+  type KnowledgeLexicalIndex,
+} from "./knowledge-lexical";
 import { serverLog } from "./logger";
 import { resolveDataPath } from "./utils";
 
@@ -15,6 +21,9 @@ const KNOWLEDGE_BACKFILL_FILE_LIMIT = 24;
 const KNOWLEDGE_CHUNK_CHARS = 1800;
 const KNOWLEDGE_CHUNK_OVERLAP = 160;
 const KNOWLEDGE_EXCERPT_CHARS = 3000;
+const KNOWLEDGE_SEMANTIC_BUDGET_MS = 1_200;
+const KNOWLEDGE_LEXICAL_INDEX_VERSION = 1;
+const KNOWLEDGE_RRF_K = 60;
 const TEXT_SPLITTER_SEPARATORS = ["\n\n", "\n", "\u3002", "\uff1b", "\uff0c", " ", ""];
 
 interface KnowledgeFile {
@@ -39,7 +48,20 @@ interface KnowledgeHit {
   chunkCount?: number;
 }
 
+interface StoredKnowledgeLexicalFile {
+  mtimeMs: number;
+  size: number;
+  chunks: string[];
+}
+
+interface StoredKnowledgeLexicalIndex {
+  version: number;
+  files: Record<string, StoredKnowledgeLexicalFile>;
+}
+
 let knowledgeIndexing: Promise<void> | null = null;
+let knowledgeLexicalIndexing: Promise<KnowledgeLexicalIndex> | null = null;
+let knowledgeLexicalCache: { signature: string; index: KnowledgeLexicalIndex } | null = null;
 
 export async function collectFiles(root: string, dir = root, limit = 200): Promise<string[]> {
   const out: string[] = [];
@@ -66,10 +88,23 @@ function normalizeKnowledgeRel(value: string) {
   return value.replace(/\\/g, "/").replace(/^\/+/, "");
 }
 
-function scoreKnowledge(query: string, content: string, filePath: string) {
-  const tokens = Array.from(new Set(query.toLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) ?? []));
-  const haystack = `${filePath}\n${content}`.toLowerCase();
-  return tokens.reduce((score, token) => score + (haystack.includes(token) ? 1 : 0), 0);
+async function withinKnowledgeSemanticBudget<T>(promise: Promise<T>, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise.catch((error) => {
+      serverLog(`WARN Knowledge semantic retrieval failed: ${error instanceof Error ? error.message : String(error)}`);
+      return fallback;
+    }),
+    new Promise<T>((resolve) => {
+      timer = setTimeout(() => {
+        serverLog(`WARN Knowledge semantic retrieval exceeded ${KNOWLEDGE_SEMANTIC_BUDGET_MS}ms; using lexical results.`);
+        resolve(fallback);
+      }, KNOWLEDGE_SEMANTIC_BUDGET_MS);
+      timer.unref?.();
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 async function readKnowledgeFiles(limit = KNOWLEDGE_INDEX_SCAN_LIMIT): Promise<KnowledgeFile[]> {
@@ -174,6 +209,91 @@ async function chunkKnowledgeFile(file: KnowledgeFile) {
   return file.size > MAX_FILE_READ_BYTES
     ? splitLargeKnowledgeContent(file, content)
     : chunkKnowledgeContent(content);
+}
+
+function knowledgeFilesSignature(files: KnowledgeFile[]) {
+  return files
+    .map((file) => `${file.rel}:${file.mtimeMs}:${file.size}`)
+    .sort()
+    .join("|");
+}
+
+async function readStoredKnowledgeLexicalIndex(): Promise<StoredKnowledgeLexicalIndex> {
+  try {
+    const parsed = JSON.parse(await fs.readFile(KNOWLEDGE_LEXICAL_INDEX_FILE, "utf8")) as StoredKnowledgeLexicalIndex;
+    if (parsed.version !== KNOWLEDGE_LEXICAL_INDEX_VERSION || !parsed.files || typeof parsed.files !== "object") {
+      throw new Error("unsupported lexical index version");
+    }
+    return parsed;
+  } catch {
+    return { version: KNOWLEDGE_LEXICAL_INDEX_VERSION, files: {} };
+  }
+}
+
+async function writeStoredKnowledgeLexicalIndex(index: StoredKnowledgeLexicalIndex) {
+  await fs.mkdir(path.dirname(KNOWLEDGE_LEXICAL_INDEX_FILE), { recursive: true });
+  await fs.writeFile(KNOWLEDGE_LEXICAL_INDEX_FILE, JSON.stringify(index), "utf8");
+}
+
+function lexicalDocumentsFromStoredIndex(stored: StoredKnowledgeLexicalIndex): KnowledgeLexicalDocument[] {
+  return Object.entries(stored.files).flatMap(([rel, file]) =>
+    file.chunks.map((content, chunkIndex) => ({
+      rel,
+      content,
+      chunkIndex,
+      chunkCount: file.chunks.length,
+    })),
+  );
+}
+
+async function doEnsureKnowledgeLexicalIndex(files: KnowledgeFile[], signature: string) {
+  const stored = await readStoredKnowledgeLexicalIndex();
+  const livePaths = new Set(files.map((file) => file.rel));
+  let changed = false;
+
+  for (const rel of Object.keys(stored.files)) {
+    if (!livePaths.has(rel)) {
+      delete stored.files[rel];
+      changed = true;
+    }
+  }
+
+  for (const file of files) {
+    const existing = stored.files[file.rel];
+    if (existing && existing.mtimeMs === file.mtimeMs && existing.size === file.size) continue;
+    const chunks = await chunkKnowledgeFile(file);
+    if (chunks.length) {
+      stored.files[file.rel] = { mtimeMs: file.mtimeMs, size: file.size, chunks };
+    } else {
+      delete stored.files[file.rel];
+    }
+    changed = true;
+  }
+
+  if (changed) {
+    await writeStoredKnowledgeLexicalIndex(stored);
+    serverLog(`INFO Refreshed knowledge lexical index files=${Object.keys(stored.files).length}`);
+  }
+  const index = buildKnowledgeLexicalIndex(lexicalDocumentsFromStoredIndex(stored));
+  knowledgeLexicalCache = { signature, index };
+  return index;
+}
+
+async function ensureKnowledgeLexicalIndex() {
+  const files = await readKnowledgeFiles();
+  const signature = knowledgeFilesSignature(files);
+  if (knowledgeLexicalCache?.signature === signature) return knowledgeLexicalCache.index;
+  if (knowledgeLexicalIndexing) return knowledgeLexicalIndexing;
+  knowledgeLexicalIndexing = doEnsureKnowledgeLexicalIndex(files, signature)
+    .finally(() => {
+      knowledgeLexicalIndexing = null;
+    });
+  return knowledgeLexicalIndexing;
+}
+
+async function invalidateKnowledgeLexicalIndex() {
+  knowledgeLexicalCache = null;
+  knowledgeLexicalIndexing = null;
 }
 
 function knowledgeVectorId(rel: string, chunkIndex: number) {
@@ -337,6 +457,8 @@ export async function upsertKnowledgeFile(relPath: string, settings: MemoryEmbed
   const rel = normalizeKnowledgeRel(relPath);
   const fullPath = resolveDataPath(KNOWLEDGE_DIR, rel);
   const stat = await fs.stat(fullPath).catch(() => null);
+  await invalidateKnowledgeLexicalIndex();
+  if (settings.semanticEnabled === false) return Boolean(stat?.isFile());
   const collection = await getKnowledgeCollection();
   if (!collection) return false;
 
@@ -357,6 +479,7 @@ export async function upsertKnowledgeFile(relPath: string, settings: MemoryEmbed
 
 export async function deleteKnowledgeVectors(relPath: string) {
   const rel = normalizeKnowledgeRel(relPath);
+  await invalidateKnowledgeLexicalIndex();
   const collection = await getKnowledgeCollection();
   if (!collection) return;
   const indexed = await readIndexedKnowledge(collection);
@@ -409,35 +532,42 @@ async function semanticKnowledgeHits(
   return Array.from(byRel.values()).slice(0, maxFiles);
 }
 
-async function keywordKnowledgeHits(query: string, maxFiles = 4): Promise<KnowledgeHit[]> {
-  const files = await readKnowledgeFiles();
-  const hits: KnowledgeHit[] = [];
+async function lexicalKnowledgeChannels(query: string, maxFiles = 4): Promise<KnowledgeHit[][]> {
+  const index = await ensureKnowledgeLexicalIndex();
+  const channels = searchKnowledgeLexicalIndex(index, query, maxFiles);
+  return [channels.exact, channels.title, channels.bm25].map((results) => results.map((result) => ({
+    rel: result.rel,
+    content: result.content,
+    score: result.score,
+    method: "keyword" as const,
+    chunkIndex: result.chunkIndex,
+    chunkCount: result.chunkCount,
+  })));
+}
 
-  for (const file of files) {
-    const chunks = await chunkKnowledgeFile(file);
-    const scoredChunks = chunks
-      .map((chunk, index) => ({
-        content: chunk,
-        chunkIndex: index,
-        score: scoreKnowledge(query, chunk, file.rel),
-      }))
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score);
-    if (!scoredChunks.length) continue;
-    hits.push({
-      rel: file.rel,
-      content: scoredChunks.slice(0, 3).map((item) => item.content).join("\n\n...\n\n"),
-      score: scoredChunks[0].score,
-      method: "keyword",
-      chunkIndex: scoredChunks[0].chunkIndex,
-      chunkCount: chunks.length,
+function fuseKnowledgeHits(channels: Array<KnowledgeHit[] | null | undefined>, limit: number) {
+  const fused = new Map<string, { hit: KnowledgeHit; score: number; methods: Set<KnowledgeSourceMethod> }>();
+  for (const channel of channels) {
+    (channel ?? []).forEach((hit, rank) => {
+      const current = fused.get(hit.rel) ?? { hit: { ...hit }, score: 0, methods: new Set<KnowledgeSourceMethod>() };
+      current.score += 1 / (KNOWLEDGE_RRF_K + rank + 1);
+      current.methods.add(hit.method);
+      if (hit.content.length > current.hit.content.length) current.hit.content = hit.content;
+      if (current.hit.chunkIndex === undefined) current.hit.chunkIndex = hit.chunkIndex;
+      if (current.hit.chunkCount === undefined) current.hit.chunkCount = hit.chunkCount;
+      fused.set(hit.rel, current);
     });
   }
-
-  return hits
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score || a.rel.localeCompare(b.rel))
-    .slice(0, maxFiles);
+  return Array.from(fused.values())
+    .map(({ hit, score, methods }) => ({
+      ...hit,
+      score,
+      method: methods.has("keyword") && methods.has("semantic") ? "keyword+semantic" as const
+        : methods.has("semantic") ? "semantic" as const
+          : "keyword" as const,
+    }))
+    .sort((left, right) => right.score - left.score || left.rel.localeCompare(right.rel))
+    .slice(0, limit);
 }
 
 function excerptKnowledge(content: string) {
@@ -478,33 +608,18 @@ export async function retrieveKnowledgeContextWithSources(
 ): Promise<{ context: string; sources: KnowledgeSourceHit[] }> {
   const settings = typeof settingsOrMaxFiles === "number" ? {} : settingsOrMaxFiles;
   const limit = typeof settingsOrMaxFiles === "number" ? settingsOrMaxFiles : maxFiles;
-  const picked: KnowledgeHit[] = [];
-  const byRel = new Map<string, KnowledgeHit>();
-  const addHits = (hits: KnowledgeHit[] | null | undefined) => {
-    for (const hit of hits ?? []) {
-      const existing = byRel.get(hit.rel);
-      if (existing) {
-        existing.method = mergeKnowledgeSourceMethod(existing.method, hit.method);
-        if (existing.chunkIndex === undefined) existing.chunkIndex = hit.chunkIndex;
-        if (existing.chunkCount === undefined) existing.chunkCount = hit.chunkCount;
-        continue;
-      }
-      if (picked.length >= limit) break;
-      byRel.set(hit.rel, hit);
-      picked.push(hit);
-    }
-  };
+  const lexicalChannels = await lexicalKnowledgeChannels(query, limit);
+  let semanticHits: KnowledgeHit[] | null = null;
 
-  addHits(await keywordKnowledgeHits(query, limit));
-
-  try {
-    addHits(await semanticKnowledgeHits(query, settings, limit));
-  } catch (error) {
-    serverLog(`WARN Knowledge semantic retrieval failed: ${error instanceof Error ? error.message : String(error)}`);
+  if (settings.semanticEnabled !== false) {
+    semanticHits = await withinKnowledgeSemanticBudget(
+      semanticKnowledgeHits(query, settings, limit),
+      null,
+    );
   }
 
-  if (!picked.length) return { context: "", sources: [] };
-  const hits = picked.slice(0, limit);
+  const hits = fuseKnowledgeHits([...lexicalChannels, semanticHits], limit);
+  if (!hits.length) return { context: "", sources: [] };
   return {
     context: formatKnowledgeContext(hits),
     sources: hits.map(toKnowledgeSourceHit),
